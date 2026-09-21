@@ -1,4 +1,4 @@
-// Demo catalogue: 45 prebuilt firmware images + the sim config each needs.
+// Demo catalogue: 49 prebuilt firmware images + the sim config each needs.
 export const DEMOS = [
   { id: 'gpio', name: 'GPIO', file: 'fw-gpio.bin.gz', desc: 'Output, pull-up, interrupt attach', expect: 'ALL TESTS PASSED' },
   { id: 'uart', name: 'UART', file: 'fw-uart.bin.gz', desc: 'Serial0/1/2 loopback', expect: 'ALL TESTS PASSED' },
@@ -15,6 +15,7 @@ export const DEMOS = [
   { id: 'mcpwm', name: 'MCPWM', file: 'fw-mcpwm.bin.gz', desc: 'Duty/freq + capture + fault', script: 'mcpwm-drive', expect: 'RESULT=PASS' },
   { id: 'rmt', name: 'RMT', file: 'fw-rmt.bin.gz', desc: 'TX two NEC-like items, RX loopback', expect: 'ALL TESTS PASSED' },
   { id: 'i2s', name: 'I2S audio', file: 'fw-i2s.bin.gz', desc: 'DMA TX completes 64 B', expect: 'RESULT=PASS' },
+  { id: 'i2s-rx', name: 'I2S mic', file: 'fw-i2s-rx.bin.gz', desc: 'Host-fed RX, 256 B exact', script: 'i2s-rx-feed', expect: 'RESULT=PASS' },
   { id: 'twai', name: 'TWAI / CAN', file: 'fw-twai.bin.gz', desc: 'Self-transmit std frame 0x123', expect: 'ALL TESTS PASSED' },
   { id: 'twai-normal', name: 'TWAI normal', file: 'fw-twai-normal.bin.gz', desc: 'Peer frame inject + TX capture', budget: 8000000, script: 'twai-peer', expect: 'RESULT=PASS' },
   { id: 'analog', name: 'ADC one-shot', file: 'fw-analog.bin.gz', desc: '4 channels, attenuation table', config: { analogInputs: { 36: 1.65, 32: 0.0, 33: 3.3, 34: 1.65 } }, expect: 'RESULT=PASS' },
@@ -29,6 +30,9 @@ export const DEMOS = [
   { id: 'ulp-wake', name: 'ULP wake', file: 'fw-ulp-wake.bin.gz', desc: 'ULP wake from deep sleep', budget: 8000000, expect: 'RESULT=PASS' },
   { id: 'flash', name: 'Flash R/W', file: 'fw-flash.bin.gz', desc: 'Raw flash erase/write/read', budget: 8000000, expect: 'RESULT=PASS' },
   { id: 'part', name: 'Partitions', file: 'fw-part.bin.gz', desc: 'OTA table enumerate', budget: 8000000, partitions: 'nvs,data,nvs,0x9000,0x5000\notadata,data,ota,0xe000,0x2000\nota_0,app,ota_0,0x10000,0x1E0000\nota_1,app,ota_1,0x200000,0x1E0000', expect: 'ALL TESTS PASSED' },
+  { id: 'ota', name: 'OTA update', file: 'fw-ota.bin.gz', desc: 'OTA begin/write/end cycle', budget: 120000000, partitions: 'nvs,data,nvs,0x9000,0x5000\notadata,data,ota,0xe000,0x2000\nota_0,app,ota_0,0x10000,0x1E0000\nota_1,app,ota_1,0x200000,0x1E0000\nspiffs,data,spiffs,0x3E0000,0x20000', expect: 'RESULT=PASS' },
+  { id: 'ota-multi', name: 'OTA slots', file: 'fw-ota-multi.bin.gz', desc: 'Running/next partition cycle', budget: 10000000, expect: 'RESULT=PASS' },
+  { id: 'default-pt', name: 'Default part.', file: 'fw-default-pt.bin.gz', desc: 'Factory partition table dump', budget: 8000000, expect: 'ALL TESTS PASSED' },
   { id: 'spiffs', name: 'SPIFFS', file: 'fw-spiffs.bin.gz', desc: 'Mount + file write/read', budget: 12000000, expect: 'RESULT=PASS' },
   { id: 'sdmmc', name: 'SDMMC', file: 'fw-sdmmc.bin.gz', desc: 'SD host init/deinit', expect: 'RESULT=PASS' },
   { id: 'sdcard', name: 'SD card', file: 'fw-sdcard.bin.gz', desc: 'FAT mount, 4 KB file R/W', config: { sdCard: { sizeMB: 16 } }, expect: 'RESULT=PASS' },
@@ -41,10 +45,12 @@ export const DEMOS = [
   { id: 'bt', name: 'BT controller', file: 'fw-bt.bin.gz', desc: 'Controller init (no baseband)', config: { bleShim: true }, budget: 8000000, expect: 'RESULT=PASS' },
   { id: 'ble-init', name: 'BLE init', file: 'fw-ble-init.bin.gz', desc: 'Bluedroid init, HCI wait', config: { bleShim: true }, budget: 10000000, expect: 'RESULT=PASS' },
   { id: 'wifi', name: 'WiFi scan', file: 'fw-wifi.bin.gz', desc: 'Station scan finds TEST-AP', budget: 80000000, config: { wifi: { ssid: 'TEST-AP', channel: 6 }, macAddress: '24:0a:c4:12:34:56' }, expect: 'ALL TESTS PASSED' },
+  { id: 'softap', name: 'Soft-AP', file: 'fw-softap.bin.gz', desc: 'AP init, IP, MAC, station count', budget: 500000000, config: { wifi: false, macAddress: '24:0a:c4:12:34:59' }, expect: 'RESULT=PASS' },
   { id: 'emac', name: 'Ethernet reg', file: 'fw-emac.bin.gz', desc: 'EMAC register readback', expect: 'RESULT=PASS' },
   { id: 'emac-loopback', name: 'Ethernet MAC', file: 'fw-emac-loopback.bin.gz', desc: 'PHY ID + 64 B DMA loopback', expect: 'LOOPBACK=PASS' },
   { id: 'camera', name: 'Camera', file: 'fw-camera.bin.gz', desc: 'OV2640 frame 38400 B via VSYNC drive', config: { camFrameBytes: 38400 }, budget: 500000000, script: 'camera-vsync', expect: 'CAM_DATA=PASS' },
   { id: 'deepsleep', name: 'Deep sleep', file: 'fw-deepsleep.bin.gz', desc: '3 boots, RTC memory survives', expect: 'RESULT=PASS' },
+  { id: 'buttons', name: 'Buttons', file: 'fw-buttons.bin.gz', desc: 'RESET + BOOT pins, 4 boots', script: 'buttons-press', expect: 'BOOT #4' },
 ];
 
 // Measured on this machine (Node, gpio image, run/stop hot loop): ~709 MIPS
@@ -162,5 +168,42 @@ export async function runDemoScript(kind, sim, log) {
       }
       if (log().includes('ALL TESTS PASSED')) return;
     }
+  } else if (kind === 'i2s-rx-feed') {
+    // i2s-rx installs the RX driver, then blocks reading until 512 host-fed
+    // words arrive (values 0x1000+i, verified word-exact by firmware).
+    const t0 = Date.now();
+    let fed = false;
+    while (Date.now() - t0 < 90000) {
+      await new Promise((r) => setTimeout(r, 100));
+      sim.pollUart();
+      if (!fed && log().includes('RX_INSTALL=')) {
+        fed = true;
+        for (let i = 0; i < 512; i++) await sim.feedI2SRX(0x1000 + i);
+      }
+      if (log().includes('ALL TESTS PASSED')) return;
+    }
+  } else if (kind === 'buttons-press') {
+    // buttons: RESET tap reboots to BOOT #2, BOOT hold + RESET to #3,
+    // release + RESET to #4 (dev-board EN + GPIO0 behavior).
+    const t0 = Date.now();
+    const waitFor = async (re, ms = 30000) => {
+      const s = Date.now();
+      while (Date.now() - s < ms) {
+        await new Promise((r) => setTimeout(r, 200));
+        sim.pollUart();
+        if (re.test(log())) return true;
+      }
+      return false;
+    };
+    if (!await waitFor(/BOOT #1/)) return;
+    await waitFor(/READY/);
+    await sim.pressResetButton();
+    if (!await waitFor(/BOOT #2/)) return;
+    await sim.pressBootButton(true);
+    await sim.pressResetButton();
+    if (!await waitFor(/BOOT #3/)) return;
+    await sim.pressBootButton(false);
+    await sim.pressResetButton();
+    await waitFor(/BOOT #4/);
   }
 }

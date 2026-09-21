@@ -55,6 +55,34 @@
           <button class="btn" id="boardEsp32" type="button" aria-pressed="true">ESP32</button>
           <button class="btn" id="boardCam" type="button" aria-pressed="false">ESP32-CAM</button>
         </div>
+        <h3 style="margin-top:16px">WiFi (station + AP)</h3>
+        <p class="wifi-note">Station scans and Soft-AP init run fully offline in the
+          emulator. Full station + AP data (DHCP, TCP, port-forward) flows through
+          the local gateway — see Docs.</p>
+        <div class="field">
+          <label for="wifiSsid">Station SSID to join</label>
+          <input type="text" id="wifiSsid" value="TEST-AP" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="board-row" role="group" aria-label="WiFi role">
+          <button class="btn" id="wifiRoleBoth" type="button" aria-pressed="true">STA + AP</button>
+          <button class="btn" id="wifiRoleSta" type="button" aria-pressed="false">STA only</button>
+          <button class="btn" id="wifiRoleAp" type="button" aria-pressed="false">AP only</button>
+        </div>
+        <div class="wifi-stats" id="wifiStats" hidden>
+          <div><span>state</span><b id="wState">—</b></div>
+          <div><span>IP</span><b id="wIp">—</b></div>
+          <div><span>forward</span><b id="wFwd">—</b></div>
+          <div><span>tx/rx</span><b id="wTxRx">—</b></div>
+        </div>
+        <h3 style="margin-top:16px">OTA / partitions</h3>
+        <div class="field">
+          <label for="partPreset">Partition preset (OTA demos)</label>
+          <select id="partPreset">
+            <option value="ota">OTA (nvs + otadata + ota_0/1 + spiffs)</option>
+            <option value="ota-min">OTA minimal (nvs + otadata + ota_0/1)</option>
+            <option value="factory">Factory default (firmware table)</option>
+          </select>
+        </div>
         <div class="run-row">
           <button class="btn primary" id="btnRun" type="button">Run</button>
           <button class="btn danger" id="btnStop" type="button" disabled>Stop</button>
@@ -99,6 +127,34 @@ const $ = (id) => document.getElementById(id);
 const term = $('term'), demoList = $('demoList'), statusLine = $('statusLine');
 const btnRun = $('btnRun'), btnStop = $('btnStop'), ctaRun = $('ctaRun'), verdict = $('verdict');
 const echoRow = $('echoRow'), echoInput = $('echoInput'), btnSend = $('btnSend');
+const wifiSsid = $('wifiSsid'), partPreset = $('partPreset'), wifiStats = $('wifiStats');
+
+// WiFi role selector (station + AP): mirrors the gateway-backed station/AP
+// paths — STA scans/joins, AP serves its beacon, STA+AP does both.
+let wifiRole = 'both';
+function setWifiRole(next) {
+  wifiRole = next;
+  $('wifiRoleBoth').setAttribute('aria-pressed', String(next === 'both'));
+  $('wifiRoleSta').setAttribute('aria-pressed', String(next === 'sta'));
+  $('wifiRoleAp').setAttribute('aria-pressed', String(next === 'ap'));
+}
+$('wifiRoleBoth').addEventListener('click', () => setWifiRole('both'));
+$('wifiRoleSta').addEventListener('click', () => setWifiRole('sta'));
+$('wifiRoleAp').addEventListener('click', () => setWifiRole('ap'));
+
+// OTA / partition presets for the OTA + partition-table demos.
+const PART_PRESETS = {
+  'ota': 'nvs,data,nvs,0x9000,0x5000\notadata,data,ota,0xe000,0x2000\nota_0,app,ota_0,0x10000,0x1E0000\nota_1,app,ota_1,0x200000,0x1E0000\nspiffs,data,spiffs,0x3E0000,0x20000',
+  'ota-min': 'nvs,data,nvs,0x9000,0x5000\notadata,data,ota,0xe000,0x2000\nota_0,app,ota_0,0x10000,0x1E0000\nota_1,app,ota_1,0x200000,0x1E0000',
+  'factory': '',
+};
+function selectedPartitions(demo) {
+  if (demo.partitions) return demo.partitions;
+  if (demo.id === 'ota' || demo.id === 'ota-multi' || demo.id === 'part' || demo.id === 'default-pt') {
+    return PART_PRESETS[partPreset.value] || '';
+  }
+  return '';
+}
 
 let selected = DEMOS[0];
 let board = 'esp32';
@@ -279,13 +335,26 @@ async function run() {
       flashSizeMB: 4, mmuPages: 64, strapValue: 0x13,
       budget: selected.budget || 5000000,
       board, ...(selected.config || {}),
-      ...(selected.partitions ? { partitions: selected.partitions } : {}),
+      ...(selectedPartitions(selected) ? { partitions: selectedPartitions(selected) } : {}),
+      // WiFi role: the gateway-backed station + AP paths. STA/AP demos read
+      // the SSID from the panel; scan + Soft-AP init stay fully offline.
+      ...((selected.id === 'wifi' || selected.id === 'softap')
+        ? { wifi: wifiRole === 'both' ? { ssid: wifiSsid.value || 'TEST-AP', channel: 6 }
+          : wifiRole === 'sta' ? { ssid: wifiSsid.value || 'TEST-AP', channel: 6, ap: false }
+          : false }
+        : {}),
       bootrom: new Uint8Array(romSab),
       wasmBinary: new Uint8Array(wasmSab),
     }, flash, null);
     sim.run();
-    setStatus('running — ' + selected.name, true);
-    print('$ run · ' + selected.desc + '\n', 'dim');
+    setStatus('running — ' + selected.name + ' · wifi:' + wifiRole, true);
+    print('$ run · ' + selected.desc + ' · wifi:' + wifiRole + ' ssid:' + wifiSsid.value + '\n', 'dim');
+    if (selected.id === 'wifi' || selected.id === 'softap') {
+      wifiStats.hidden = false;
+      print('$ wifi: station scan + Soft-AP init; gateway data needs openhw-gw on :5085\n', 'dim');
+    } else {
+      wifiStats.hidden = true;
+    }
     // Interactive demos (UART echo) keep running after READY so the user can
     // type; the input row enables as soon as the firmware is listening.
     if (selected.interactive === 'uart-echo') {
@@ -321,6 +390,18 @@ async function run() {
       try { $('mPc').textContent = fmtHex(sim.pc); } catch {}
       $('mCyc').textContent = fmtBig(cyc);
       $('mUart').textContent = fmtBig(uartBytes);
+      // Live WiFi station + AP counters (gateway-backed when openhw-gw runs).
+      try {
+        if ((selected.id === 'wifi' || selected.id === 'softap') && sim.getWifiStats) {
+          sim.getWifiStats().then((st) => {
+            if (!st) return;
+            $('wState').textContent = ['idle', 'connecting', 'connected', 'no-ap', 'gw-error'][st.state] ?? st.state;
+            $('wIp').textContent = st.ip || '—';
+            $('wFwd').textContent = st.portForward || st.udpForward || '—';
+            $('wTxRx').textContent = st.txFrames + '/' + st.rxFrames;
+          }).catch(() => {});
+        }
+      } catch {}
     }, 500);
 
     if (selected.script) scriptPromise = runDemoScript(selected.script, sim, () => uartText);

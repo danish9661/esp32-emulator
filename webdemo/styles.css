@@ -199,6 +199,16 @@ a:focus-visible, button:focus-visible, select:focus-visible {
 .board-row .btn { flex: 1; justify-content: center; padding: 8px 6px; font-size: 13.5px; }
 .board-row .btn[aria-pressed="true"] { border-color: var(--cyan); color: var(--cyan); }
 
+/* WiFi + OTA preset panel */
+.wifi-note { font-size: 12.5px; color: var(--dim); margin: 0 0 10px; }
+.wifi-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px;
+  font-family: var(--mono); font-size: 12px; }
+.wifi-stats[hidden] { display: none; }
+.wifi-stats div { background: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 9px; display: flex; justify-content: space-between; gap: 8px; }
+.wifi-stats span { color: var(--dim); }
+.wifi-stats b { color: var(--green); font-weight: 600; white-space: nowrap; }
+
 .run-row { display: flex; gap: 10px; margin-top: 6px; }
 .run-row .btn { flex: 1; justify-content: center; }
 

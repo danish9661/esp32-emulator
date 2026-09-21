@@ -64,9 +64,74 @@
     </div>
   </section>
 
+  <section class="section" id="wifi">
+    <h2>WiFi station + AP</h2>
+    <p class="sub">Station scan/associate and Soft-AP init run fully offline in the emulator.
+      The data path (DHCP, DNS, TCP/UDP, port-forward to the board) flows through the
+      local gateway over a WebSocket — the same path the Node test-suite uses.</p>
+    <div class="about-grid">
+      <div class="panel">
+        <h3>Station (STA)</h3>
+        <p>Scan finds the virtual AP, auth + assoc complete, DHCP assigns an address.
+          Try the <a href="./index.html#demo-wifi">WiFi scan</a> demo, then pick STA only
+          vs STA + AP in the console WiFi panel.</p>
+      </div>
+      <div class="panel">
+        <h3>Access point (AP)</h3>
+        <p>Soft-AP init, <span style="font-family:var(--mono)">softAPIP()</span> =
+          192.168.4.1, derived MAC, station count. Try the
+          <a href="./index.html#demo-softap">Soft-AP</a> demo. Association counting
+          needs a second station — untested, count stays 0.</p>
+      </div>
+    </div>
+    <div class="callout"><b>Full data needs the gateway.</b> Start it next to the page:
+      <span style="font-family:var(--mono)">cd openhw-studio-gateway &amp;&amp; ./start-gateway.sh</span>
+      (serves <span style="font-family:var(--mono)">ws://127.0.0.1:5085/api/network-gateway</span>,
+      forwards <span style="font-family:var(--mono)">127.0.0.1:8080 → board :80</span>).
+      The console WiFi stats (state / IP / forward / tx-rx) go live once the gateway answers.</div>
+  </section>
+
+  <section class="section" id="ota">
+    <h2>OTA + partition presets</h2>
+    <p class="sub">The console OTA preset selector rewrites the partition table before boot —
+      the same CSV path the worker tests use.</p>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead><tr><th scope="col">Preset</th><th scope="col">Table</th><th scope="col">Used by</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">OTA</th><td><span style="font-family:var(--mono)">nvs + otadata + ota_0/1 + spiffs</span></td><td><a href="./index.html#demo-ota">OTA update</a></td></tr>
+          <tr><th scope="row">OTA minimal</th><td><span style="font-family:var(--mono)">nvs + otadata + ota_0/1</span></td><td><a href="./index.html#demo-ota-multi">OTA slots</a></td></tr>
+          <tr><th scope="row">Factory default</th><td>Firmware-baked table</td><td><a href="./index.html#demo-default-pt">Default part.</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section" id="refs">
+    <h2>References</h2>
+    <p class="sub">Prior art this project learns from — JS-first chip simulation with real
+      firmware images.</p>
+    <div class="about-grid">
+      <div class="panel">
+        <h3>wokwi / esp8266js</h3>
+        <p>ESP8266 simulator in JavaScript (MIT, Uri Shaked). Boots real bootloader +
+          partition + app binaries from an RTOS-SDK build — the same “real image in,
+          UART out” contract our console follows.
+          <a href="https://github.com/wokwi/esp8266js" target="_blank" rel="noopener">github.com/wokwi/esp8266js</a></p>
+      </div>
+      <div class="panel">
+        <h3>wokwi / esp32js</h3>
+        <p>Wokwi’s ESP32 simulator core. Useful as a second opinion on peripheral
+          semantics (timers, SPI flash cache, WiFi frame flow) when our native Rust
+          models disagree with observed firmware behavior.
+          <a href="https://github.com/wokwi/esp32js" target="_blank" rel="noopener">github.com/wokwi/esp32js</a></p>
+      </div>
+    </div>
+  </section>
+
   <section class="section" id="demos">
     <h2>Demo catalogue</h2>
-    <p class="sub">All 45 images are prebuilt Arduino firmware (bootloader + partitions + app),
+    <p class="sub">All 49 images are prebuilt Arduino firmware (bootloader + partitions + app),
       verified PASS on the host suite before shipping. Seven need a host action while they run —
       the console performs it for you; UART echo is fully interactive (you type, the chip echoes).</p>
     <div class="table-scroll">
@@ -127,6 +192,7 @@ const rows = [
   ['MCPWM', YES, YES, 'Duty/freq, capture + fault via host pins', 'Carrier detail', 'mcpwm'],
   ['RMT', YES, YES, 'TX items stream into armed RX (virtual wire)', 'Carrier modulation detail', 'rmt'],
   ['I2S audio', YES, YES, 'DMA TX completes 64 B', 'RX microphone path (suite-only)', 'i2s'],
+  ['I2S mic', YES, YES, 'Host-fed RX, 256 B word-exact', '—', 'i2s-rx'],
   ['TWAI / CAN', YES, YES, 'Self-reception in NO_ACK mode', 'Bus-off recovery timing', 'twai'],
   ['TWAI normal mode', YES, YES, 'Peer inject + TX capture', 'Error-frame detail', 'twai-normal'],
   ['ADC one-shot', YES, YES, 'Attenuation table, 12-bit counts', 'Noise model (returns exact counts)', 'analog'],
@@ -153,10 +219,15 @@ const rows = [
   ['BT controller', PART, PART, 'Controller init (HCI shim)', 'LL/baseband: advertising needs real RF — init only', 'bt'],
   ['BLE stack init', PART, PART, 'Bluedroid init handshake', 'GATT services / ADV payloads need the baseband', 'ble-init'],
   ['WiFi scan', PART, PART, 'Station scan finds TEST-AP (no gateway)', 'AP/data path needs the network gateway', 'wifi'],
+  ['Soft-AP', YES, YES, 'AP init, 192.168.4.1, derived MAC, station count', 'Association needs a 2nd station (count stays 0)', 'softap'],
+  ['OTA update', YES, YES, 'esp_ota_begin/write/end over OTA slots', 'Rollback/bootloader OTA switch detail', 'ota'],
+  ['OTA slots', YES, YES, 'Running/next partition cycle', '—', 'ota-multi'],
+  ['Default partitions', YES, YES, 'Factory table dump via flash read', '—', 'default-pt'],
   ['Ethernet regs', YES, YES, 'EMAC register readback', 'RMII timing', 'emac'],
   ['Ethernet MAC', YES, YES, 'LAN8720 PHY ID, 64 B DMA loopback', 'RMII timing', 'emac-loopback'],
   ['Camera (OV2640)', NO, YES, 'SCCB + DVP frame into PSRAM framebuffer', 'ESP32 dev board has no camera (— by hardware)', 'camera'],
   ['Deep sleep + RTC mem', YES, YES, '3 boots, RTC_DATA_ATTR survives, wake causes', 'ULP wake stub', 'deepsleep'],
+  ['Dev buttons', YES, YES, 'RESET tap + BOOT hold, BOOT #1→#4', '—', 'buttons'],
   ['SD / SDMMC', YES, YES, 'Virtual card, FAT R/W (suite-tested)', 'Covered above by SD card + eMMC demos', null],
   ['WiFi station + AP', PART, PART, 'TX/RX bridge + gateway path (suite-tested)', 'AP/data path needs the network gateway', 'wifi'],
 ];
@@ -197,6 +268,7 @@ const demos = [
   ['MCPWM', 'Duty/freq + capture + fault', 'RESULT=PASS', 'toggles GPIO4/5, sends keys'],
   ['RMT', 'TX two NEC-like items, RX loopback', 'ALL TESTS PASSED', 'none'],
   ['I2S audio', 'DMA TX completes 64 B', 'RESULT=PASS', 'none'],
+  ['I2S mic', 'Host-fed RX, 256 B word-exact', 'RESULT=PASS', 'feeds 512 samples at RX_INSTALL='],
   ['TWAI / CAN', 'Self-transmit std frame 0x123', 'ALL TESTS PASSED', 'none'],
   ['TWAI normal', 'Peer inject + TX capture', 'RESULT=PASS', 'injects peer CAN frame'],
   ['ADC one-shot', '4 channels incl. attenuation switch', 'RESULT=PASS', 'analogInputs preset'],
@@ -227,6 +299,7 @@ const demos = [
   ['Ethernet MAC', 'PHY ID + 64 B DMA loopback', 'LOOPBACK=PASS', 'none'],
   ['Camera', 'OV2640 frame 38400 B', 'CAM_DATA=PASS', 'pulses VSYNC until frame lands'],
   ['Deep sleep', '3 boots, RTC memory survives', 'RESULT=PASS', 'none'],
+  ['Dev buttons', 'RESET tap + BOOT hold, BOOT #1→#4', 'BOOT #4', 'presses RESET/BOOT buttons'],
 ];
 const dtbody = document.querySelector('#demoTable tbody');
 for (const [name, ex, mark, assist] of demos) {

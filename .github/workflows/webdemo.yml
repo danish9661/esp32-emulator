@@ -78,12 +78,12 @@ jobs:
             await pg.waitForLoadState('networkidle');
             await pg.waitForTimeout(800);
             if (page === 'index.html') {
-              const n = await pg.evaluate('document.querySelectorAll(\".demo-item\").length');
-              if (n !== 19) fails.push('demo count ' + n);
+              const n = await pg.evaluate('document.querySelectorAll(".demo-item").length');
+              if (n < 45) fails.push('demo count ' + n);
             }
             if (page === 'docs.html') {
-              const m = await pg.evaluate('document.querySelectorAll(\"#supportTable tbody tr\").length');
-              if (m < 20) fails.push('matrix rows ' + m);
+              const m = await pg.evaluate('document.querySelectorAll("#supportTable tbody tr").length');
+              if (m < 45) fails.push('matrix rows ' + m);
             }
             if (errs.length) fails.push(page + ': ' + errs.join(' | '));
             await pg.close();
