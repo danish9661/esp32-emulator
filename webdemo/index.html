@@ -6,10 +6,7 @@
 <title>esp32emu — ESP32 in your browser</title>
 <meta name="description" content="Run real ESP32 firmware in your browser. Pick a peripheral demo, watch the UART log stream out of a live dual-core Xtensa simulation.">
 <link rel="stylesheet" href="./styles.css">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
-<script src="./vendor-pako.min.js"></script>
+<script src="./coi-serviceworker.js"></script>
 </head>
 <body>
 <header class="topbar">
@@ -159,7 +156,16 @@ async function loadImage(demo) {
   const res = await fetch('./firmware/' + demo.file);
   if (!res.ok) throw new Error('firmware fetch failed: ' + res.status);
   const gz = new Uint8Array(await res.arrayBuffer());
-  const raw = window.pako ? window.pako.ungzip(gz) : gz;
+  let raw;
+  if (typeof DecompressionStream !== 'undefined') {
+    const ds = new DecompressionStream('gzip');
+    const stream = new Blob([gz]).stream().pipeThrough(ds);
+    raw = new Uint8Array(await new Response(stream).arrayBuffer());
+  } else if (window.pako) {
+    raw = window.pako.ungzip(gz);
+  } else {
+    throw new Error('no gzip decoder available');
+  }
   if (raw.length !== 4 * 1024 * 1024) throw new Error('bad image size ' + raw.length);
   return raw;
 }

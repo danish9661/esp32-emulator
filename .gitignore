@@ -66,3 +66,6 @@
 # Worker + ROM binaries are loaded by the webdemo from webdemo/worker/
 !/webdemo/worker/*.wasm
 !/webdemo/worker/*.bin
+# Build tooling (webdemo bundler + node:crypto MD5 shim for the browser build)
+!/tools/
+!/tools/*.mjs

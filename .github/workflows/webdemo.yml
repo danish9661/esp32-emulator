@@ -1,0 +1,120 @@
+name: Webdemo (GitHub Pages)
+
+# Builds the browser bundles from src/ and deploys webdemo/ to GitHub Pages.
+# The emulator needs SharedArrayBuffer, so the site registers
+# webdemo/coi-serviceworker.js, which adds the COOP/COEP headers client-side.
+# No server-side header config needed; works on the default *.github.io host.
+#
+# One-time repo setup (owner does this once):
+#   Settings → Pages → Build and deployment → Source: "GitHub Actions"
+#
+# Triggers: pushes to main touching webdemo/, tools/, src/, engine-wasm/
+# (engine + ROM binaries are copied fresh from src/ on every deploy), plus
+# manual dispatch.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'webdemo/**'
+      - 'tools/**'
+      - 'src/**'
+      - 'engine-wasm/**'
+      - '.github/workflows/webdemo.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build browser bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (esbuild for the webdemo bundle)
+        run: npm install
+
+      - name: Rebuild webdemo worker bundles from src/
+        run: node tools/build-webdemo.mjs
+
+      - name: Smoke-test the built pages (no console errors, matrix renders)
+        run: |
+          npm install --no-save playwright-core
+          npx -y playwright@latest install --with-deps chromium 2>&1 | tail -n 2
+          node --input-type=module -e "
+          import { chromium } from 'playwright-core';
+          import { createServer } from 'http';
+          import { readFileSync, existsSync } from 'fs';
+          import { join, extname } from 'path';
+          const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.gz': 'application/gzip', '.wasm': 'application/wasm', '.bin': 'application/octet-stream' };
+          const server = createServer((req, res) => {
+            let p = decodeURIComponent(new URL(req.url, 'http://x').pathname).replace(/^\\//, '');
+            if (p === '' || p.endsWith('/')) p += 'index.html';
+            const f = join('webdemo', p);
+            if (!existsSync(f)) { res.writeHead(404); res.end('nf'); return; }
+            res.writeHead(200, { 'content-type': MIME[extname(f)] || 'application/octet-stream' });
+            res.end(readFileSync(f));
+          });
+          await new Promise((r) => server.listen(8942, '127.0.0.1', r));
+          const b = await chromium.launch();
+          const fails = [];
+          for (const page of ['index.html', 'about.html', 'docs.html']) {
+            const pg = await b.newPage();
+            const errs = [];
+            pg.on('pageerror', (e) => errs.push(String(e).slice(0, 150)));
+            await pg.goto('http://127.0.0.1:8942/' + page);
+            await pg.waitForLoadState('networkidle');
+            await pg.waitForTimeout(800);
+            if (page === 'index.html') {
+              const n = await pg.evaluate('document.querySelectorAll(\".demo-item\").length');
+              if (n !== 19) fails.push('demo count ' + n);
+            }
+            if (page === 'docs.html') {
+              const m = await pg.evaluate('document.querySelectorAll(\"#supportTable tbody tr\").length');
+              if (m < 20) fails.push('matrix rows ' + m);
+            }
+            if (errs.length) fails.push(page + ': ' + errs.join(' | '));
+            await pg.close();
+          }
+          await b.close();
+          server.close();
+          if (fails.length) { console.error('SMOKE FAIL:', fails.join('; ')); process.exit(1); }
+          console.log('webdemo smoke test passed');
+          "
+
+      - name: Assemble Pages artifact (site root = webdemo/)
+        run: |
+          mkdir -p _site
+          cp -r webdemo/. _site/
+          # coi-serviceworker must serve from the site root scope
+          test -f _site/coi-serviceworker.js
+          ls _site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
