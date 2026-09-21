@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs — esp32emu</title>
+<meta name="description" content="esp32emu documentation: peripheral and module support matrix, demo catalogue, build and test instructions.">
+<link rel="stylesheet" href="./styles.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="./index.html"><span class="brand-mark">32</span><span><b>esp32emu</b><br><small>WASM dual-core Xtensa</small></span></a>
+    <nav>
+      <a href="./index.html">Demo</a>
+      <a href="./about.html">About</a>
+      <a href="./docs.html" aria-current="page">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <p class="kicker"><span class="dot"></span>documentation</p>
+    <h1>What the chip supports, <span class="accent">in one table.</span></h1>
+    <p class="lede">Every peripheral below runs against the same native Rust model whether you use
+      the ESP32 dev module or the ESP32-CAM — the modules differ only in memory, pins, and the
+      camera. Status reflects the verified worker test-suite, not aspirations.</p>
+  </section>
+
+  <section class="section" id="matrix">
+    <h2>Peripheral support matrix</h2>
+    <p class="sub">ESP32 silicon vs ESP32-CAM module. &ldquo;Demo&rdquo; jumps back to the console
+      with that firmware selected.</p>
+    <div class="table-scroll">
+      <table class="matrix" id="supportTable">
+        <thead>
+          <tr><th scope="col">Peripheral</th><th scope="col">ESP32</th><th scope="col">ESP32-CAM</th><th scope="col">What was added</th><th scope="col">What is left</th><th scope="col">Demo</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="legend"><span class="pill yes">native</span> cycle-counted Rust model, test passing
+      <span class="pill partial">partial</span> works with documented limits
+      <span class="pill no">not emulated</span> out of scope for this engine</p>
+  </section>
+
+  <section class="section" id="modules">
+    <h2>Module comparison</h2>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead><tr><th scope="col">Item</th><th scope="col">ESP32 dev module</th><th scope="col">ESP32-CAM (AI-Thinker)</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Silicon</th><td>ESP32, dual LX6 @ 240 MHz model</td><td>Same ESP32 silicon</td></tr>
+          <tr><th scope="row">Flash</th><td>4 MB</td><td>4 MB</td></tr>
+          <tr><th scope="row">PSRAM</th><td>Optional</td><td>4 MB quad, on by preset (<span style="font-family:var(--mono)">psramFound()</span> true)</td></tr>
+          <tr><th scope="row">Camera</th><td>—</td><td>OV2640 via SCCB + I2S-camera DMA, 160&times;120 test frame (38400 B)</td></tr>
+          <tr><th scope="row">Pins</th><td>Free GPIO</td><td>Fixed camera pinout (PWDN 32, XCLK 0, SIOD 26, SIOC 27, D0–D7, VSYNC 25, HREF 23, PCLK 22), LED 33, flash LED 4</td></tr>
+          <tr><th scope="row">Demo toggle</th><td>Default board</td><td>Use the ESP32-CAM button above the console; any demo runs on either</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section" id="demos">
+    <h2>Demo catalogue</h2>
+    <p class="sub">All 19 images are prebuilt Arduino firmware (bootloader + partitions + app),
+      verified PASS on the host suite before shipping. Four need a host action while they run —
+      the console performs it for you.</p>
+    <div class="table-scroll">
+      <table class="matrix" id="demoTable">
+        <thead><tr><th scope="col">Demo</th><th scope="col">Exercises</th><th scope="col">Pass mark</th><th scope="col">Host assist</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section" id="build">
+    <h2>Build, test, reproduce</h2>
+    <div class="about-grid">
+      <div class="panel">
+        <h3>Rebuild the engine</h3>
+        <pre class="code">npm run build:wasm   <span class="c"># Rust → WASM</span>
+npm run build        <span class="c"># esbuild dist/ bundle</span>
+npm test             <span class="c"># no-server battery</span></pre>
+      </div>
+      <div class="panel">
+        <h3>Run the peripheral suite</h3>
+        <pre class="code">node tests/compile-server.mjs  <span class="c"># :5525</span>
+node tests/test-worker-gpio.mjs
+./tests/run-worker-tests.sh --skip-bt --skip-wifi</pre>
+      </div>
+    </div>
+    <div class="callout"><b>Reading the console verdict.</b> Each demo ends with the chip&rsquo;s own
+      verdict line (<span style="font-family:var(--mono)">RESULT=PASS</span> or the peripheral mark
+      such as <span style="font-family:var(--mono)">CAM_DATA=PASS</span>). The host never prints a
+      pass mark — if the mark is missing, the demo genuinely did not finish.</div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>esp32emu &middot; WASM Xtensa core, native peripheral models</span>
+    <nav><a href="./index.html">Demo</a><a href="./about.html">About</a></nav>
+  </div>
+</footer>
+
+<script type="module">
+const YES = '<span class="pill yes">native</span>';
+const PART = '<span class="pill partial">partial</span>';
+const NO = '<span class="pill no">not emulated</span>';
+const rows = [
+  ['UART 0/1/2', YES, YES, 'TX/RX FIFO, baud autodetect, IRDA', '—', 'uart'],
+  ['GPIO + IO_MUX', YES, YES, 'Matrix routing, 64 pins, strap values', '—', 'gpio'],
+  ['SPI master', YES, YES, 'Flash-cache fast-path, loopback 0xAA', 'Slave DMA edge cases', 'spi'],
+  ['I2C master', YES, YES, 'Master write probe, clock stretching', 'Multi-master arbitration', 'i2c'],
+  ['HW timers + watchdog', YES, YES, 'TIMG0/1 alarms, RTC WDT, brownout reset', '—', 'timer'],
+  ['LEDC PWM + fade', YES, YES, 'Duty write, 0→255 hardware fade', '—', 'pwm'],
+  ['RMT', YES, YES, 'TX items stream into armed RX (virtual wire)', 'Carrier modulation detail', 'rmt'],
+  ['TWAI / CAN', YES, YES, 'Self-reception in NO_ACK mode', 'Bus-off recovery timing', 'twai'],
+  ['PCNT', YES, YES, 'Edge counting + threshold IRQ via host-driven pin', 'Glitch filter model', 'pcnt'],
+  ['ADC one-shot', YES, YES, 'Attenuation table, 12-bit counts', 'Noise model (returns exact counts)', 'analog'],
+  ['ADC continuous + DMA', YES, YES, 'TYPE1 frames through I2S RX-DMA path', '—', 'adc-cont'],
+  ['Touch + DAC', YES, YES, 'Touch counts, touch IRQ, DAC→ADC wire', 'Capacitance curve', 'touch-dac'],
+  ['Dual core', YES, YES, 'APP CPU boot, shared-memory counters', '—', 'multicore'],
+  ['Brownout (BOD)', YES, YES, 'Threshold IRQ + reset at 2.0 V rail dip', 'Analog trip-point slope', 'bod'],
+  ['BT controller', PART, PART, 'Controller init (HCI shim)', 'LL/baseband: advertising needs real RF — init only', 'bt'],
+  ['BLE stack init', PART, PART, 'Bluedroid init handshake', 'GATT services / ADV payloads need the baseband', 'ble-init'],
+  ['Ethernet MAC', YES, YES, 'LAN8720 PHY ID, 64 B DMA loopback', 'RMII timing', 'emac-loopback'],
+  ['Camera (OV2640)', NO, YES, 'SCCB + DVP frame into PSRAM framebuffer', 'ESP32 dev board has no camera (— by hardware)', 'camera'],
+  ['Deep sleep + RTC mem', YES, YES, '3 boots, RTC_DATA_ATTR survives, wake causes', 'ULP wake stub', 'deepsleep'],
+  ['SD / SDMMC', YES, YES, 'Virtual card, FAT R/W (suite-tested)', 'No demo image shipped on this page', null],
+  ['WiFi station + AP', PART, PART, 'TX/RX bridge + gateway path (suite-tested)', 'Needs the network gateway — no offline demo image', null],
+];
+const tbody = document.querySelector('#supportTable tbody');
+if (tbody && typeof document.createElement === 'function') for (const [name, a, b, added, left, demo] of rows) {
+  const tr = document.createElement('tr');
+  const th = document.createElement('th');
+  th.scope = 'row'; th.textContent = name;
+  tr.append(th);
+  const c1 = document.createElement('td'); c1.innerHTML = a;
+  const c2 = document.createElement('td'); c2.innerHTML = b;
+  const c3 = document.createElement('td'); c3.textContent = added;
+  const c4 = document.createElement('td'); c4.textContent = left;
+  const c5 = document.createElement('td');
+  if (demo) {
+    const link = document.createElement('a');
+    link.href = './index.html#demo-' + demo;
+    link.textContent = 'Try it';
+    c5.append(link);
+  } else c5.textContent = '—';
+  tr.append(c1, c2, c3, c4, c5);
+  tbody.append(tr);
+}
+
+const demos = [
+  ['GPIO', 'Output, pull-up, interrupt attach/detach', 'ALL TESTS PASSED', 'none'],
+  ['UART', 'Serial0/1/2 hello + flush', 'ALL TESTS PASSED', 'none'],
+  ['SPI', 'Loopback transfer 0xAA', 'LOOPBACK=PASS', 'none'],
+  ['I2C', 'Master write probe', 'I2C=PASS', 'none'],
+  ['HW timer', '1 MHz timer create / read / stop', 'ALL TESTS PASSED', 'none'],
+  ['PWM + fade', 'LEDC write + 0→255 hardware fade', 'FADE_DATA=PASS', 'none'],
+  ['RMT', 'TX two NEC-like items, RX loopback', 'ALL TESTS PASSED', 'none'],
+  ['TWAI / CAN', 'Self-transmit std frame 0x123', 'ALL TESTS PASSED', 'none'],
+  ['ADC one-shot', '4 channels incl. attenuation switch', 'RESULT=PASS', 'analogInputs preset'],
+  ['ADC continuous', 'DMA frames via I2S path', 'ALL TESTS PASSED', 'analogInputs preset'],
+  ['Touch + DAC', 'Touch IRQ + DAC→ADC loopback', 'ALL TESTS PASSED', 'drives touch pad 3 at DYN_READY'],
+  ['Dual core', 'Core 0 + core 1 shared counters', 'RESULT=PASS', 'none'],
+  ['Pulse counter', '10 host-driven edges + threshold IRQ', 'COUNT10=PASS', 'toggles GPIO4, sends “g”'],
+  ['Brownout', 'Rail dip 3.3→2.0 V, IRQ + reset', 'BODRESET=PASS', 'drives supply rail'],
+  ['BT controller', 'Controller init', 'RESULT=PASS', 'BLE shim on'],
+  ['BLE init', 'Bluedroid init handshake', 'RESULT=PASS', 'BLE shim on'],
+  ['Ethernet MAC', 'PHY ID + 64 B DMA loopback', 'LOOPBACK=PASS', 'none'],
+  ['Camera', 'OV2640 frame 38400 B', 'CAM_DATA=PASS', 'pulses VSYNC until frame lands'],
+  ['Deep sleep', '3 boots, RTC memory survives', 'RESULT=PASS', 'none'],
+];
+const dtbody = document.querySelector('#demoTable tbody');
+for (const [name, ex, mark, assist] of demos) {
+  const tr = document.createElement('tr');
+  for (const v of [name, ex, mark, assist]) {
+    const td = document.createElement('td');
+    td.textContent = v;
+    if (v === mark) td.style.fontFamily = 'var(--mono)';
+    tr.append(td);
+  }
+  dtbody.append(tr);
+}
+</script>
+</body>
+</html>

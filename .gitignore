@@ -54,3 +54,15 @@
 !/openhw-studio-gateway/Dockerfile
 # Root rom symlink -> tests/rom (tracked); tests/rom/*.bin is real data
 !/rom
+# Webdemo site (static browser demo: pages + bundled worker + prebuilt firmware)
+!/webdemo/
+!/webdemo/*.html
+!/webdemo/*.js
+!/webdemo/*.css
+!/webdemo/worker/
+!/webdemo/worker/*.js
+!/webdemo/firmware/
+!/webdemo/firmware/*.gz
+# Worker + ROM binaries are loaded by the webdemo from webdemo/worker/
+!/webdemo/worker/*.wasm
+!/webdemo/worker/*.bin

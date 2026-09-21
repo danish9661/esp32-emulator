@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>esp32emu — ESP32 in your browser</title>
+<meta name="description" content="Run real ESP32 firmware in your browser. Pick a peripheral demo, watch the UART log stream out of a live dual-core Xtensa simulation.">
+<link rel="stylesheet" href="./styles.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script src="./vendor-pako.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="./index.html"><span class="brand-mark">32</span><span><b>esp32emu</b><br><small>WASM dual-core Xtensa</small></span></a>
+    <nav>
+      <a href="./index.html" aria-current="page">Demo</a>
+      <a href="./about.html">About</a>
+      <a href="./docs.html">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <p class="kicker"><span class="dot"></span>live simulation &middot; real firmware &middot; no install</p>
+    <h1>The ESP32, running <span class="accent">right here</span> in this tab.</h1>
+    <p class="lede">This page boots the actual ESP32 boot ROM plus compiled Arduino firmware on a
+      dual-core Xtensa LX6 model compiled to WebAssembly. Pick a peripheral on the left,
+      press run, and read what the chip itself prints on its serial port.</p>
+    <div class="hero-cta">
+      <button class="btn primary" id="ctaRun" type="button">Run the GPIO demo</button>
+      <a class="btn" href="./docs.html">Peripheral support table</a>
+    </div>
+    <div class="stats" id="heroStats">
+      <div class="stat"><div class="v"><em id="statMips">709</em> MIPS</div><div class="l">measured sim throughput</div></div>
+      <div class="stat"><div class="v">2 &times; LX6</div><div class="l">cores per run, 240 MHz model</div></div>
+      <div class="stat"><div class="v">19</div><div class="l">prebuilt firmware images on this page</div></div>
+      <div class="stat"><div class="v">0</div><div class="l">install steps to try one</div></div>
+    </div>
+  </section>
+
+  <section class="section" id="console">
+    <h2>Console</h2>
+    <p class="sub">The terminal below is the chip&rsquo;s UART0. The metrics strip shows the live
+      program counter, simulated cycles, and measured throughput while it runs.</p>
+    <div class="console-grid">
+      <div class="panel">
+        <h3>Firmware</h3>
+        <div class="demo-list" id="demoList" role="group" aria-label="Firmware demos"></div>
+        <h3 style="margin-top:16px">Module</h3>
+        <div class="board-row" role="group" aria-label="Module">
+          <button class="btn" id="boardEsp32" type="button" aria-pressed="true">ESP32</button>
+          <button class="btn" id="boardCam" type="button" aria-pressed="false">ESP32-CAM</button>
+        </div>
+        <div class="run-row">
+          <button class="btn primary" id="btnRun" type="button">Run</button>
+          <button class="btn danger" id="btnStop" type="button" disabled>Stop</button>
+        </div>
+      </div>
+      <div class="screen">
+        <div class="screen-bar">
+          <span class="lights"><i id="lightRun"></i><i id="lightUart"></i><i id="lightPass"></i></span>
+          <span id="screenTitle">uart0 &middot; 115200 8-N-1</span>
+          <span id="statusLine">idle</span>
+        </div>
+        <pre id="term" aria-live="polite"><span class="dim">Press run. The boot ROM banner (ets ...) appears first, then the demo log.</span>
+</pre>
+        <div class="metrics">
+          <div class="metric"><div class="v" id="mMips">&mdash;</div><div class="l">MIPS live</div></div>
+          <div class="metric"><div class="v" id="mPc">&mdash;</div><div class="l">PC core 0</div></div>
+          <div class="metric"><div class="v" id="mCyc">&mdash;</div><div class="l">sim cycles</div></div>
+          <div class="metric"><div class="v" id="mUart">&mdash;</div><div class="l">UART bytes</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="callout" id="verdict" hidden></div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>esp32emu &middot; WASM Xtensa core, native peripheral models</span>
+    <nav><a href="./about.html">About</a><a href="./docs.html">Docs</a></nav>
+  </div>
+</footer>
+
+<script type="module">
+import { DEMOS, MEASURED_MIPS, runDemoScript } from './demos.js';
+import { SimulatorWorker } from './worker/worker-proxy.js';
+
+const $ = (id) => document.getElementById(id);
+const term = $('term'), demoList = $('demoList'), statusLine = $('statusLine');
+const btnRun = $('btnRun'), btnStop = $('btnStop'), ctaRun = $('ctaRun'), verdict = $('verdict');
+
+let selected = DEMOS[0];
+let board = 'esp32';
+let sim = null, running = false, uartText = '', uartBytes = 0;
+let pollTimer = null, metTimer = null, scriptPromise = null;
+let cyc0 = 0, t0 = 0, lastCyc = 0, lastT = 0;
+
+function print(text, cls) {
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = text;
+  term.appendChild(span);
+  term.scrollTop = term.scrollHeight;
+}
+function setStatus(text, live) {
+  statusLine.textContent = text;
+  statusLine.classList.toggle('live', !!live);
+  $('lightRun').classList.toggle('on', !!live);
+}
+function fmtHex(n) { return '0x' + (n >>> 0).toString(16).padStart(8, '0'); }
+function fmtBig(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function buildList() {
+  demoList.innerHTML = '';
+  const preselect = (location.hash || '').replace('#demo-', '');
+  if (preselect) {
+    const hit = DEMOS.find((d) => d.id === preselect);
+    if (hit) selected = hit;
+  }
+  for (const d of DEMOS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'demo-item';
+    b.setAttribute('aria-pressed', d === selected ? 'true' : 'false');
+    const t = document.createElement('span'); t.className = 't'; t.textContent = d.name;
+    const ds = document.createElement('span'); ds.className = 'd'; ds.textContent = d.desc;
+    b.append(t, ds);
+    b.addEventListener('click', () => {
+      if (running) return;
+      selected = d;
+      for (const el of demoList.children) el.setAttribute('aria-pressed', 'false');
+      b.setAttribute('aria-pressed', 'true');
+    });
+    demoList.appendChild(b);
+  }
+}
+
+function setBoard(next) {
+  board = next;
+  $('boardEsp32').setAttribute('aria-pressed', String(next === 'esp32'));
+  $('boardCam').setAttribute('aria-pressed', String(next === 'esp32-cam'));
+}
+
+$('boardEsp32').addEventListener('click', () => { if (!running) setBoard('esp32'); });
+$('boardCam').addEventListener('click', () => { if (!running) setBoard('esp32-cam'); });
+
+async function loadImage(demo) {
+  const res = await fetch('./firmware/' + demo.file);
+  if (!res.ok) throw new Error('firmware fetch failed: ' + res.status);
+  const gz = new Uint8Array(await res.arrayBuffer());
+  const raw = window.pako ? window.pako.ungzip(gz) : gz;
+  if (raw.length !== 4 * 1024 * 1024) throw new Error('bad image size ' + raw.length);
+  return raw;
+}
+
+async function ensureStopped() {
+  running = false;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (metTimer) { clearInterval(metTimer); metTimer = null; }
+  if (scriptPromise) { try { await scriptPromise; } catch {} scriptPromise = null; }
+  if (sim) { try { sim.stop(); } catch {} try { sim.terminate(); } catch {} sim = null; }
+  btnRun.disabled = false;
+  btnStop.disabled = true;
+  setStatus('idle', false);
+}
+
+function verdictLine(demo, text) {
+  verdict.hidden = false;
+  if (text.includes('ALL TESTS PASSED') || text.includes(demo.expect)) {
+    verdict.innerHTML = '';
+    const b = document.createElement('b');
+    b.textContent = demo.name + ' finished: PASS';
+    verdict.append(b, document.createTextNode(' — the chip printed its own pass mark (' + demo.expect + ').'));
+    $('lightPass').classList.add('on');
+  } else {
+    verdict.textContent = demo.name + ' stopped. Last UART lines are above; expected mark: ' + demo.expect + '.';
+  }
+}
+
+async function run() {
+  if (running) return;
+  await ensureStopped();
+  running = true;
+  btnRun.disabled = true;
+  btnStop.disabled = false;
+  verdict.hidden = true;
+  $('lightPass').classList.remove('on');
+  term.innerHTML = '';
+  uartText = ''; uartBytes = 0;
+  setStatus('loading ' + selected.file + ' …', true);
+  print('$ load ' + selected.file + '  [' + selected.name + ']\n', 'dim');
+  $('mMips').textContent = '…';
+  $('mPc').textContent = '…';
+  $('mCyc').textContent = '…';
+  $('mUart').textContent = '…';
+
+  try {
+    const image = await loadImage(selected);
+    const flash = new Uint8Array(new SharedArrayBuffer(4 * 1024 * 1024));
+    flash.set(image);
+    const romBytes = new Uint8Array(await (await fetch(new URL('./worker/esp32-v3-rom.bin', import.meta.url))).arrayBuffer());
+    const wasmBytes = new Uint8Array(await (await fetch(new URL('./worker/esp_engine_wasm.wasm', import.meta.url))).arrayBuffer());
+
+    sim = new SimulatorWorker();
+    sim._onUART = (b) => {
+      uartText += String.fromCharCode(b);
+      uartBytes++;
+    };
+    sim._onError = (e) => print('\n[host] ' + (e && e.message ? e.message : e) + '\n', 'err');
+    setStatus('booting…', true);
+    // ROM + WASM travel inside init() (SAB-backed flash must be main-thread
+    // allocated so both sides share it; plain arrays get cloned to the worker).
+    const romSab = new SharedArrayBuffer(romBytes.length);
+    new Uint8Array(romSab).set(romBytes);
+    const wasmSab = new SharedArrayBuffer(wasmBytes.length);
+    new Uint8Array(wasmSab).set(wasmBytes);
+    await sim.init('ESP32', {
+      flashSizeMB: 4, mmuPages: 64, strapValue: 0x13,
+      budget: selected.budget || 5000000,
+      board, ...(selected.config || {}),
+      bootrom: new Uint8Array(romSab),
+      wasmBinary: new Uint8Array(wasmSab),
+    }, flash, null);
+    sim.run();
+    setStatus('running — ' + selected.name, true);
+    print('$ run · ' + selected.desc + '\n', 'dim');
+
+    cyc0 = sim.debug ? sim.debug[2] : 0;
+    t0 = performance.now();
+    lastCyc = cyc0; lastT = t0;
+
+    pollTimer = setInterval(() => {
+      if (!sim) return;
+      sim.pollUart();
+      // Stream newly arrived UART text (cheap tail diff).
+      const el = term;
+      const shown = el.__shown || 0;
+      if (uartText.length > shown) {
+        const chunk = uartText.slice(shown, shown + 65536);
+        print(chunk);
+        el.__shown = shown + chunk.length;
+        $('lightUart').classList.add('on');
+        setTimeout(() => $('lightUart').classList.remove('on'), 120);
+      }
+    }, 120);
+
+    metTimer = setInterval(() => {
+      if (!sim) return;
+      const cyc = sim.debug ? sim.debug[2] : 0;
+      const now = performance.now();
+      const dc = cyc - lastCyc, dt = (now - lastT) / 1000;
+      lastCyc = cyc; lastT = now;
+      if (dt > 0 && dc >= 0) $('mMips').textContent = (dc / dt / 1e6).toFixed(1);
+      try { $('mPc').textContent = fmtHex(sim.pc); } catch {}
+      $('mCyc').textContent = fmtBig(cyc);
+      $('mUart').textContent = fmtBig(uartBytes);
+    }, 500);
+
+    if (selected.script) scriptPromise = runDemoScript(selected.script, sim, () => uartText);
+
+    // End-of-run watchdog: stop when the pass mark arrives or after 150 s.
+    const tEnd = Date.now() + 150000;
+    let finalCyc = 0;
+    while (running && Date.now() < tEnd) {
+      await new Promise((r) => setTimeout(r, 400));
+      if (!sim) break;
+      sim.pollUart();
+      try { finalCyc = sim.debug ? sim.debug[2] : finalCyc; } catch {}
+      if (uartText.includes(selected.expect) || uartText.includes('ALL TESTS PASSED')) break;
+    }
+    const wall = (performance.now() - t0) / 1000;
+    const total = finalCyc > cyc0 ? finalCyc - cyc0 : (sim && sim.debug ? sim.debug[2] : 0) - cyc0;
+    if (sim) { try { sim.stop(); } catch {} }
+    print('\n[host] ' + fmtBig(total) + ' cycles in ' + wall.toFixed(1) + ' s = ' + (total / wall / 1e6).toFixed(1) + ' MIPS\n', 'dim');
+    verdictLine(selected, uartText);
+  } catch (e) {
+    print('\n[host] failed: ' + (e && e.message ? e.message : e) + '\n', 'err');
+    setStatus('error', false);
+  } finally {
+    await ensureStopped();
+  }
+}
+
+btnRun.addEventListener('click', run);
+ctaRun.addEventListener('click', () => {
+  document.getElementById('console').scrollIntoView({ behavior: 'smooth' });
+  run();
+});
+btnStop.addEventListener('click', async () => {
+  print('\n[host] stopped by user\n', 'warn');
+  verdictLine(selected, uartText);
+  await ensureStopped();
+});
+
+$('statMips').textContent = MEASURED_MIPS;
+buildList();
+</script>
+</body>
+</html>

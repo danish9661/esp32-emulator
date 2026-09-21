@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About — esp32emu</title>
+<meta name="description" content="What esp32emu is, how the WASM Xtensa core and native peripherals work, and how the 709 MIPS figure is measured.">
+<link rel="stylesheet" href="./styles.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="./index.html"><span class="brand-mark">32</span><span><b>esp32emu</b><br><small>WASM dual-core Xtensa</small></span></a>
+    <nav>
+      <a href="./index.html">Demo</a>
+      <a href="./about.html" aria-current="page">About</a>
+      <a href="./docs.html">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <p class="kicker"><span class="dot"></span>about the emulator</p>
+    <h1>A whole ESP32, <span class="accent">simulated honestly.</span></h1>
+    <p class="lede">esp32emu boots the real ESP32 boot ROM and runs real compiled Arduino / ESP-IDF
+      firmware on a cycle-counted dual-core Xtensa LX6 model. There is no instruction-set
+      paraphrase and no UART spoofing: every byte on the demo terminal was transmitted by
+      emulated silicon.</p>
+  </section>
+
+  <section class="section">
+    <h2>How it works</h2>
+    <p class="sub">Four layers, each doing the job it is best at.</p>
+    <div class="about-grid">
+      <div class="panel">
+        <h3>1 · Core engine (Rust to WASM)</h3>
+        <p>Both LX6 cores execute inside a single WebAssembly module compiled from Rust.
+          A batched <span class="kv" style="font-family:var(--mono)">core_run</span> export advances
+          up to 512 interleaved iterations per host call, with CCOUNT sync per instruction.
+          The core is self-timed: it tracks its own cycle count and fast-forwards idle stretches
+          straight to the next timer alarm.</p>
+      </div>
+      <div class="panel">
+        <h3>2 · Native peripherals (same module)</h3>
+        <p>UART, GPIO, SPI, I2C, timers, RMT, TWAI, ADC, touch, SDMMC, EMAC, WiFi MAC and more
+          live in Rust behind a page-table dispatch. A full firmware run issues
+          zero fallback calls into JavaScript for peripheral traffic.</p>
+      </div>
+      <div class="panel">
+        <h3>3 · Host bridges (JavaScript)</h3>
+        <p>What cannot live in WASM stays out: the worker-thread host, the
+          SharedArrayBuffer UART ring, the simulation clock source, the WiFi gateway socket,
+          and the compile service that turns Arduino sketches into flash images.</p>
+      </div>
+      <div class="panel">
+        <h3>4 · This page</h3>
+        <p>The demo tab spawns the same worker the Node test-suite uses, feeds it a prebuilt
+          4&nbsp;MB flash image, and renders UART0 into the terminal. The ESP32-CAM toggle
+          applies the real module preset: 4&nbsp;MB PSRAM and the AI-Thinker pinout.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Speed, measured not marketed</h2>
+    <p class="sub">Throughput is reported in MIPS: millions of simulated instructions retired per
+      wall-clock second. Two numbers matter.</p>
+    <div class="stats">
+      <div class="stat"><div class="v"><em>709</em> MIPS</div><div class="l">steady-state, GPIO firmware, run/stop hot loop</div></div>
+      <div class="stat"><div class="v">~58</div><div class="l">M instr/sec, batched core_run path (lab bench)</div></div>
+      <div class="stat"><div class="v">live</div><div class="l">every demo run prints its own MIPS line</div></div>
+      <div class="stat"><div class="v">0</div><div class="l">JS fallback calls on the peripheral hot path</div></div>
+    </div>
+    <div class="callout"><b>Why two numbers?</b> The 709 MIPS figure is the whole simulator
+      (both cores, idle fast-forward, host loop) on the demo firmware. The ~58 M instr/sec
+      figure is the core engine alone on a CPU-bound loop. Idle or delay-heavy firmware is
+      dominated by fast-forward, not instruction throughput — which is exactly what real
+      silicon does too.</div>
+    <pre class="code"><span class="c"># reproduce the headline number (Node, repo root)</span>
+node tests/bench-profile.mjs /tmp/fwlocal/gpio/out/sketch.ino.merged.bin
+<span class="c"># per-demo pass/fail (needs the compile server on :5525)</span>
+node tests/test-worker-gpio.mjs   <span class="c"># … one file per peripheral</span></pre>
+  </section>
+
+  <section class="section">
+    <h2>Key facts</h2>
+    <div class="about-grid">
+      <div class="panel">
+        <dl class="kv">
+          <dt>Chip</dt><dd>ESP32 (Xtensa LX6, dual core, 240 MHz model)</dd>
+          <dt>Boards</dt><dd>ESP32 dev module · ESP32-CAM (AI-Thinker, 4 MB PSRAM)</dd>
+          <dt>Firmware</dt><dd>Arduino / ESP-IDF 3.3.10, compiled with arduino-cli</dd>
+          <dt>Boot</dt><dd>Real boot ROM (esp32-v3-rom.bin) + real bootloader</dd>
+        </dl>
+      </div>
+      <div class="panel">
+        <dl class="kv">
+          <dt>Engine</dt><dd>Rust → wasm32-unknown-unknown, batched core_run</dd>
+          <dt>Host</dt><dd>Node worker_threads · browser Web Worker + SharedArrayBuffer</dd>
+          <dt>UART</dt><dd>Ring buffer over SAB, 115200 8-N-1 model</dd>
+          <dt>Honest limits</dt><dd>BLE advertising needs the baseband (not emulated); WiFi RF needs the gateway</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>esp32emu &middot; WASM Xtensa core, native peripheral models</span>
+    <nav><a href="./index.html">Demo</a><a href="./docs.html">Docs</a></nav>
+  </div>
+</footer>
+</body>
+</html>
