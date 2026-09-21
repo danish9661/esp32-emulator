@@ -202,6 +202,25 @@ a:focus-visible, button:focus-visible, select:focus-visible {
 .run-row { display: flex; gap: 10px; margin-top: 6px; }
 .run-row .btn { flex: 1; justify-content: center; }
 
+/* UART echo input (visible only while an interactive demo runs) */
+.echo-row { display: flex; gap: 8px; margin-top: 10px; }
+.echo-row[hidden] { display: none; }
+.echo-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+}
+.echo-row input:disabled { opacity: 0.45; }
+
+/* Outbound repo link in the top nav */
+.topbar nav a[target="_blank"] { border: 1px solid var(--line); }
+
 .screen {
   background: #0a0d10;
   border: 1px solid var(--line);

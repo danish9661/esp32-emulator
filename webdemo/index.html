@@ -16,6 +16,7 @@
       <a href="./index.html" aria-current="page">Demo</a>
       <a href="./about.html">About</a>
       <a href="./docs.html">Docs</a>
+      <a href="https://github.com/danish9661/esp32-emulator" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
 </header>
@@ -26,23 +27,25 @@
     <h1>The ESP32, running <span class="accent">right here</span> in this tab.</h1>
     <p class="lede">This page boots the actual ESP32 boot ROM plus compiled Arduino firmware on a
       dual-core Xtensa LX6 model compiled to WebAssembly. Pick a peripheral on the left,
-      press run, and read what the chip itself prints on its serial port.</p>
+      press run, and read what the chip itself prints on its serial port. Try the UART echo
+      demo to type at the chip yourself.</p>
     <div class="hero-cta">
       <button class="btn primary" id="ctaRun" type="button">Run the GPIO demo</button>
       <a class="btn" href="./docs.html">Peripheral support table</a>
     </div>
     <div class="stats" id="heroStats">
       <div class="stat"><div class="v"><em id="statMips">709</em> MIPS</div><div class="l">measured sim throughput</div></div>
+      <div class="stat"><div class="v" id="statLiveMips">—</div><div class="l">this browser, last run (live)</div></div>
       <div class="stat"><div class="v">2 &times; LX6</div><div class="l">cores per run, 240 MHz model</div></div>
-      <div class="stat"><div class="v">19</div><div class="l">prebuilt firmware images on this page</div></div>
-      <div class="stat"><div class="v">0</div><div class="l">install steps to try one</div></div>
+      <div class="stat"><div class="v" id="statDemoCount">45</div><div class="l">prebuilt firmware images on this page</div></div>
     </div>
   </section>
 
   <section class="section" id="console">
     <h2>Console</h2>
-    <p class="sub">The terminal below is the chip&rsquo;s UART0. The metrics strip shows the live
-      program counter, simulated cycles, and measured throughput while it runs.</p>
+    <p class="sub">The terminal below is the chip&rsquo;s UART0. The metrics strip shows live
+      speed in MIPS plus program counter, simulated cycles, and UART traffic while it runs.
+      Every run ends with its own MIPS line, and the hero keeps the latest figure.</p>
     <div class="console-grid">
       <div class="panel">
         <h3>Firmware</h3>
@@ -55,6 +58,10 @@
         <div class="run-row">
           <button class="btn primary" id="btnRun" type="button">Run</button>
           <button class="btn danger" id="btnStop" type="button" disabled>Stop</button>
+        </div>
+        <div class="echo-row" id="echoRow" hidden>
+          <input id="echoInput" type="text" placeholder="Type here — sent to the chip over UART" autocomplete="off" spellcheck="false" disabled>
+          <button class="btn primary" id="btnSend" type="button" disabled>Send</button>
         </div>
       </div>
       <div class="screen">
@@ -80,7 +87,7 @@
 <footer>
   <div class="wrap">
     <span>esp32emu &middot; WASM Xtensa core, native peripheral models</span>
-    <nav><a href="./about.html">About</a><a href="./docs.html">Docs</a></nav>
+    <nav><a href="./about.html">About</a><a href="./docs.html">Docs</a><a href="https://github.com/danish9661/esp32-emulator" target="_blank" rel="noopener">GitHub</a></nav>
   </div>
 </footer>
 
@@ -91,12 +98,41 @@ import { SimulatorWorker } from './worker/worker-proxy.js';
 const $ = (id) => document.getElementById(id);
 const term = $('term'), demoList = $('demoList'), statusLine = $('statusLine');
 const btnRun = $('btnRun'), btnStop = $('btnStop'), ctaRun = $('ctaRun'), verdict = $('verdict');
+const echoRow = $('echoRow'), echoInput = $('echoInput'), btnSend = $('btnSend');
 
 let selected = DEMOS[0];
 let board = 'esp32';
 let sim = null, running = false, uartText = '', uartBytes = 0;
 let pollTimer = null, metTimer = null, scriptPromise = null;
 let cyc0 = 0, t0 = 0, lastCyc = 0, lastT = 0;
+
+// Latest finished-run speed, shown both in the metrics strip and the hero.
+let lastRunMips = null;
+
+function setEchoEnabled(on) {
+  echoRow.hidden = !on;
+  echoInput.disabled = !on;
+  btnSend.disabled = !on;
+  if (!on) echoInput.value = '';
+}
+
+function sendEchoLine() {
+  if (!sim || !running) return;
+  const line = echoInput.value;
+  echoInput.value = '';
+  try {
+    sim.sendUart(line + '\n');
+    print(line + '\n', 'dim');
+  } catch (e) {
+    print('\n[host] send failed: ' + (e && e.message ? e.message : e) + '\n', 'err');
+  }
+  echoInput.focus();
+}
+
+btnSend.addEventListener('click', sendEchoLine);
+echoInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); sendEchoLine(); }
+});
 
 function print(text, cls) {
   const span = document.createElement('span');
@@ -172,6 +208,7 @@ async function loadImage(demo) {
 
 async function ensureStopped() {
   running = false;
+  setEchoEnabled(false);
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (metTimer) { clearInterval(metTimer); metTimer = null; }
   if (scriptPromise) { try { await scriptPromise; } catch {} scriptPromise = null; }
@@ -183,6 +220,13 @@ async function ensureStopped() {
 
 function verdictLine(demo, text) {
   verdict.hidden = false;
+  if (demo.interactive === 'uart-echo') {
+    verdict.innerHTML = '';
+    const b = document.createElement('b');
+    b.textContent = demo.name + ' session ended';
+    verdict.append(b, document.createTextNode(' — echo firmware stays live until you press Stop; every echoed line came from the chip.'));
+    return;
+  }
   if (text.includes('ALL TESTS PASSED') || text.includes(demo.expect)) {
     verdict.innerHTML = '';
     const b = document.createElement('b');
@@ -235,12 +279,18 @@ async function run() {
       flashSizeMB: 4, mmuPages: 64, strapValue: 0x13,
       budget: selected.budget || 5000000,
       board, ...(selected.config || {}),
+      ...(selected.partitions ? { partitions: selected.partitions } : {}),
       bootrom: new Uint8Array(romSab),
       wasmBinary: new Uint8Array(wasmSab),
     }, flash, null);
     sim.run();
     setStatus('running — ' + selected.name, true);
     print('$ run · ' + selected.desc + '\n', 'dim');
+    // Interactive demos (UART echo) keep running after READY so the user can
+    // type; the input row enables as soon as the firmware is listening.
+    if (selected.interactive === 'uart-echo') {
+      print('$ uart echo live — type below, Enter sends\n', 'dim');
+    }
 
     cyc0 = sim.debug ? sim.debug[2] : 0;
     t0 = performance.now();
@@ -275,20 +325,33 @@ async function run() {
 
     if (selected.script) scriptPromise = runDemoScript(selected.script, sim, () => uartText);
 
-    // End-of-run watchdog: stop when the pass mark arrives or after 150 s.
-    const tEnd = Date.now() + 150000;
+    const interactive = selected.interactive === 'uart-echo';
+    let echoReady = false;
+    // End-of-run watchdog: stop when the pass mark arrives or after 150 s
+    // (interactive echo runs until the user presses Stop or 5 min pass).
+    const tEnd = Date.now() + (interactive ? 300000 : 150000);
     let finalCyc = 0;
     while (running && Date.now() < tEnd) {
       await new Promise((r) => setTimeout(r, 400));
       if (!sim) break;
       sim.pollUart();
       try { finalCyc = sim.debug ? sim.debug[2] : finalCyc; } catch {}
-      if (uartText.includes(selected.expect) || uartText.includes('ALL TESTS PASSED')) break;
+      if (interactive && !echoReady && uartText.includes('ECHO_READY')) {
+        echoReady = true;
+        setEchoEnabled(true);
+        setStatus('running — ' + selected.name + ' (echo live)', true);
+        echoInput.focus();
+      }
+      if (!interactive && (uartText.includes(selected.expect) || uartText.includes('ALL TESTS PASSED'))) break;
     }
     const wall = (performance.now() - t0) / 1000;
     const total = finalCyc > cyc0 ? finalCyc - cyc0 : (sim && sim.debug ? sim.debug[2] : 0) - cyc0;
+    const mips = wall > 0 ? total / wall / 1e6 : 0;
     if (sim) { try { sim.stop(); } catch {} }
-    print('\n[host] ' + fmtBig(total) + ' cycles in ' + wall.toFixed(1) + ' s = ' + (total / wall / 1e6).toFixed(1) + ' MIPS\n', 'dim');
+    print('\n[host] ' + fmtBig(total) + ' cycles in ' + wall.toFixed(1) + ' s = ' + mips.toFixed(1) + ' MIPS\n', 'dim');
+    lastRunMips = mips;
+    const heroLive = $('statLiveMips');
+    if (heroLive) heroLive.textContent = mips.toFixed(1) + ' MIPS';
     verdictLine(selected, uartText);
   } catch (e) {
     print('\n[host] failed: ' + (e && e.message ? e.message : e) + '\n', 'err');
@@ -310,6 +373,7 @@ btnStop.addEventListener('click', async () => {
 });
 
 $('statMips').textContent = MEASURED_MIPS;
+$('statDemoCount').textContent = DEMOS.length;
 buildList();
 </script>
 </body>

@@ -16,6 +16,7 @@
       <a href="./index.html">Demo</a>
       <a href="./about.html">About</a>
       <a href="./docs.html" aria-current="page">Docs</a>
+      <a href="https://github.com/danish9661/esp32-emulator" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
 </header>
@@ -65,9 +66,9 @@
 
   <section class="section" id="demos">
     <h2>Demo catalogue</h2>
-    <p class="sub">All 19 images are prebuilt Arduino firmware (bootloader + partitions + app),
-      verified PASS on the host suite before shipping. Four need a host action while they run —
-      the console performs it for you.</p>
+    <p class="sub">All 45 images are prebuilt Arduino firmware (bootloader + partitions + app),
+      verified PASS on the host suite before shipping. Seven need a host action while they run —
+      the console performs it for you; UART echo is fully interactive (you type, the chip echoes).</p>
     <div class="table-scroll">
       <table class="matrix" id="demoTable">
         <thead><tr><th scope="col">Demo</th><th scope="col">Exercises</th><th scope="col">Pass mark</th><th scope="col">Host assist</th></tr></thead>
@@ -102,7 +103,7 @@ node tests/test-worker-gpio.mjs
 <footer>
   <div class="wrap">
     <span>esp32emu &middot; WASM Xtensa core, native peripheral models</span>
-    <nav><a href="./index.html">Demo</a><a href="./about.html">About</a></nav>
+    <nav><a href="./index.html">Demo</a><a href="./about.html">About</a><a href="https://github.com/danish9661/esp32-emulator" target="_blank" rel="noopener">GitHub</a></nav>
   </div>
 </footer>
 
@@ -112,26 +113,52 @@ const PART = '<span class="pill partial">partial</span>';
 const NO = '<span class="pill no">not emulated</span>';
 const rows = [
   ['UART 0/1/2', YES, YES, 'TX/RX FIFO, baud autodetect, IRDA', '—', 'uart'],
+  ['UART echo (interactive)', YES, YES, 'RX bytes via host input row, TX echo', '—', 'uart-echo'],
   ['GPIO + IO_MUX', YES, YES, 'Matrix routing, 64 pins, strap values', '—', 'gpio'],
   ['SPI master', YES, YES, 'Flash-cache fast-path, loopback 0xAA', 'Slave DMA edge cases', 'spi'],
+  ['SPI slave', YES, YES, 'Full-duplex master↔slave x2, post_trans_cb', '—', 'spi-slave'],
   ['I2C master', YES, YES, 'Master write probe, clock stretching', 'Multi-master arbitration', 'i2c'],
+  ['I2C slave', YES, YES, 'Slave recv/onReceive via host keypress', 'Clock-stretch corner cases', 'i2c-slave'],
+  ['RTC I2C', YES, YES, 'RTC I2C controller path', '—', 'rtc-i2c'],
   ['HW timers + watchdog', YES, YES, 'TIMG0/1 alarms, RTC WDT, brownout reset', '—', 'timer'],
+  ['RTC watchdog', YES, YES, 'RTC WDT feed + reset reason', '—', 'rtc-wdt'],
+  ['Task watchdog', YES, YES, 'TWDT via gptimer', '—', 'twdt'],
   ['LEDC PWM + fade', YES, YES, 'Duty write, 0→255 hardware fade', '—', 'pwm'],
+  ['MCPWM', YES, YES, 'Duty/freq, capture + fault via host pins', 'Carrier detail', 'mcpwm'],
   ['RMT', YES, YES, 'TX items stream into armed RX (virtual wire)', 'Carrier modulation detail', 'rmt'],
+  ['I2S audio', YES, YES, 'DMA TX completes 64 B', 'RX microphone path (suite-only)', 'i2s'],
   ['TWAI / CAN', YES, YES, 'Self-reception in NO_ACK mode', 'Bus-off recovery timing', 'twai'],
-  ['PCNT', YES, YES, 'Edge counting + threshold IRQ via host-driven pin', 'Glitch filter model', 'pcnt'],
+  ['TWAI normal mode', YES, YES, 'Peer inject + TX capture', 'Error-frame detail', 'twai-normal'],
   ['ADC one-shot', YES, YES, 'Attenuation table, 12-bit counts', 'Noise model (returns exact counts)', 'analog'],
   ['ADC continuous + DMA', YES, YES, 'TYPE1 frames through I2S RX-DMA path', '—', 'adc-cont'],
+  ['Temp sensor', YES, YES, 'temperatureRead 25 C range + stability', '—', 'tsens'],
   ['Touch + DAC', YES, YES, 'Touch counts, touch IRQ, DAC→ADC wire', 'Capacitance curve', 'touch-dac'],
   ['Dual core', YES, YES, 'APP CPU boot, shared-memory counters', '—', 'multicore'],
+  ['Interrupt stress', YES, YES, 'Timer + GPIO IRQ storm', '—', 'interrupt-stress'],
+  ['PCNT', YES, YES, 'Edge counting + threshold IRQ via host-driven pin', 'Glitch filter model', 'pcnt'],
   ['Brownout (BOD)', YES, YES, 'Threshold IRQ + reset at 2.0 V rail dip', 'Analog trip-point slope', 'bod'],
+  ['ULP coprocessor', YES, YES, 'FSM program load + run + data', 'ADC/TSENS edge detail', 'ulp'],
+  ['ULP wake', YES, YES, 'ULP wake from deep sleep', '—', 'ulp-wake'],
+  ['Flash R/W', YES, YES, 'Raw erase/write/read', 'Wear model', 'flash'],
+  ['Partition table', YES, YES, 'OTA table enumerate via API', '—', 'part'],
+  ['SPIFFS', YES, YES, 'Mount + file write/read', 'Wear model', 'spiffs'],
+  ['SDMMC host', YES, YES, 'Host init/deinit', 'High-speed modes', 'sdmmc'],
+  ['SD card (virtual)', YES, YES, 'FAT mount, 4 KB file R/W + ls', 'SPI-mode SD', 'sdcard'],
+  ['eMMC (virtual)', YES, YES, 'MMC probe + EXT_CSD + sector R/W', 'HS200 timing', 'emmc'],
+  ['SDIO slave', YES, YES, 'Init/start, recv timeout honest', 'Host-driven transfers', 'sdio-slave'],
+  ['UHCI', YES, YES, 'Raw UART-DMA register readback', '—', 'uhci'],
+  ['Register sweep', YES, YES, 'Secure-boot/I2C/SLC/FE stub pages', '—', 'sweep'],
+  ['RSA accelerator', YES, YES, 'Hardware RSA operation', 'Large-key timing', 'rsa'],
+  ['Digital signature', YES, YES, 'DS register-file stub', 'HMAC-backed signing (no consumer)', 'ds'],
   ['BT controller', PART, PART, 'Controller init (HCI shim)', 'LL/baseband: advertising needs real RF — init only', 'bt'],
   ['BLE stack init', PART, PART, 'Bluedroid init handshake', 'GATT services / ADV payloads need the baseband', 'ble-init'],
+  ['WiFi scan', PART, PART, 'Station scan finds TEST-AP (no gateway)', 'AP/data path needs the network gateway', 'wifi'],
+  ['Ethernet regs', YES, YES, 'EMAC register readback', 'RMII timing', 'emac'],
   ['Ethernet MAC', YES, YES, 'LAN8720 PHY ID, 64 B DMA loopback', 'RMII timing', 'emac-loopback'],
   ['Camera (OV2640)', NO, YES, 'SCCB + DVP frame into PSRAM framebuffer', 'ESP32 dev board has no camera (— by hardware)', 'camera'],
   ['Deep sleep + RTC mem', YES, YES, '3 boots, RTC_DATA_ATTR survives, wake causes', 'ULP wake stub', 'deepsleep'],
-  ['SD / SDMMC', YES, YES, 'Virtual card, FAT R/W (suite-tested)', 'No demo image shipped on this page', null],
-  ['WiFi station + AP', PART, PART, 'TX/RX bridge + gateway path (suite-tested)', 'Needs the network gateway — no offline demo image', null],
+  ['SD / SDMMC', YES, YES, 'Virtual card, FAT R/W (suite-tested)', 'Covered above by SD card + eMMC demos', null],
+  ['WiFi station + AP', PART, PART, 'TX/RX bridge + gateway path (suite-tested)', 'AP/data path needs the network gateway', 'wifi'],
 ];
 const tbody = document.querySelector('#supportTable tbody');
 if (tbody && typeof document.createElement === 'function') for (const [name, a, b, added, left, demo] of rows) {
@@ -157,20 +184,46 @@ if (tbody && typeof document.createElement === 'function') for (const [name, a, 
 const demos = [
   ['GPIO', 'Output, pull-up, interrupt attach/detach', 'ALL TESTS PASSED', 'none'],
   ['UART', 'Serial0/1/2 hello + flush', 'ALL TESTS PASSED', 'none'],
+  ['UART echo', 'Type in page, chip echoes each line', 'ECHO_READY', 'you type, Enter sends'],
   ['SPI', 'Loopback transfer 0xAA', 'LOOPBACK=PASS', 'none'],
+  ['SPI slave', 'Full-duplex master↔slave x2', 'RESULT=PASS', 'none'],
   ['I2C', 'Master write probe', 'I2C=PASS', 'none'],
+  ['I2C slave', 'Slave recv + master write', 'RESULT=PASS', 'sends “g” at SLAVE_READY'],
+  ['RTC I2C', 'RTC I2C controller path', 'RESULT=PASS', 'none'],
   ['HW timer', '1 MHz timer create / read / stop', 'ALL TESTS PASSED', 'none'],
+  ['RTC + WDT', 'RTC watchdog feed + reset', 'RESULT=PASS', 'none'],
+  ['Task WDT', 'Task watchdog via gptimer', 'RESULT=PASS', 'none'],
   ['PWM + fade', 'LEDC write + 0→255 hardware fade', 'FADE_DATA=PASS', 'none'],
+  ['MCPWM', 'Duty/freq + capture + fault', 'RESULT=PASS', 'toggles GPIO4/5, sends keys'],
   ['RMT', 'TX two NEC-like items, RX loopback', 'ALL TESTS PASSED', 'none'],
+  ['I2S audio', 'DMA TX completes 64 B', 'RESULT=PASS', 'none'],
   ['TWAI / CAN', 'Self-transmit std frame 0x123', 'ALL TESTS PASSED', 'none'],
+  ['TWAI normal', 'Peer inject + TX capture', 'RESULT=PASS', 'injects peer CAN frame'],
   ['ADC one-shot', '4 channels incl. attenuation switch', 'RESULT=PASS', 'analogInputs preset'],
   ['ADC continuous', 'DMA frames via I2S path', 'ALL TESTS PASSED', 'analogInputs preset'],
+  ['Temp sensor', 'temperatureRead 25 C range', 'RESULT=PASS', 'none'],
   ['Touch + DAC', 'Touch IRQ + DAC→ADC loopback', 'ALL TESTS PASSED', 'drives touch pad 3 at DYN_READY'],
   ['Dual core', 'Core 0 + core 1 shared counters', 'RESULT=PASS', 'none'],
+  ['IRQ stress', 'Timer + GPIO storm', 'RESULT=PASS', 'none'],
   ['Pulse counter', '10 host-driven edges + threshold IRQ', 'COUNT10=PASS', 'toggles GPIO4, sends “g”'],
   ['Brownout', 'Rail dip 3.3→2.0 V, IRQ + reset', 'BODRESET=PASS', 'drives supply rail'],
+  ['ULP coproc', 'FSM program load + run', 'RESULT=PASS', 'none'],
+  ['ULP wake', 'ULP wake from deep sleep', 'RESULT=PASS', 'none'],
+  ['Flash R/W', 'Raw erase/write/read', 'RESULT=PASS', 'none'],
+  ['Partitions', 'OTA table enumerate', 'ALL TESTS PASSED', 'custom partition CSV'],
+  ['SPIFFS', 'Mount + file write/read', 'RESULT=PASS', 'none'],
+  ['SDMMC host', 'Host init/deinit', 'RESULT=PASS', 'none'],
+  ['SD card', 'FAT mount, 4 KB file R/W', 'RESULT=PASS', '16 MB sdCard image'],
+  ['eMMC', 'MMC probe + sector R/W', 'RESULT=PASS', '16 MB MMC image'],
+  ['SDIO slave', 'Slave init/start, recv timeout', 'RESULT=PASS', 'none'],
+  ['UHCI', 'Raw UART-DMA register R/W', 'RESULT=PASS', 'none'],
+  ['Reg sweep', 'Secure-boot/I2C/SLC/FE pages', 'RESULT=PASS', 'none'],
+  ['RSA accel', 'Hardware RSA operation', 'RESULT=PASS', 'none'],
+  ['Dig. signature', 'DS register-file stub', 'RESULT=PASS', 'none'],
   ['BT controller', 'Controller init', 'RESULT=PASS', 'BLE shim on'],
   ['BLE init', 'Bluedroid init handshake', 'RESULT=PASS', 'BLE shim on'],
+  ['WiFi scan', 'Station scan finds TEST-AP', 'ALL TESTS PASSED', 'virtual AP, no gateway'],
+  ['Ethernet regs', 'EMAC register readback', 'RESULT=PASS', 'none'],
   ['Ethernet MAC', 'PHY ID + 64 B DMA loopback', 'LOOPBACK=PASS', 'none'],
   ['Camera', 'OV2640 frame 38400 B', 'CAM_DATA=PASS', 'pulses VSYNC until frame lands'],
   ['Deep sleep', '3 boots, RTC memory survives', 'RESULT=PASS', 'none'],

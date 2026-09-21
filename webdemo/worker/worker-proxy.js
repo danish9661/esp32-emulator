@@ -527,7 +527,7 @@ var SimulatorWorker = class {
   /** Send bytes to the emulated UART RX (guest input) */
   sendUart(data) {
     if (!this.uartRxCtrl || !this.uartRxRing) return;
-    const bytes = typeof data === "string" ? Buffer.from(data, "utf-8") : data;
+    const bytes = typeof data === "string" ? (typeof Buffer !== "undefined" ? Buffer.from(data, "utf-8") : new TextEncoder().encode(data)) : data;
     for (let i = 0; i < bytes.length; i++) {
       const w = Atomics.load(this.uartRxCtrl, 0);
       this.uartRxRing[w % UART_RING_SIZE] = bytes[i];

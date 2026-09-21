@@ -61,6 +61,27 @@ await build({
   }
 }
 
+// Browser-safe UART TX path: the Node proxy uses Buffer.from, which does not
+// exist in browsers. Fall back to TextEncoder so page-driven sendUart works
+// (UART echo demo + pcnt/mcpwm/i2c-slave host keypress scripts).
+{
+  const path = 'webdemo/worker/worker-proxy.js';
+  const { readFileSync, writeFileSync } = await import('fs');
+  let s = readFileSync(path, 'utf8');
+  const needle =
+    'const bytes = typeof data === "string" ? Buffer.from(data, "utf-8") : data;';
+  if (!s.includes(needle)) {
+    console.warn('[build-webdemo] sendUart patch: needle not found, skipping');
+  } else {
+    s = s.replace(
+      needle,
+      'const bytes = typeof data === "string" ? (typeof Buffer !== "undefined" ? Buffer.from(data, "utf-8") : new TextEncoder().encode(data)) : data;',
+    );
+    writeFileSync(path, s);
+    console.log('[build-webdemo] sendUart browser patch applied');
+  }
+}
+
 copyFileSync(
   'src/engine/esp-xtensa/esp_engine_wasm.wasm',
   'webdemo/worker/esp_engine_wasm.wasm',
