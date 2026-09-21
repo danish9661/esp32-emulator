@@ -1,0 +1,2 @@
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+atomics,+bulk-memory", "-C", "link-args=--import-memory --shared-memory --max-memory=134217728 --allow-undefined --export=core_init --export=core_step --export=core_run --export=core_reset"]

@@ -5,12 +5,26 @@
 !/engine-wasm/
 /engine-wasm/*
 !/engine-wasm/src/
+!/engine-wasm/Cargo.toml
+!/engine-wasm/Cargo.lock
+!/engine-wasm/.cargo/
 
 /tests/build/local-compile/
 # Transient diag artefacts (never commit)
 /tests/tmp-*
 *.log
 /tmp-battery.log
+# Build/test byproducts (regenerable)
+/dist/
+/engine-wasm/target/
+/tests/build/
+/firmware.bin
+/wifi-capture.pcap
+/node_modules/
+# Gateway binaries (rebuild via `cd openhw-studio-gateway && go build`); keep sources
+/openhw-studio-gateway/openhw-gw
+/openhw-studio-gateway/openhw-gw.exe
+/openhw-studio-gateway/ap_bridge.go.bak
 !/.github/
 !/docs/
 !/README.md
@@ -22,3 +36,21 @@
 !/build.mjs
 !/eslint.config.js
 !/package-lock.json
+# Project docs + handoff notes at root
+!/AGENT.md
+!/AGENTS.md
+!/ble.md
+!/handover.md
+!/spi-rx-debug.mjs
+!/tsconfig.json
+# ESP32-CAM / gateway sources
+!/openhw-studio-gateway/
+!/openhw-studio-gateway/*.go
+!/openhw-studio-gateway/go.mod
+!/openhw-studio-gateway/go.sum
+!/openhw-studio-gateway/README.md
+!/openhw-studio-gateway/start-gateway.sh
+!/openhw-studio-gateway/start-gateway.cmd
+!/openhw-studio-gateway/Dockerfile
+# Root rom symlink -> tests/rom (tracked); tests/rom/*.bin is real data
+!/rom
