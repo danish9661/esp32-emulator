@@ -1,0 +1,24 @@
+/*
+!/src/
+!/tests/
+!/.gitignore
+!/engine-wasm/
+/engine-wasm/*
+!/engine-wasm/src/
+
+/tests/build/local-compile/
+# Transient diag artefacts (never commit)
+/tests/tmp-*
+*.log
+/tmp-battery.log
+!/.github/
+!/docs/
+!/README.md
+!/package.json
+!/LICENSE
+!/CHANGELOG.md
+!/THIRD-PARTY-NOTICES.md
+!/bin
+!/build.mjs
+!/eslint.config.js
+!/package-lock.json

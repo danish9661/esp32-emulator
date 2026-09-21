@@ -1,0 +1,139 @@
+name: Release
+
+# Publishes the `esp32emu` npm package and creates a matching GitHub release.
+# Trigger by pushing a tag like `v0.1.0`, or run manually from the Actions tab.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0). A git tag 'v<version>' is created."
+        required: true
+
+permissions:
+  contents: write # needed to create the GitHub release and (on dispatch) the tag
+
+jobs:
+  build-and-test:
+    name: Build WASM engine & test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (esbuild for dist build)
+        run: npm install
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build WASM engine (release)
+        working-directory: engine-wasm
+        run: cargo build --release --target wasm32-unknown-unknown
+
+      - name: Place built wasm into the package
+        run: cp engine-wasm/target/wasm32-unknown-unknown/release/esp_engine_wasm.wasm src/engine/esp-xtensa/esp_engine_wasm.wasm
+
+      - name: Build dist bundle (esbuild)
+        run: npm run build
+
+      - name: Prepare boot ROM symlink
+        run: ln -s tests/rom rom
+
+      - name: Run no-server tests
+        run: |
+          set -o pipefail
+          FAILED=0
+          for t in tests/wasm-bench.mjs tests/test-wasm-standalone.mjs tests/test-wasm-worker-init.mjs tests/test-package-smoke.mjs; do
+            echo "--- $t"
+            if ENGINE=wasm node "$t" 2>&1 | tee /tmp/test-out.log; then
+              echo "PASS $t"
+            else
+              echo "FAIL $t"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Tag repo (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Set package version
+        run: npm pkg set version="${{ steps.version.outputs.version }}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: .
+
+  publish-npm:
+    name: Publish to npm
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: package
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies & build dist
+        working-directory: package
+        run: npm install && npm run build
+
+      - name: Publish
+        working-directory: package
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  github-release:
+    name: Create GitHub release
+    needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: package
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build-and-test.outputs.version }}
+          name: v${{ needs.build-and-test.outputs.version }}
+          files: package/src/engine/esp-xtensa/esp_engine_wasm.wasm
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

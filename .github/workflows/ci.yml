@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      compile_server_url:
+        description: "Compile server URL for the worker-test summary job (self-hosted runner must reach it)"
+        required: false
+        default: "http://localhost:5525"
+      run_wifi:
+        description: "Run wifi/web/webserver worker tests (requires the gateway on the runner)"
+        type: boolean
+        default: false
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run lint
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Run tsc --checkJs
+        run: npx tsc --checkJs --noEmit
+
+  build-wasm:
+    name: Build WASM engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build (release, wasm32-unknown-unknown)
+        working-directory: engine-wasm
+        run: cargo build --release --target wasm32-unknown-unknown
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp_engine_wasm
+          path: engine-wasm/target/wasm32-unknown-unknown/release/esp_engine_wasm.wasm
+          if-no-files-found: error
+
+  no-server-tests:
+    name: No-server tests
+    runs-on: ubuntu-latest
+    needs: build-wasm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download built wasm
+        uses: actions/download-artifact@v4
+        with:
+          name: esp_engine_wasm
+          path: src/engine/esp-xtensa/
+      - name: Prepare boot ROM symlink (rom -> tests/rom)
+        run: ln -s tests/rom rom
+      - name: Download MicroPython bin (for test-micropython)
+        run: curl -L -o /tmp/micropython-esp32.bin https://micropython.org/resources/firmware/ESP32_GENERIC-20260824-v1.29.0.bin && ls -lh /tmp/micropython-esp32.bin
+      - name: Run no-server tests
+        run: |
+          set -o pipefail
+          FAILED=0
+          for t in tests/wasm-bench.mjs tests/test-wasm-standalone.mjs tests/test-wasm-worker-init.mjs tests/test-package-smoke.mjs tests/test-micropython.mjs; do
+            echo "--- $t"
+            if ENGINE=wasm node "$t" 2>&1 | tee /tmp/test-out.log; then
+              echo "PASS $t"
+            else
+              echo "FAIL $t"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+  worker-summary:
+    name: Worker test summary
+    runs-on: [self-hosted, linux]
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-wasm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download built wasm
+        uses: actions/download-artifact@v4
+        with:
+          name: esp_engine_wasm
+          path: src/engine/esp-xtensa/
+      - name: Prepare boot ROM symlink (rom -> tests/rom)
+        run: ln -s tests/rom rom
+      - name: Start compile server
+        run: node tests/compile-server.mjs &
+      - name: Wait for compile server
+        run: |
+          for i in $(seq 1 15); do
+            if curl -s -m 2 http://localhost:5525/api/compile/status/0 >/dev/null 2>&1; then
+              echo "Compile server ready"; break
+            fi
+            sleep 2
+          done
+      - name: Start gateway server
+        if: github.event.inputs.run_wifi == 'true'
+        run: |
+          chmod +x ./openhw-studio-gateway/openhw-gw
+          ./openhw-studio-gateway/openhw-gw &
+          sleep 2
+      - name: Run worker suite (skip bt; skip wifi unless requested)
+        run: |
+          SKIP_ARGS="--skip-bt --timeout=600"
+          if [ "${{ github.event.inputs.run_wifi }}" != "true" ]; then
+            SKIP_ARGS="$SKIP_ARGS --skip-wifi"
+          fi
+          ./tests/run-worker-tests.sh $SKIP_ARGS
+      - name: Summarize results
+        run: echo "Worker suite complete — see the step log for PASS/FAIL/SKIP counts."
