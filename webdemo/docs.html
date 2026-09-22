@@ -117,14 +117,15 @@
   </section>
 
   <section class="section" id="mips">
-    <h2>Per-demo speed (MIPS)</h2>
-    <p class="sub">Whole-run cycles / wall-clock to the pass mark, measured host-side on
-      the same engine the page runs. MIPS varies with workload (idle-heavy firmware
-      fast-forwards; CPU-bound loops retire faster) — the console prints the live
-      figure after every run.</p>
+    <h2>Per-demo speed (true MIPS)</h2>
+    <p class="sub">Retired instructions / wall-clock to the pass mark, measured host-side on
+      the same engine the page runs (Rust <span style="font-family:var(--mono)">inst_count</span>
+      summed over both cores — instructions the WASM cores really executed, not the
+      JS step budget). Real firmware, all 53 PASS. The console prints the live figure
+      after every run; expect ~9–26 MIPS depending on workload.</p>
     <div class="table-scroll">
       <table class="matrix" id="mipsTable">
-        <thead><tr><th scope="col">Demo</th><th scope="col">MIPS</th><th scope="col">Cycles</th><th scope="col">Wall</th><th scope="col">Demo</th></tr></thead>
+        <thead><tr><th scope="col">Demo</th><th scope="col">MIPS</th><th scope="col">Retired instr</th><th scope="col">Wall</th><th scope="col">Demo</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -356,7 +357,7 @@ if (mtbody) {
     c1.textContent = (m && m.mips != null) ? String(m.mips) : '—';
     const c2 = document.createElement('td');
     c2.style.fontFamily = 'var(--mono)';
-    c2.textContent = (m && m.cycles != null) ? fmtCycles(m.cycles) : '—';
+    c2.textContent = (m && m.instr != null) ? fmtCycles(m.instr) : '—';
     const c3 = document.createElement('td');
     c3.style.fontFamily = 'var(--mono)';
     c3.textContent = (m && m.wall_s != null) ? m.wall_s + ' s' : 'live';

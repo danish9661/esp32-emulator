@@ -17,6 +17,10 @@ const SAB_WIFI_STATE = 15, SAB_WIFI_TX_FRAMES = 16, SAB_WIFI_TX_BYTES = 17, SAB_
 // Debug SAB layout (u32 indices) — populated when debugSab is provided in init
 const DBG_PC0 = 0, DBG_PC1 = 1, DBG_CYCLES = 2, DBG_NANOS_LO = 3, DBG_NANOS_HI = 4;
 const DBG_TICKS = 5, DBG_ENABLED0 = 6, DBG_ENABLED1 = 7;
+// Retired-instruction totals (Rust inst_count per core). Unlike DBG_CYCLES
+// (the JS step budget + idle fast-forward), these count instructions the
+// WASM cores really executed — the honest numerator for MIPS.
+const DBG_INST0 = 8, DBG_INST1 = 9;
 const DBG_PHYS_START = 16;   // 64 u32s for physical registers (core 0)
 const DBG_SPEC_START = 80;   // 16 u32s for key special registers (12 used)
 const DBG_ALL_SPEC_START = 96;  // 256 u32s for ALL special registers
@@ -136,6 +140,11 @@ function writeSABState() {
     debugData[DBG_PC0] = ctrl[SAB_PC] >>> 0;
     debugData[DBG_PC1] = (chip._wasmCores?.[1]?.PC ?? chip.cores?.[1]?.PC ?? 0) >>> 0;
     debugData[DBG_CYCLES] = chip.cycles >>> 0;
+    // Retired instructions per core (Rust inst_count; 0 when WASM absent).
+    try {
+      debugData[DBG_INST0] = chip._wasmCores?.[0]?.instCount >>> 0 || 0;
+      debugData[DBG_INST1] = chip._wasmCores?.[1]?.instCount >>> 0 || 0;
+    } catch { debugData[DBG_INST0] = 0; debugData[DBG_INST1] = 0; }
     debugData[DBG_NANOS_LO] = ctrl[SAB_NANOS_LO];
     debugData[DBG_NANOS_HI] = ctrl[SAB_NANOS_HI];
     debugData[DBG_TICKS] = (chip.clocks?.cpu?.ticks ?? 0) >>> 0;

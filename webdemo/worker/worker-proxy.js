@@ -556,6 +556,18 @@ var SimulatorWorker = class {
   get pc() {
     return this.ctrl ? Atomics.load(this.ctrl, SAB_SLOT_PC) : -1;
   }
+  // Retired instructions per core (Rust inst_count via debug SAB slots 8/9).
+  // Unlike chip.cycles (JS step budget + idle fast-forward), these count
+  // instructions the WASM cores really executed — the honest MIPS numerator.
+  get inst0() {
+    return this.debug ? this.debug[8] >>> 0 : 0;
+  }
+  get inst1() {
+    return this.debug ? this.debug[9] >>> 0 : 0;
+  }
+  get instTotal() {
+    return this.inst0 + this.inst1 >>> 0;
+  }
   get stuck() {
     return this.ctrl ? Atomics.load(this.ctrl, SAB_SLOT_STUCK) : 0;
   }

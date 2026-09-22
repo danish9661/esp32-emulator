@@ -45,7 +45,7 @@
       <a class="btn" href="./docs.html">Peripheral support table</a>
     </div>
     <div class="stats" id="heroStats">
-      <div class="stat"><div class="v"><em id="statMips">709</em> MIPS</div><div class="l">measured sim throughput</div></div>
+      <div class="stat"><div class="v"><em id="statMips">18.4</em> MIPS</div><div class="l">true retired, GPIO firmware to pass mark</div></div>
       <div class="stat"><div class="v" id="statLiveMips">—</div><div class="l">this browser, last run (live)</div></div>
       <div class="stat"><div class="v">2 &times; LX6</div><div class="l">cores per run, 240 MHz model</div></div>
       <div class="stat"><div class="v" id="statDemoCount">45</div><div class="l">prebuilt firmware images on this page</div></div>
@@ -207,6 +207,10 @@ let board = 'esp32';
 let sim = null, running = false, uartText = '', uartBytes = 0;
 let pollTimer = null, metTimer = null, scriptPromise = null;
 let cyc0 = 0, t0 = 0, lastCyc = 0, lastT = 0;
+// Retired-instruction baseline (Rust inst_count per core, via debug SAB).
+// Unlike chip.cycles (JS step budget + idle fast-forward), inst counts what
+// the WASM cores really executed — the honest numerator for MIPS.
+let inst0 = 0, lastInst = 0;
 
 // Latest finished-run speed, shown both in the metrics strip and the hero.
 let lastRunMips = null;
@@ -525,8 +529,10 @@ async function run() {
     }
 
     cyc0 = sim.debug ? sim.debug[2] : 0;
+    inst0 = sim.instTotal ?? 0;
     t0 = performance.now();
     lastCyc = cyc0; lastT = t0;
+    lastInst = inst0;
 
     pollTimer = setInterval(() => {
       if (!sim) return;
@@ -546,10 +552,14 @@ async function run() {
     metTimer = setInterval(() => {
       if (!sim) return;
       const cyc = sim.debug ? sim.debug[2] : 0;
+      const inst = sim.instTotal ?? 0;
       const now = performance.now();
       const dc = cyc - lastCyc, dt = (now - lastT) / 1000;
+      const di = inst - lastInst;
       lastCyc = cyc; lastT = now;
-      if (dt > 0 && dc >= 0) $('mMips').textContent = (dc / dt / 1e6).toFixed(1);
+      lastInst = inst;
+      // MIPS = retired instructions / wall second (not step budget).
+      if (dt > 0 && di >= 0) $('mMips').textContent = (di / dt / 1e6).toFixed(1);
       try { $('mPc').textContent = fmtHex(sim.pc); } catch {}
       $('mCyc').textContent = fmtBig(cyc);
       $('mUart').textContent = fmtBig(uartBytes);
@@ -594,12 +604,13 @@ async function run() {
     // End-of-run watchdog: stop when the pass mark arrives or after 150 s
     // (interactive echo runs until the user presses Stop or 5 min pass).
     const tEnd = Date.now() + (interactive ? 300000 : 150000);
-    let finalCyc = 0;
+    let finalCyc = 0, finalInst = 0;
     while (running && Date.now() < tEnd) {
       await new Promise((r) => setTimeout(r, 400));
       if (!sim) break;
       sim.pollUart();
       try { finalCyc = sim.debug ? sim.debug[2] : finalCyc; } catch {}
+      try { finalInst = sim.instTotal ?? finalInst; } catch {}
       if (interactive && !echoReady && uartText.includes('ECHO_READY')) {
         echoReady = true;
         setEchoEnabled(true);
@@ -610,9 +621,12 @@ async function run() {
     }
     const wall = (performance.now() - t0) / 1000;
     const total = finalCyc > cyc0 ? finalCyc - cyc0 : (sim && sim.debug ? sim.debug[2] : 0) - cyc0;
-    const mips = wall > 0 ? total / wall / 1e6 : 0;
+    // MIPS from retired instructions, not the step budget.
+    const instTotal = finalInst > inst0 ? finalInst - inst0 : (sim?.instTotal ?? 0) - inst0;
+    const mips = wall > 0 ? Math.max(0, instTotal) / wall / 1e6 : 0;
     if (sim) { try { sim.stop(); } catch {} }
-    print('\n[host] ' + fmtBig(total) + ' cycles in ' + wall.toFixed(1) + ' s = ' + mips.toFixed(1) + ' MIPS\n', 'dim');
+    print('\n[host] ' + fmtBig(instTotal) + ' instr in ' + wall.toFixed(1) + ' s = ' + mips.toFixed(1) + ' MIPS'
+      + ' (' + fmtBig(total) + ' sim cycles)\n', 'dim');
     lastRunMips = mips;
     const heroLive = $('statLiveMips');
     if (heroLive) heroLive.textContent = mips.toFixed(1) + ' MIPS';
@@ -624,7 +638,7 @@ async function run() {
       const b = document.createElement('b');
       b.textContent = 'Verified: ' + vm.mips + ' MIPS';
       demoMips.append(b, document.createTextNode(
-        ' (' + fmtBig(vm.cycles) + ' cycles / ' + vm.wall_s + ' s host-side; live: ' + mips.toFixed(1) + ' MIPS in this browser) — see Docs.'));
+        ' (' + fmtBig(vm.instr) + ' retired instr / ' + vm.wall_s + ' s host-side; live: ' + mips.toFixed(1) + ' MIPS in this browser) — see Docs.'));
     } else {
       demoMips.hidden = true;
     }

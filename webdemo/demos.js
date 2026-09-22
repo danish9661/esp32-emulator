@@ -70,9 +70,10 @@ export const DEMOS = [
   { id: 'buttons', cat: 'system', sketch: 'buttons.ino', name: 'Buttons', file: 'fw-buttons.bin.gz', desc: 'RESET + BOOT pins, 4 boots', script: 'buttons-press', expect: 'BOOT #4' },
 ];
 
-// Measured on this machine (Node, gpio image, run/stop hot loop): ~709 MIPS
-// steady-state. Per-demo page shows a live MIPS readout instead.
-export const MEASURED_MIPS = 709;
+// Host-measured whole-run throughput for the hero stat: retired
+// instructions / wall-clock on the gpio demo (same engine the page runs).
+// True retired MIPS — see webdemo/mips.js for all 53 demos.
+export const MEASURED_MIPS = 18.4;
 
 // Interactive scripts: host actions the demo needs while it runs.
 export async function runDemoScript(kind, sim, log) {

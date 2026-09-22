@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>About — esp32emu</title>
-<meta name="description" content="What esp32emu is, how the WASM Xtensa core and native peripherals work, and how the 709 MIPS figure is measured.">
+<meta name="description" content="What esp32emu is, how the WASM Xtensa core and native peripherals work, and how true retired-instruction MIPS is measured.">
 <meta name="theme-color" content="#101418">
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
 <link rel="manifest" href="./manifest.webmanifest">
@@ -76,21 +76,24 @@
 
   <section class="section">
     <h2>Speed, measured not marketed</h2>
-    <p class="sub">Throughput is reported in MIPS: millions of simulated instructions retired per
-      wall-clock second. Two numbers matter.</p>
+    <p class="sub">Throughput is reported in true MIPS: retired instructions per wall-clock
+      second, counted in the WASM cores themselves — not the simulator's step
+      budget. Two numbers matter.</p>
     <div class="stats">
-      <div class="stat"><div class="v"><em>709</em> MIPS</div><div class="l">steady-state, GPIO firmware, run/stop hot loop</div></div>
-      <div class="stat"><div class="v">~58</div><div class="l">M instr/sec, batched core_run path (lab bench)</div></div>
+      <div class="stat"><div class="v"><em>~18</em> MIPS</div><div class="l">retired, GPIO firmware, whole run to pass mark</div></div>
+      <div class="stat"><div class="v">9–26</div><div class="l">MIPS range across all 53 demos (real firmware)</div></div>
       <div class="stat"><div class="v">live</div><div class="l">every demo run prints its own MIPS line</div></div>
       <div class="stat"><div class="v">0</div><div class="l">JS fallback calls on the peripheral hot path</div></div>
     </div>
-    <div class="callout"><b>Why two numbers?</b> The 709 MIPS figure is the whole simulator
-      (both cores, idle fast-forward, host loop) on the demo firmware. The ~58 M instr/sec
-      figure is the core engine alone on a CPU-bound loop. Idle or delay-heavy firmware is
-      dominated by fast-forward, not instruction throughput — which is exactly what real
-      silicon does too.</div>
-    <pre class="code"><span class="c"># reproduce the headline number (Node, repo root)</span>
-node tests/bench-profile.mjs /tmp/fwlocal/gpio/out/sketch.ino.merged.bin
+    <div class="callout"><b>Why not 3000?</b> An older build divided the JS step budget
+      (<span style="font-family:var(--mono)">chip.cycles</span>: +512 per batched step plus
+      idle fast-forward) by wall-clock and printed ~3000 MIPS. That counter is virtual
+      time, not executed instructions — one step can retire far fewer than 512, and idle
+      fast-forward adds cycles with zero instructions. The honest numerator is Rust
+      <span style="font-family:var(--mono)">inst_count</span> (both cores, via the debug SAB):
+      ~11M retired in ~0.6s on GPIO ≈ 18 MIPS. The per-demo table in Docs lists all 53.</div>
+    <pre class="code"><span class="c"># reproduce a true-MIPS number (Node, repo root; needs :5525 for images)</span>
+node /tmp/fwex5/measure-inst.mjs gpio
 <span class="c"># per-demo pass/fail (needs the compile server on :5525)</span>
 node tests/test-worker-gpio.mjs   <span class="c"># … one file per peripheral</span></pre>
   </section>

@@ -34,6 +34,11 @@ const CORE_OFF_PENDING_INT  = 2540;  // pending_interrupts: u32
 const CORE_OFF_OPCODE_SEG   = 2544;  // opcode_segment: u32
 const CORE_OFF_PC           = 2584;  // pc: u32
 const CORE_OFF_NEXT_PC      = 2588;  // next_pc: u32
+const _CORE_OFF_CCMP0       = 2592;  // ccompare0_event: u32
+const _CORE_OFF_CCMP1       = 2596;  // ccompare1_event: u32
+const _CORE_OFF_CCMP2       = 2600;  // ccompare2_event: u32
+const _CORE_OFF_DEBUG_OP    = 2604;  // debug_opcode: u32
+const CORE_OFF_INST_COUNT   = 2608;  // inst_count: u32 (retired instructions)
 
 const MEM_FAULT_INFO = 72; // index in special_registers
 const NATIVE_HANDLER_FLAG = 0x80000000;
@@ -814,6 +819,7 @@ export class WasmCore {
     this._specRegs   = new Uint32Array(sab, baseOff + CORE_OFF_SPECIAL_REGS, 256);
     this._pcView          = new Uint32Array(sab, baseOff + CORE_OFF_PC, 1);
     this._nextPcView      = new Uint32Array(sab, baseOff + CORE_OFF_NEXT_PC, 1);
+    this._instCountView   = new Uint32Array(sab, baseOff + CORE_OFF_INST_COUNT, 1);
     this._enabledView     = new Uint32Array(sab, baseOff + CORE_OFF_ENABLED, 1);
     this._idleView        = new Uint32Array(sab, baseOff + CORE_OFF_IDLE, 1);
     this._lightSleepView  = new Uint32Array(sab, baseOff + CORE_OFF_LIGHT_SLEEP, 1);
@@ -847,6 +853,10 @@ export class WasmCore {
   set PC(v) { this._pcView[0] = v; }
   get nextPC() { return this._nextPcView[0]; }
   set nextPC(v) { this._nextPcView[0] = v; }
+  // Retired-instruction counter (Rust CoreState.inst_count, +1 per
+  // run_instruction). Unlike chip.cycles (JS step budget + idle
+  // fast-forward), this counts instructions the WASM cores really executed.
+  get instCount() { return this._instCountView[0] >>> 0; }
 
   // Windowed AR register access (matches Rust CoreState::ar())
   AR(reg) {

@@ -4050,6 +4050,7 @@ var CORE_OFF_PENDING_INT = 2540;
 var CORE_OFF_OPCODE_SEG = 2544;
 var CORE_OFF_PC = 2584;
 var CORE_OFF_NEXT_PC = 2588;
+var CORE_OFF_INST_COUNT = 2608;
 var MEM_FAULT_INFO = 72;
 var NATIVE_HANDLER_FLAG2 = 2147483648;
 var HID_SHA = 0;
@@ -4759,6 +4760,7 @@ var WasmCore = class {
     this._specRegs = new Uint32Array(sab, baseOff + CORE_OFF_SPECIAL_REGS, 256);
     this._pcView = new Uint32Array(sab, baseOff + CORE_OFF_PC, 1);
     this._nextPcView = new Uint32Array(sab, baseOff + CORE_OFF_NEXT_PC, 1);
+    this._instCountView = new Uint32Array(sab, baseOff + CORE_OFF_INST_COUNT, 1);
     this._enabledView = new Uint32Array(sab, baseOff + CORE_OFF_ENABLED, 1);
     this._idleView = new Uint32Array(sab, baseOff + CORE_OFF_IDLE, 1);
     this._lightSleepView = new Uint32Array(sab, baseOff + CORE_OFF_LIGHT_SLEEP, 1);
@@ -4822,6 +4824,12 @@ var WasmCore = class {
   }
   set nextPC(v) {
     this._nextPcView[0] = v;
+  }
+  // Retired-instruction counter (Rust CoreState.inst_count, +1 per
+  // run_instruction). Unlike chip.cycles (JS step budget + idle
+  // fast-forward), this counts instructions the WASM cores really executed.
+  get instCount() {
+    return this._instCountView[0] >>> 0;
   }
   // Windowed AR register access (matches Rust CoreState::ar())
   AR(reg) {
@@ -5675,6 +5683,8 @@ var DBG_NANOS_HI = 4;
 var DBG_TICKS = 5;
 var DBG_ENABLED0 = 6;
 var DBG_ENABLED1 = 7;
+var DBG_INST0 = 8;
+var DBG_INST1 = 9;
 var DBG_PHYS_START = 16;
 var DBG_SPEC_START = 80;
 var DBG_ALL_SPEC_START = 96;
@@ -5811,6 +5821,13 @@ function writeSABState() {
     debugData[DBG_PC0] = ctrl[SAB_PC] >>> 0;
     debugData[DBG_PC1] = (chip._wasmCores?.[1]?.PC ?? chip.cores?.[1]?.PC ?? 0) >>> 0;
     debugData[DBG_CYCLES] = chip.cycles >>> 0;
+    try {
+      debugData[DBG_INST0] = chip._wasmCores?.[0]?.instCount >>> 0 || 0;
+      debugData[DBG_INST1] = chip._wasmCores?.[1]?.instCount >>> 0 || 0;
+    } catch {
+      debugData[DBG_INST0] = 0;
+      debugData[DBG_INST1] = 0;
+    }
     debugData[DBG_NANOS_LO] = ctrl[SAB_NANOS_LO];
     debugData[DBG_NANOS_HI] = ctrl[SAB_NANOS_HI];
     debugData[DBG_TICKS] = (chip.clocks?.cpu?.ticks ?? 0) >>> 0;
