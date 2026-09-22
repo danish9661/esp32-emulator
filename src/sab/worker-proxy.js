@@ -332,7 +332,7 @@ class SimulatorWorker {
    * PUSH (data4-7 + deliver).
    * @param {number} id - 11-bit standard or 29-bit extended identifier
    * @param {number[]|Uint8Array} data - up to 8 payload bytes
-   * @param {object} [opts] - { ext: boolean, rtr: boolean }
+   * @param {{ext?: boolean, rtr?: boolean}} [opts] - { ext: boolean, rtr: boolean }
    */
   async sendTwaiFrame(id, data, opts = {}) {
     this._checkReady();
