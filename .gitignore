@@ -69,3 +69,6 @@
 # Build tooling (webdemo bundler + node:crypto MD5 shim for the browser build)
 !/tools/
 !/tools/*.mjs
+# Demo sketch sources shown by the webdemo "view sketch" modal
+!/webdemo/sketches/
+!/webdemo/sketches/*.ino

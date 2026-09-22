@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Docs — esp32emu</title>
 <meta name="description" content="esp32emu documentation: peripheral and module support matrix, demo catalogue, build and test instructions.">
+<meta name="theme-color" content="#101418">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="manifest" href="./manifest.webmanifest">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="esp32emu">
+<meta property="og:title" content="Docs — esp32emu">
+<meta property="og:description" content="ESP32 vs ESP32-CAM peripheral support matrix, per-demo MIPS table, build and test instructions.">
+<meta property="og:url" content="https://danish9661.github.io/esp32-emulator/docs.html">
+<meta name="twitter:card" content="summary">
 <link rel="stylesheet" href="./styles.css">
 <script src="./coi-serviceworker.js"></script>
 </head>
@@ -107,6 +116,20 @@
     </div>
   </section>
 
+  <section class="section" id="mips">
+    <h2>Per-demo speed (MIPS)</h2>
+    <p class="sub">Whole-run cycles / wall-clock to the pass mark, measured host-side on
+      the same engine the page runs. MIPS varies with workload (idle-heavy firmware
+      fast-forwards; CPU-bound loops retire faster) — the console prints the live
+      figure after every run.</p>
+    <div class="table-scroll">
+      <table class="matrix" id="mipsTable">
+        <thead><tr><th scope="col">Demo</th><th scope="col">MIPS</th><th scope="col">Cycles</th><th scope="col">Wall</th><th scope="col">Demo</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="section" id="refs">
     <h2>References</h2>
     <p class="sub">Prior art this project learns from — JS-first chip simulation with real
@@ -173,6 +196,8 @@ node tests/test-worker-gpio.mjs
 </footer>
 
 <script type="module">
+import { DEMO_MIPS } from './mips.js';
+import { DEMOS } from './demos.js';
 const YES = '<span class="pill yes">native</span>';
 const PART = '<span class="pill partial">partial</span>';
 const NO = '<span class="pill no">not emulated</span>';
@@ -209,7 +234,7 @@ const rows = [
   ['Flash R/W', YES, YES, 'Raw erase/write/read', 'Wear model', 'flash'],
   ['Partition table', YES, YES, 'OTA table enumerate via API', '—', 'part'],
   ['SPIFFS', YES, YES, 'Mount + file write/read', 'Wear model', 'spiffs'],
-  ['SDMMC host', YES, YES, 'Host init/deinit', 'High-speed modes', 'sdmmc'],
+  ['SDMMC', YES, YES, 'Host init/deinit', 'High-speed modes', 'sdmmc'],
   ['SD card (virtual)', YES, YES, 'FAT mount, 4 KB file R/W + ls', 'SPI-mode SD', 'sdcard'],
   ['eMMC (virtual)', YES, YES, 'MMC probe + EXT_CSD + sector R/W', 'HS200 timing', 'emmc'],
   ['SDIO slave', YES, YES, 'Init/start, recv timeout honest', 'Host-driven transfers', 'sdio-slave'],
@@ -224,14 +249,12 @@ const rows = [
   ['OTA update', YES, YES, 'esp_ota_begin/write/end over OTA slots', 'Rollback/bootloader OTA switch detail', 'ota'],
   ['OTA slots', YES, YES, 'Running/next partition cycle', '—', 'ota-multi'],
   ['Default partitions', YES, YES, 'Factory table dump via flash read', '—', 'default-pt'],
-  ['Ethernet regs', YES, YES, 'EMAC register readback', 'RMII timing', 'emac'],
+  ['Ethernet reg', YES, YES, 'EMAC register readback', 'RMII timing', 'emac'],
   ['Ethernet MAC', YES, YES, 'LAN8720 PHY ID, 64 B DMA loopback', 'RMII timing', 'emac-loopback'],
   ['Camera (OV2640)', NO, YES, 'SCCB + DVP frame into PSRAM framebuffer', 'ESP32 dev board has no camera (— by hardware)', 'camera'],
   ['ESP32-CAM module', NO, YES, 'Board preset: 4 MB PSRAM + camera frame', 'Dev-module pinout differs (use camera demo)', 'esp32-cam'],
   ['Deep sleep + RTC mem', YES, YES, '3 boots, RTC_DATA_ATTR survives, wake causes', 'ULP wake stub', 'deepsleep'],
   ['Dev buttons', YES, YES, 'RESET tap + BOOT hold, BOOT #1→#4', '—', 'buttons'],
-  ['SD / SDMMC', YES, YES, 'Virtual card, FAT R/W (suite-tested)', 'Covered above by SD card + eMMC demos', null],
-  ['WiFi station + AP', PART, PART, 'TX/RX bridge + gateway path (suite-tested)', 'AP/data path needs the network gateway', 'wifi'],
 ];
 const tbody = document.querySelector('#supportTable tbody');
 if (tbody && typeof document.createElement === 'function') for (const [name, a, b, added, left, demo] of rows) {
@@ -286,8 +309,11 @@ const demos = [
   ['ULP wake', 'ULP wake from deep sleep', 'RESULT=PASS', 'none'],
   ['Flash R/W', 'Raw erase/write/read', 'RESULT=PASS', 'none'],
   ['Partitions', 'OTA table enumerate', 'ALL TESTS PASSED', 'custom partition CSV'],
+  ['OTA update', 'OTA begin/write/end cycle', 'RESULT=PASS', 'OTA partition preset'],
+  ['OTA slots', 'Running/next partition cycle', 'RESULT=PASS', 'OTA-minimal partition preset'],
+  ['Default part.', 'Factory partition table dump', 'ALL TESTS PASSED', 'none'],
   ['SPIFFS', 'Mount + file write/read', 'RESULT=PASS', 'none'],
-  ['SDMMC host', 'Host init/deinit', 'RESULT=PASS', 'none'],
+  ['SDMMC', 'SD host init/deinit', 'RESULT=PASS', 'none'],
   ['SD card', 'FAT mount, 4 KB file R/W', 'RESULT=PASS', '16 MB sdCard image'],
   ['eMMC', 'MMC probe + sector R/W', 'RESULT=PASS', '16 MB MMC image'],
   ['SDIO slave', 'Slave init/start, recv timeout', 'RESULT=PASS', 'none'],
@@ -298,12 +324,13 @@ const demos = [
   ['BT controller', 'Controller init', 'RESULT=PASS', 'BLE shim on'],
   ['BLE init', 'Bluedroid init handshake', 'RESULT=PASS', 'BLE shim on'],
   ['WiFi scan', 'Station scan finds TEST-AP', 'ALL TESTS PASSED', 'virtual AP, no gateway'],
-  ['Ethernet regs', 'EMAC register readback', 'RESULT=PASS', 'none'],
+  ['Soft-AP', 'AP init, IP, MAC, station count', 'RESULT=PASS', 'offline, no gateway'],
+  ['Ethernet reg', 'EMAC register readback', 'RESULT=PASS', 'none'],
   ['Ethernet MAC', 'PHY ID + 64 B DMA loopback', 'LOOPBACK=PASS', 'none'],
   ['Camera', 'OV2640 frame 38400 B', 'CAM_DATA=PASS', 'pulses VSYNC until frame lands'],
   ['ESP32-CAM', 'Module preset: PSRAM + camera', 'CAM_DATA=PASS', 'board preset + VSYNC pulses'],
   ['Deep sleep', '3 boots, RTC memory survives', 'RESULT=PASS', 'none'],
-  ['Dev buttons', 'RESET tap + BOOT hold, BOOT #1→#4', 'BOOT #4', 'presses RESET/BOOT buttons'],
+  ['Buttons', 'RESET tap + BOOT hold, BOOT #1→#4', 'BOOT #4', 'presses RESET/BOOT buttons'],
 ];
 const dtbody = document.querySelector('#demoTable tbody');
 for (const [name, ex, mark, assist] of demos) {
@@ -315,6 +342,37 @@ for (const [name, ex, mark, assist] of demos) {
     tr.append(td);
   }
   dtbody.append(tr);
+}
+
+// Per-demo MIPS table (from mips.js, keyed by demo id — no name guessing).
+const mtbody = document.querySelector('#mipsTable tbody');
+if (mtbody) {
+  for (const d of DEMOS) {
+    const m = DEMO_MIPS[d.id];
+    const tr = document.createElement('tr');
+    const c0 = document.createElement('th'); c0.scope = 'row'; c0.textContent = d.name;
+    const c1 = document.createElement('td');
+    c1.style.fontFamily = 'var(--mono)';
+    c1.textContent = (m && m.mips != null) ? String(m.mips) : '—';
+    const c2 = document.createElement('td');
+    c2.style.fontFamily = 'var(--mono)';
+    c2.textContent = (m && m.cycles != null) ? fmtCycles(m.cycles) : '—';
+    const c3 = document.createElement('td');
+    c3.style.fontFamily = 'var(--mono)';
+    c3.textContent = (m && m.wall_s != null) ? m.wall_s + ' s' : 'live';
+    const c4 = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = './index.html#demo-' + d.id;
+    link.textContent = 'Try it';
+    c4.append(link);
+    tr.append(c0, c1, c2, c3, c4);
+    mtbody.append(tr);
+  }
+}
+function fmtCycles(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  return String(n);
 }
 </script>
 </body>

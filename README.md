@@ -2,12 +2,20 @@
 
 [![npm version](https://img.shields.io/npm/v/esp32emu)](https://www.npmjs.com/package/esp32emu)
 [![license](https://img.shields.io/npm/l/esp32emu)](LICENSE)
-[![CI](https://github.com/danish9661/esp32-emu/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/esp32-emu/actions)
+[![CI](https://github.com/danish9661/esp32-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/esp32-emulator/actions)
 
 A fast ESP32 (Xtensa LX6, dual-core) emulator. The CPU is executed by a
 Rust-compiled WASM engine; peripherals run natively in Rust (inside the same
 WASM module) with JavaScript hosts for the remaining subsystems (WiFi analog,
 clock source, loader FFI glue).
+
+## Try it in your browser
+
+No install: **[danish9661.github.io/esp32-emulator](https://danish9661.github.io/esp32-emulator)**
+boots the real boot ROM plus 53 prebuilt Arduino firmware images (GPIO, UART
+echo, SPI, I2C, timers, PWM, RMT, I2S, TWAI, ADC, touch, MCPWM, flash/OTA,
+SD, WiFi scan, Soft-AP, camera, deep sleep…) on the same WASM engine, with a
+live UART terminal and per-run MIPS readout. Sources live in `webdemo/`.
 
 ## Architecture
 

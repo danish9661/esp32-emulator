@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>esp32emu — ESP32 in your browser</title>
 <meta name="description" content="Run real ESP32 firmware in your browser. Pick a peripheral demo, watch the UART log stream out of a live dual-core Xtensa simulation.">
+<meta name="theme-color" content="#101418">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="manifest" href="./manifest.webmanifest">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="esp32emu">
+<meta property="og:title" content="esp32emu — ESP32 in your browser">
+<meta property="og:description" content="53 prebuilt Arduino firmware images on a WASM dual-core Xtensa core. Live UART terminal, per-run MIPS readout, no install.">
+<meta property="og:url" content="https://danish9661.github.io/esp32-emulator/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="esp32emu — ESP32 in your browser">
+<meta name="twitter:description" content="Real ESP32 firmware, live in your browser: UART terminal + MIPS per run.">
 <link rel="stylesheet" href="./styles.css">
 <script src="./coi-serviceworker.js"></script>
 </head>
@@ -48,8 +59,19 @@
       Every run ends with its own MIPS line, and the hero keeps the latest figure.</p>
     <div class="console-grid">
       <div class="panel">
-        <h3>Firmware</h3>
+        <h3>Firmware <span class="count" id="demoCount"></span></h3>
+        <div class="field" style="margin-bottom:10px">
+          <label for="demoFilter">Filter demos</label>
+          <input type="text" id="demoFilter" placeholder="e.g. wifi, timer, sd…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field" style="margin-bottom:10px">
+          <label for="demoCat">Category</label>
+          <select id="demoCat"></select>
+        </div>
         <div class="demo-list" id="demoList" role="group" aria-label="Firmware demos"></div>
+        <div class="demo-actions">
+          <button class="btn" id="btnSketch" type="button" disabled>View sketch</button>
+        </div>
         <h3 style="margin-top:16px">Module</h3>
         <div class="board-row" role="group" aria-label="Module">
           <button class="btn" id="boardEsp32" type="button" aria-pressed="true">ESP32</button>
@@ -96,6 +118,10 @@
         <div class="screen-bar">
           <span class="lights"><i id="lightRun"></i><i id="lightUart"></i><i id="lightPass"></i></span>
           <span id="screenTitle">uart0 &middot; 115200 8-N-1</span>
+          <span class="term-actions">
+            <button class="mini-btn" id="btnCopyLog" type="button" disabled>Copy log</button>
+            <button class="mini-btn" id="btnDlLog" type="button" disabled>Download</button>
+          </span>
           <span id="statusLine">idle</span>
         </div>
         <pre id="term" aria-live="polite"><span class="dim">Press run. The boot ROM banner (ets ...) appears first, then the demo log.</span>
@@ -109,7 +135,21 @@
       </div>
     </div>
     <div class="callout" id="verdict" hidden></div>
+    <div class="demo-mips" id="demoMips" hidden></div>
   </section>
+
+  <div class="modal-backdrop" id="sketchModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sketchTitle">
+      <div class="modal-bar">
+        <b id="sketchTitle">Sketch</b>
+        <span>
+          <button class="mini-btn" id="btnCopySketch" type="button">Copy</button>
+          <button class="mini-btn" id="btnCloseSketch" type="button">Close</button>
+        </span>
+      </div>
+      <pre id="sketchBody"><span class="dim">Loading…</span></pre>
+    </div>
+  </div>
 </main>
 
 <footer>
@@ -120,14 +160,20 @@
 </footer>
 
 <script type="module">
-import { DEMOS, MEASURED_MIPS, runDemoScript } from './demos.js';
+import { DEMOS, DEMO_CATS, MEASURED_MIPS, runDemoScript } from './demos.js';
+import { DEMO_MIPS } from './mips.js';
 import { SimulatorWorker } from './worker/worker-proxy.js';
 
 const $ = (id) => document.getElementById(id);
 const term = $('term'), demoList = $('demoList'), statusLine = $('statusLine');
 const btnRun = $('btnRun'), btnStop = $('btnStop'), ctaRun = $('ctaRun'), verdict = $('verdict');
+const demoMips = $('demoMips');
 const echoRow = $('echoRow'), echoInput = $('echoInput'), btnSend = $('btnSend');
 const wifiSsid = $('wifiSsid'), partPreset = $('partPreset'), wifiStats = $('wifiStats');
+const demoFilter = $('demoFilter'), demoCat = $('demoCat'), demoCount = $('demoCount');
+const btnSketch = $('btnSketch'), sketchModal = $('sketchModal');
+const sketchTitle = $('sketchTitle'), sketchBody = $('sketchBody');
+const btnCopyLog = $('btnCopyLog'), btnDlLog = $('btnDlLog');
 
 // WiFi role selector (station + AP): mirrors the gateway-backed station/AP
 // paths — STA scans/joins, AP serves its beacon, STA+AP does both.
@@ -224,10 +270,17 @@ function buildList() {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'demo-item';
+    b.dataset.demoId = d.id;
     b.setAttribute('aria-pressed', d === selected ? 'true' : 'false');
     const t = document.createElement('span'); t.className = 't'; t.textContent = d.name;
     const ds = document.createElement('span'); ds.className = 'd'; ds.textContent = d.desc;
     b.append(t, ds);
+    const m = DEMO_MIPS[d.id];
+    if (m && m.mips != null) {
+      const ms = document.createElement('span'); ms.className = 'mips';
+      ms.textContent = m.mips + ' MIPS verified';
+      b.append(ms);
+    }
     b.addEventListener('click', () => {
       if (running) return;
       selected = d;
@@ -236,9 +289,12 @@ function buildList() {
       if (d.board) setBoard(d.board);
       for (const el of demoList.children) el.setAttribute('aria-pressed', 'false');
       b.setAttribute('aria-pressed', 'true');
+      btnSketch.disabled = !d.sketch;
     });
     demoList.appendChild(b);
   }
+  btnSketch.disabled = !selected.sketch;
+  refreshList();
 }
 
 function setBoard(next) {
@@ -249,6 +305,39 @@ function setBoard(next) {
 
 $('boardEsp32').addEventListener('click', () => { if (!running) setBoard('esp32'); });
 $('boardCam').addEventListener('click', () => { if (!running) setBoard('esp32-cam'); });
+
+// Demo filter + category (53 demos are unfindable without them).
+function visibleDemos() {
+  const q = (demoFilter.value || '').trim().toLowerCase();
+  const cat = demoCat.value || 'all';
+  return DEMOS.filter((d) => {
+    if (cat !== 'all' && d.cat !== cat) return false;
+    if (!q) return true;
+    return (d.name + ' ' + d.desc + ' ' + d.id).toLowerCase().includes(q);
+  });
+}
+function refreshList() {
+  const vis = new Set(visibleDemos().map((d) => d.id));
+  let shown = 0;
+  for (const el of demoList.children) {
+    const show = vis.has(el.dataset.demoId);
+    el.hidden = !show;
+    if (show) shown++;
+  }
+  demoCount.textContent = shown + ' / ' + DEMOS.length;
+}
+demoFilter.addEventListener('input', refreshList);
+demoCat.addEventListener('change', refreshList);
+(function initCats() {
+  const opt = document.createElement('option');
+  opt.value = 'all'; opt.textContent = 'All categories';
+  demoCat.append(opt);
+  for (const [id, label] of Object.entries(DEMO_CATS)) {
+    const o = document.createElement('option');
+    o.value = id; o.textContent = label;
+    demoCat.append(o);
+  }
+})();
 
 async function loadImage(demo) {
   const res = await fetch('./firmware/' + demo.file);
@@ -289,6 +378,62 @@ async function ensureStopped() {
   setStatus('idle', false);
 }
 
+// Copy / download the UART log (users take results with them).
+function logText() { return uartText; }
+function updateLogButtons() {
+  const has = uartText.length > 0;
+  btnCopyLog.disabled = !has;
+  btnDlLog.disabled = !has;
+}
+btnCopyLog.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(logText());
+    btnCopyLog.textContent = 'Copied';
+    setTimeout(() => { btnCopyLog.textContent = 'Copy log'; }, 1500);
+  } catch {
+    btnCopyLog.textContent = 'Failed';
+    setTimeout(() => { btnCopyLog.textContent = 'Copy log'; }, 1500);
+  }
+});
+btnDlLog.addEventListener('click', () => {
+  const blob = new Blob([logText()], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (selected ? selected.id : 'demo') + '-uart.log';
+  document.body.append(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+});
+
+// View sketch: proves the firmware is real (Arduino source per demo).
+async function openSketch() {
+  if (!selected || !selected.sketch) return;
+  sketchModal.hidden = false;
+  sketchTitle.textContent = selected.name + ' — ' + selected.sketch;
+  sketchBody.textContent = 'Loading…';
+  try {
+    const res = await fetch('./sketches/' + selected.sketch);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    sketchBody.textContent = await res.text();
+  } catch (e) {
+    sketchBody.textContent = 'Could not load sketch: ' + (e && e.message ? e.message : e);
+  }
+}
+function closeSketch() { sketchModal.hidden = true; }
+btnSketch.addEventListener('click', openSketch);
+$('btnCloseSketch').addEventListener('click', closeSketch);
+$('btnCopySketch').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(sketchBody.textContent);
+    $('btnCopySketch').textContent = 'Copied';
+    setTimeout(() => { $('btnCopySketch').textContent = 'Copy'; }, 1500);
+  } catch {}
+});
+sketchModal.addEventListener('click', (e) => { if (e.target === sketchModal) closeSketch(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !sketchModal.hidden) closeSketch();
+});
+
 function verdictLine(demo, text) {
   verdict.hidden = false;
   if (demo.interactive === 'uart-echo') {
@@ -319,6 +464,8 @@ async function run() {
   $('lightPass').classList.remove('on');
   term.innerHTML = '';
   uartText = ''; uartBytes = 0;
+  updateLogButtons();
+  demoMips.hidden = true;
   setStatus('loading ' + selected.file + ' …', true);
   print('$ load ' + selected.file + '  [' + selected.name + ']\n', 'dim');
   $('mMips').textContent = '…';
@@ -337,6 +484,7 @@ async function run() {
     sim._onUART = (b) => {
       uartText += String.fromCharCode(b);
       uartBytes++;
+      updateLogButtons();
     };
     sim._onError = (e) => print('\n[host] ' + (e && e.message ? e.message : e) + '\n', 'err');
     setStatus('booting…', true);
@@ -468,6 +616,18 @@ async function run() {
     lastRunMips = mips;
     const heroLive = $('statLiveMips');
     if (heroLive) heroLive.textContent = mips.toFixed(1) + ' MIPS';
+    // Verified (host-measured) MIPS for this demo, next to the live figure.
+    const vm = DEMO_MIPS[selected.id];
+    if (vm && vm.mips != null) {
+      demoMips.hidden = false;
+      demoMips.innerHTML = '';
+      const b = document.createElement('b');
+      b.textContent = 'Verified: ' + vm.mips + ' MIPS';
+      demoMips.append(b, document.createTextNode(
+        ' (' + fmtBig(vm.cycles) + ' cycles / ' + vm.wall_s + ' s host-side; live: ' + mips.toFixed(1) + ' MIPS in this browser) — see Docs.'));
+    } else {
+      demoMips.hidden = true;
+    }
     verdictLine(selected, uartText);
   } catch (e) {
     print('\n[host] failed: ' + (e && e.message ? e.message : e) + '\n', 'err');

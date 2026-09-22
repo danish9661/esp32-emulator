@@ -47,12 +47,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/danish9661/esp32-emu.git"
+    "url": "git+https://github.com/danish9661/esp32-emulator.git"
   },
   "bugs": {
-    "url": "https://github.com/danish9661/esp32-emu/issues"
+    "url": "https://github.com/danish9661/esp32-emulator/issues"
   },
-  "homepage": "https://github.com/danish9661/esp32-emu#readme",
+  "homepage": "https://github.com/danish9661/esp32-emulator#readme",
   "devDependencies": {
     "@types/node": "^26.4.0",
     "axios": "^1.19.0",

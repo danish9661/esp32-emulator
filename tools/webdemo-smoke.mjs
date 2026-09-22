@@ -49,10 +49,25 @@ try {
     if (page === 'index.html') {
       const n = await pg.evaluate('document.querySelectorAll(".demo-item").length');
       if (n < 53) fails.push('demo count ' + n);
+      // New UI: filter box, category select, sketch modal wiring.
+      const ui = await pg.evaluate('JSON.stringify({filter: !!document.getElementById("demoFilter"), cat: !!document.getElementById("demoCat"), sketch: !!document.getElementById("btnSketch"), copy: !!document.getElementById("btnCopyLog"), dl: !!document.getElementById("btnDlLog"), mips: !!document.getElementById("demoMips")})');
+      const u = JSON.parse(ui);
+      for (const [k, v] of Object.entries(u)) {
+        if (!v) fails.push('missing #' + k);
+      }
+      // Filter actually filters: type "wifi", expect fewer visible items.
+      await pg.fill('#demoFilter', 'wifi');
+      await pg.waitForTimeout(300);
+      const vis = await pg.evaluate('[...document.querySelectorAll(".demo-item")].filter((el) => !el.hidden).length');
+      if (!(vis >= 1 && vis < n)) fails.push('filter broken (visible=' + vis + ' of ' + n + ')');
+      await pg.fill('#demoFilter', '');
+      await pg.waitForTimeout(300);
     }
     if (page === 'docs.html') {
       const m = await pg.evaluate('document.querySelectorAll("#supportTable tbody tr").length');
       if (m < 53) fails.push('matrix rows ' + m);
+      const mt = await pg.evaluate('document.querySelectorAll("#mipsTable tbody tr").length');
+      if (mt < 53) fails.push('mips rows ' + mt);
     }
     if (errs.length) fails.push(page + ': ' + errs.join(' | '));
     await pg.close();
