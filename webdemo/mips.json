@@ -1,0 +1,373 @@
+{
+ "gpio": {
+  "mips": 18.4,
+  "instr": 11062817,
+  "cycles": 1959264256,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "uart": {
+  "mips": 16.3,
+  "instr": 9799394,
+  "cycles": 1384120320,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "timer": {
+  "mips": 17.5,
+  "instr": 10528756,
+  "cycles": 1728577536,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "wifi": {
+  "mips": 22.3,
+  "instr": 60448691,
+  "cycles": 2348810240,
+  "wall_s": 2.7,
+  "pass": true
+ },
+ "uart-echo": {
+  "mips": 17,
+  "instr": 15290429,
+  "cycles": 2966945792,
+  "wall_s": 0.9,
+  "pass": true
+ },
+ "spi": {
+  "mips": 22.1,
+  "instr": 6634603,
+  "cycles": 5242880,
+  "wall_s": 0.3,
+  "pass": true
+ },
+ "spi-slave": {
+  "mips": 19.1,
+  "instr": 11487931,
+  "cycles": 2077229056,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "i2c": {
+  "mips": 19.1,
+  "instr": 11494836,
+  "cycles": 2059927552,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "i2c-slave": {
+  "mips": 16.6,
+  "instr": 24978475,
+  "cycles": 3085959168,
+  "wall_s": 1.5,
+  "pass": true
+ },
+ "rtc-i2c": {
+  "mips": 17.5,
+  "instr": 10530653,
+  "cycles": 1735917568,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "timer-freq": {
+  "mips": 16,
+  "instr": 28935489,
+  "cycles": 1589641216,
+  "wall_s": 1.8,
+  "pass": true
+ },
+ "rtc-wdt": {
+  "mips": 18.4,
+  "instr": 11075138,
+  "cycles": 1981808640,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "twdt": {
+  "mips": 18.1,
+  "instr": 10894493,
+  "cycles": 1869086720,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "pwm": {
+  "mips": 18.3,
+  "instr": 10982571,
+  "cycles": 1876426752,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "mcpwm": {
+  "mips": 15.7,
+  "instr": 37572895,
+  "cycles": 3653763072,
+  "wall_s": 2.4,
+  "pass": true
+ },
+ "rmt": {
+  "mips": 18.2,
+  "instr": 10938844,
+  "cycles": 1867513856,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "i2s": {
+  "mips": 18.4,
+  "instr": 11083239,
+  "cycles": 1915748352,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "i2s-rx": {
+  "mips": 18.2,
+  "instr": 10942164,
+  "cycles": 1849163776,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "twai": {
+  "mips": 18.6,
+  "instr": 11166569,
+  "cycles": 1994391552,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "twai-normal": {
+  "mips": 18.6,
+  "instr": 11135951,
+  "cycles": 1981284352,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "analog": {
+  "mips": 18.4,
+  "instr": 11074197,
+  "cycles": 1956642816,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "adc-cont": {
+  "mips": 18.6,
+  "instr": 11137079,
+  "cycles": 1915224064,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "tsens": {
+  "mips": 17.6,
+  "instr": 10562537,
+  "cycles": 1676148736,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "touch-dac": {
+  "mips": 17.2,
+  "instr": 25873875,
+  "cycles": 1496842240,
+  "wall_s": 1.5,
+  "pass": true
+ },
+ "multicore": {
+  "mips": 19.6,
+  "instr": 11798237,
+  "cycles": 1052246016,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "interrupt-stress": {
+  "mips": 17.3,
+  "instr": 10370261,
+  "cycles": 1477443584,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "pcnt": {
+  "mips": 16,
+  "instr": 28792367,
+  "cycles": 348127232,
+  "wall_s": 1.8,
+  "pass": true
+ },
+ "bod": {
+  "mips": 26,
+  "instr": 475553936,
+  "cycles": 2564292608,
+  "wall_s": 18.3,
+  "pass": true
+ },
+ "ulp": {
+  "mips": 18.3,
+  "instr": 10955973,
+  "cycles": 1938292736,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "ulp-wake": {
+  "mips": 14.1,
+  "instr": 16959542,
+  "cycles": 2659188736,
+  "wall_s": 1.2,
+  "pass": true
+ },
+ "flash": {
+  "mips": 21.2,
+  "instr": 12735823,
+  "cycles": 942145536,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "part": {
+  "mips": 17.5,
+  "instr": 10520752,
+  "cycles": 1712848896,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "ota": {
+  "mips": 21.5,
+  "instr": 465765707,
+  "cycles": 2188902400,
+  "wall_s": 21.6,
+  "pass": true
+ },
+ "ota-multi": {
+  "mips": 22.2,
+  "instr": 6674100,
+  "cycles": 5242880,
+  "wall_s": 0.3,
+  "pass": true
+ },
+ "default-pt": {
+  "mips": 17.8,
+  "instr": 10669959,
+  "cycles": 1744306176,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "spiffs": {
+  "mips": 21.6,
+  "instr": 12988603,
+  "cycles": 983564288,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "sdmmc": {
+  "mips": 17.6,
+  "instr": 10582571,
+  "cycles": 1753743360,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "sdcard": {
+  "mips": 20.2,
+  "instr": 24261103,
+  "cycles": 120586240,
+  "wall_s": 1.2,
+  "pass": true
+ },
+ "emmc": {
+  "mips": 18.8,
+  "instr": 11279886,
+  "cycles": 1905262592,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "sdio-slave": {
+  "mips": 18.7,
+  "instr": 11249551,
+  "cycles": 2010644480,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "uhci": {
+  "mips": 22.4,
+  "instr": 6731757,
+  "cycles": 14155776,
+  "wall_s": 0.3,
+  "pass": true
+ },
+ "sweep": {
+  "mips": 18.6,
+  "instr": 11186875,
+  "cycles": 2057830400,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "rsa": {
+  "mips": 18.4,
+  "instr": 11036857,
+  "cycles": 1739063296,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "ds": {
+  "mips": 17.8,
+  "instr": 10687742,
+  "cycles": 1831862272,
+  "wall_s": 0.6,
+  "pass": true
+ },
+ "bt": {
+  "mips": 9.3,
+  "instr": 11168812,
+  "cycles": 894435328,
+  "wall_s": 1.2,
+  "pass": true
+ },
+ "ble-init": {
+  "mips": 9.2,
+  "instr": 10999804,
+  "cycles": 816840704,
+  "wall_s": 1.2,
+  "pass": true
+ },
+ "softap": {
+  "mips": 22,
+  "instr": 138746088,
+  "cycles": 3252158464,
+  "wall_s": 6.3,
+  "pass": true
+ },
+ "emac": {
+  "mips": 22.2,
+  "instr": 6673641,
+  "cycles": 5242880,
+  "wall_s": 0.3,
+  "pass": true
+ },
+ "emac-loopback": {
+  "mips": 22.2,
+  "instr": 6673227,
+  "cycles": 5242880,
+  "wall_s": 0.3,
+  "pass": true
+ },
+ "camera": {
+  "mips": 18,
+  "instr": 16223232,
+  "cycles": 2915041280,
+  "wall_s": 0.9,
+  "pass": true
+ },
+ "esp32-cam": {
+  "mips": 19.9,
+  "instr": 17880950,
+  "cycles": 1635254272,
+  "wall_s": 0.9,
+  "pass": true
+ },
+ "deepsleep": {
+  "mips": 19.2,
+  "instr": 23091405,
+  "cycles": 1549271040,
+  "wall_s": 1.2,
+  "pass": true
+ },
+ "buttons": {
+  "mips": 20.7,
+  "instr": 37356284,
+  "cycles": 628621312,
+  "wall_s": 1.8,
+  "pass": true
+ }
+}

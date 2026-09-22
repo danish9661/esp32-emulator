@@ -311,14 +311,27 @@ The Xtensa core runs as a Rust-compiled WASM engine. Execution is batched: a
 single JS↔WASM call (`core_run`) runs up to 512 interleaved core iterations
 (both cores) instead of one call per instruction.
 
-| Metric | Per-instruction | Batched (v0.1.2+) |
-|--------|----------------|-------------------|
-| Core throughput | ~37 M instr/sec | ~57 M instr/sec |
-| Worker throughput | ~30 M instr/sec | ~58 M instr/sec |
-| Speedup | — | **~1.9×** |
+MIPS here means **true retired instructions per wall-clock second**, counted
+in the WASM cores themselves (Rust `inst_count` summed over both cores via
+the debug SAB) — not the simulator's virtual-time step budget, which reads
+~100× too high (one batched step adds 512 to `chip.cycles` while the cores
+may retire far fewer, and idle fast-forward adds cycles with zero
+instructions). Measured host-side on real firmware, all runs PASS:
+
+| Demo | Retired instr | Wall | True MIPS |
+|------|--------------|------|-----------|
+| gpio | 11.06M | 0.6s | 18.4 |
+| uart | 9.80M | 0.6s | 16.3 |
+| timer | 10.53M | 0.6s | 17.5 |
+| wifi (scan) | 60.45M | 2.7s | 22.3 |
+
+Range across all 53 demos: **~9–26 MIPS** (median ~18.4); see the per-demo
+table in `webdemo/docs.html` (`webdemo/mips.js`, regenerated with
+`node tools/measure-mips.mjs`). The browser console prints the live retired
+figure after every run.
 
 Idle/yielding firmware is dominated by idle fast-forward + native peripheral
-FFI and sees little wall-clock change. All 32 worker tests pass with zero
+FFI and sees little wall-clock change. All worker tests pass with zero
 JS fallback traffic (0 `map_read`/`map_write` FFI calls).
 
 ## Limitations

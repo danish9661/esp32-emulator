@@ -97,7 +97,18 @@
       <span style="font-family:var(--mono)">cd openhw-studio-gateway &amp;&amp; ./start-gateway.sh</span>
       (serves <span style="font-family:var(--mono)">ws://127.0.0.1:5085/api/network-gateway</span>,
       forwards <span style="font-family:var(--mono)">127.0.0.1:8080 → board :80</span>).
-      The console WiFi stats (state / IP / forward / tx-rx) go live once the gateway answers.</div>
+      The console WiFi stats (state / IP / forward / tx-rx) go live once the gateway answers.
+      Verified live: STA connect + DHCP <span style="font-family:var(--mono)">192.168.4.2</span> +
+      ICMP echo to the gateway (<span style="font-family:var(--mono)">WIFI=OK / RECV=84</span>).</div>
+    <div class="callout"><b>Why no webserver / CoAP / ESP-NOW demos on this page?</b> Those suites need
+      more than the gateway socket: a live second peer or host responder in the same
+      gateway room (ESP-NOW two-node RXCB, CoAP host ACKs), chunkSize 20000 delivery
+      quantization tuning, and poll loops that busy-spin instead of
+      <span style="font-family:var(--mono)">delay()</span>. They all pass in Node
+      (<span style="font-family:var(--mono)">test-worker-webserver / -web / -net-protocols /
+      -coap-server / -espnow / -ipv6</span>, see <span style="font-family:var(--mono)">docs/networking.md</span>)
+      and stay Node-only by design — porting their harnesses would bloat the page
+      without proving any new engine path.</div>
   </section>
 
   <section class="section" id="ota">
@@ -245,7 +256,7 @@ const rows = [
   ['Digital signature', YES, YES, 'DS register-file stub', 'HMAC-backed signing (no consumer)', 'ds'],
   ['BT controller', PART, PART, 'Controller init (HCI shim)', 'LL/baseband: advertising needs real RF — init only', 'bt'],
   ['BLE stack init', PART, PART, 'Bluedroid init handshake', 'GATT services / ADV payloads need the baseband', 'ble-init'],
-  ['WiFi scan', PART, PART, 'Station scan finds TEST-AP (no gateway)', 'AP/data path needs the network gateway', 'wifi'],
+  ['WiFi scan', YES, YES, 'Station scan + STA connect, DHCP 192.168.4.2, ICMP to gateway (live audit)', 'Internet egress untested from this page', 'wifi'],
   ['Soft-AP', YES, YES, 'AP init, 192.168.4.1, derived MAC, station count', 'Association needs a 2nd station (count stays 0)', 'softap'],
   ['OTA update', YES, YES, 'esp_ota_begin/write/end over OTA slots', 'Rollback/bootloader OTA switch detail', 'ota'],
   ['OTA slots', YES, YES, 'Running/next partition cycle', '—', 'ota-multi'],
@@ -324,7 +335,7 @@ const demos = [
   ['Dig. signature', 'DS register-file stub', 'RESULT=PASS', 'none'],
   ['BT controller', 'Controller init', 'RESULT=PASS', 'BLE shim on'],
   ['BLE init', 'Bluedroid init handshake', 'RESULT=PASS', 'BLE shim on'],
-  ['WiFi scan', 'Station scan finds TEST-AP', 'ALL TESTS PASSED', 'virtual AP, no gateway'],
+  ['WiFi scan', 'Scan + connect + DHCP + ICMP via gateway', 'WIFI=OK / RECV>0', 'needs openhw-gw on :5085'],
   ['Soft-AP', 'AP init, IP, MAC, station count', 'RESULT=PASS', 'offline, no gateway'],
   ['Ethernet reg', 'EMAC register readback', 'RESULT=PASS', 'none'],
   ['Ethernet MAC', 'PHY ID + 64 B DMA loopback', 'LOOPBACK=PASS', 'none'],

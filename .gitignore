@@ -59,6 +59,9 @@
 !/webdemo/*.html
 !/webdemo/*.js
 !/webdemo/*.css
+!/webdemo/*.json
+!/webdemo/*.svg
+!/webdemo/*.webmanifest
 !/webdemo/worker/
 !/webdemo/worker/*.js
 !/webdemo/firmware/
