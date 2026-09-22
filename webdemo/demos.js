@@ -1,4 +1,4 @@
-// Demo catalogue: 49 prebuilt firmware images + the sim config each needs.
+// Demo catalogue: 53 prebuilt firmware images + the sim config each needs.
 export const DEMOS = [
   { id: 'gpio', name: 'GPIO', file: 'fw-gpio.bin.gz', desc: 'Output, pull-up, interrupt attach', expect: 'ALL TESTS PASSED' },
   { id: 'uart', name: 'UART', file: 'fw-uart.bin.gz', desc: 'Serial0/1/2 loopback', expect: 'ALL TESTS PASSED' },
@@ -9,6 +9,7 @@ export const DEMOS = [
   { id: 'i2c-slave', name: 'I2C slave', file: 'fw-i2c-slave.bin.gz', desc: 'Slave recv + master write', config: { pinInputs: { 18: 1, 19: 1 } }, script: 'i2c-slave-go', expect: 'RESULT=PASS' },
   { id: 'rtc-i2c', name: 'RTC I2C', file: 'fw-rtc-i2c.bin.gz', desc: 'RTC I2C controller path', budget: 8000000, expect: 'RESULT=PASS' },
   { id: 'timer', name: 'HW timer', file: 'fw-timer.bin.gz', desc: '1 MHz timer create/read/stop', expect: 'ALL TESTS PASSED' },
+  { id: 'timer-freq', name: 'Timer freq', file: 'fw-timer-freq.bin.gz', desc: '1 ms vs 10 s ratio + micros/millis', expect: 'RATIO=PASS' },
   { id: 'rtc-wdt', name: 'RTC + WDT', file: 'fw-rtc-wdt.bin.gz', desc: 'RTC watchdog feed + reset', expect: 'RESULT=PASS' },
   { id: 'twdt', name: 'Task WDT', file: 'fw-twdt.bin.gz', desc: 'Task watchdog via gptimer', budget: 15000000, expect: 'RESULT=PASS' },
   { id: 'pwm', name: 'PWM + fade', file: 'fw-pwm.bin.gz', desc: 'LEDC write + 0-255 hardware fade', expect: 'FADE_DATA=PASS' },
@@ -49,6 +50,7 @@ export const DEMOS = [
   { id: 'emac', name: 'Ethernet reg', file: 'fw-emac.bin.gz', desc: 'EMAC register readback', expect: 'RESULT=PASS' },
   { id: 'emac-loopback', name: 'Ethernet MAC', file: 'fw-emac-loopback.bin.gz', desc: 'PHY ID + 64 B DMA loopback', expect: 'LOOPBACK=PASS' },
   { id: 'camera', name: 'Camera', file: 'fw-camera.bin.gz', desc: 'OV2640 frame 38400 B via VSYNC drive', config: { camFrameBytes: 38400 }, budget: 500000000, script: 'camera-vsync', expect: 'CAM_DATA=PASS' },
+  { id: 'esp32-cam', name: 'ESP32-CAM', file: 'fw-esp32-cam.bin.gz', desc: 'Module preset: PSRAM + camera', board: 'esp32-cam', budget: 500000000, config: { camFrameBytes: 38400 }, script: 'camera-vsync', expect: 'CAM_DATA=PASS' },
   { id: 'deepsleep', name: 'Deep sleep', file: 'fw-deepsleep.bin.gz', desc: '3 boots, RTC memory survives', expect: 'RESULT=PASS' },
   { id: 'buttons', name: 'Buttons', file: 'fw-buttons.bin.gz', desc: 'RESET + BOOT pins, 4 boots', script: 'buttons-press', expect: 'BOOT #4' },
 ];

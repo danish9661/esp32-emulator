@@ -215,7 +215,10 @@ function buildList() {
   const preselect = (location.hash || '').replace('#demo-', '');
   if (preselect) {
     const hit = DEMOS.find((d) => d.id === preselect);
-    if (hit) selected = hit;
+    if (hit) {
+      selected = hit;
+      if (hit.board) setBoard(hit.board);
+    }
   }
   for (const d of DEMOS) {
     const b = document.createElement('button');
@@ -228,6 +231,9 @@ function buildList() {
     b.addEventListener('click', () => {
       if (running) return;
       selected = d;
+      // Per-demo board preset (e.g. ESP32-CAM module test) overrides the
+      // toggle; plain demos keep whatever the toggle says.
+      if (d.board) setBoard(d.board);
       for (const el of demoList.children) el.setAttribute('aria-pressed', 'false');
       b.setAttribute('aria-pressed', 'true');
     });
@@ -266,7 +272,16 @@ async function ensureStopped() {
   running = false;
   setEchoEnabled(false);
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  if (metTimer) { clearInterval(metTimer); metTimer = null; }
+  if (metTimer) {
+    // metTimer may be the { _fast, _slow } pair (see run()).
+    if (metTimer._fast || metTimer._slow) {
+      if (metTimer._fast) clearInterval(metTimer._fast);
+      if (metTimer._slow) clearInterval(metTimer._slow);
+    } else {
+      clearInterval(metTimer);
+    }
+    metTimer = null;
+  }
   if (scriptPromise) { try { await scriptPromise; } catch {} scriptPromise = null; }
   if (sim) { try { sim.stop(); } catch {} try { sim.terminate(); } catch {} sim = null; }
   btnRun.disabled = false;
@@ -390,19 +405,39 @@ async function run() {
       try { $('mPc').textContent = fmtHex(sim.pc); } catch {}
       $('mCyc').textContent = fmtBig(cyc);
       $('mUart').textContent = fmtBig(uartBytes);
-      // Live WiFi station + AP counters (gateway-backed when openhw-gw runs).
-      try {
-        if ((selected.id === 'wifi' || selected.id === 'softap') && sim.getWifiStats) {
-          sim.getWifiStats().then((st) => {
-            if (!st) return;
-            $('wState').textContent = ['idle', 'connecting', 'connected', 'no-ap', 'gw-error'][st.state] ?? st.state;
-            $('wIp').textContent = st.ip || '—';
-            $('wFwd').textContent = st.portForward || st.udpForward || '—';
-            $('wTxRx').textContent = st.txFrames + '/' + st.rxFrames;
-          }).catch(() => {});
-        }
-      } catch {}
     }, 500);
+
+    // Live WiFi station + AP counters. CMD protocol: the worker command loop
+    // never runs while runSimChunk self-reschedules, so a blocking
+    // getWifiStats() mid-run deadlocks both sides (see
+    // tests/test-worker-coap-server.mjs). Poll on a slow timer with a
+    // stop/poll/start cycle instead of calling it from the fast metTimer.
+    let wifiPollBusy = false;
+    const pollWifiStats = async () => {
+      if (!sim || !running || wifiPollBusy) return;
+      if (selected.id !== 'wifi' && selected.id !== 'softap') return;
+      if (typeof sim.getWifiStats !== 'function') return;
+      wifiPollBusy = true;
+      try {
+        try { sim.stop(); } catch {}
+        await new Promise((r) => setTimeout(r, 350));
+        if (!sim || !running) return;
+        const st = await sim.getWifiStats();
+        if (st && running) {
+          $('wState').textContent = ['idle', 'connecting', 'connected', 'no-ap', 'gw-error'][st.state] ?? st.state;
+          $('wIp').textContent = st.ip || '—';
+          $('wFwd').textContent = st.portForward || st.udpForward || '—';
+          $('wTxRx').textContent = st.txFrames + '/' + st.rxFrames;
+        }
+      } catch {} finally {
+        try { if (sim && running) sim.run(); } catch {}
+        wifiPollBusy = false;
+      }
+    };
+    const wifiStatTimer = setInterval(pollWifiStats, 5000);
+    // Clean the slow WiFi timer with the fast ones.
+    const _clearMetTimer = metTimer;
+    metTimer = { _fast: _clearMetTimer, _slow: wifiStatTimer };
 
     if (selected.script) scriptPromise = runDemoScript(selected.script, sim, () => uartText);
 

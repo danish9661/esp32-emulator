@@ -48,11 +48,11 @@ try {
     await pg.waitForTimeout(800);
     if (page === 'index.html') {
       const n = await pg.evaluate('document.querySelectorAll(".demo-item").length');
-      if (n < 45) fails.push('demo count ' + n);
+      if (n < 53) fails.push('demo count ' + n);
     }
     if (page === 'docs.html') {
       const m = await pg.evaluate('document.querySelectorAll("#supportTable tbody tr").length');
-      if (m < 45) fails.push('matrix rows ' + m);
+      if (m < 53) fails.push('matrix rows ' + m);
     }
     if (errs.length) fails.push(page + ': ' + errs.join(' | '));
     await pg.close();

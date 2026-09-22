@@ -131,7 +131,7 @@
 
   <section class="section" id="demos">
     <h2>Demo catalogue</h2>
-    <p class="sub">All 49 images are prebuilt Arduino firmware (bootloader + partitions + app),
+    <p class="sub">All 53 images are prebuilt Arduino firmware (bootloader + partitions + app),
       verified PASS on the host suite before shipping. Seven need a host action while they run —
       the console performs it for you; UART echo is fully interactive (you type, the chip echoes).</p>
     <div class="table-scroll">
@@ -186,6 +186,7 @@ const rows = [
   ['I2C slave', YES, YES, 'Slave recv/onReceive via host keypress', 'Clock-stretch corner cases', 'i2c-slave'],
   ['RTC I2C', YES, YES, 'RTC I2C controller path', '—', 'rtc-i2c'],
   ['HW timers + watchdog', YES, YES, 'TIMG0/1 alarms, RTC WDT, brownout reset', '—', 'timer'],
+  ['Timer freq', YES, YES, '1 ms vs 10 s ratio + micros/millis', '—', 'timer-freq'],
   ['RTC watchdog', YES, YES, 'RTC WDT feed + reset reason', '—', 'rtc-wdt'],
   ['Task watchdog', YES, YES, 'TWDT via gptimer', '—', 'twdt'],
   ['LEDC PWM + fade', YES, YES, 'Duty write, 0→255 hardware fade', '—', 'pwm'],
@@ -226,6 +227,7 @@ const rows = [
   ['Ethernet regs', YES, YES, 'EMAC register readback', 'RMII timing', 'emac'],
   ['Ethernet MAC', YES, YES, 'LAN8720 PHY ID, 64 B DMA loopback', 'RMII timing', 'emac-loopback'],
   ['Camera (OV2640)', NO, YES, 'SCCB + DVP frame into PSRAM framebuffer', 'ESP32 dev board has no camera (— by hardware)', 'camera'],
+  ['ESP32-CAM module', NO, YES, 'Board preset: 4 MB PSRAM + camera frame', 'Dev-module pinout differs (use camera demo)', 'esp32-cam'],
   ['Deep sleep + RTC mem', YES, YES, '3 boots, RTC_DATA_ATTR survives, wake causes', 'ULP wake stub', 'deepsleep'],
   ['Dev buttons', YES, YES, 'RESET tap + BOOT hold, BOOT #1→#4', '—', 'buttons'],
   ['SD / SDMMC', YES, YES, 'Virtual card, FAT R/W (suite-tested)', 'Covered above by SD card + eMMC demos', null],
@@ -262,6 +264,7 @@ const demos = [
   ['I2C slave', 'Slave recv + master write', 'RESULT=PASS', 'sends “g” at SLAVE_READY'],
   ['RTC I2C', 'RTC I2C controller path', 'RESULT=PASS', 'none'],
   ['HW timer', '1 MHz timer create / read / stop', 'ALL TESTS PASSED', 'none'],
+  ['Timer freq', '1 ms vs 10 s ratio + micros/millis', 'RATIO=PASS', 'none'],
   ['RTC + WDT', 'RTC watchdog feed + reset', 'RESULT=PASS', 'none'],
   ['Task WDT', 'Task watchdog via gptimer', 'RESULT=PASS', 'none'],
   ['PWM + fade', 'LEDC write + 0→255 hardware fade', 'FADE_DATA=PASS', 'none'],
@@ -298,6 +301,7 @@ const demos = [
   ['Ethernet regs', 'EMAC register readback', 'RESULT=PASS', 'none'],
   ['Ethernet MAC', 'PHY ID + 64 B DMA loopback', 'LOOPBACK=PASS', 'none'],
   ['Camera', 'OV2640 frame 38400 B', 'CAM_DATA=PASS', 'pulses VSYNC until frame lands'],
+  ['ESP32-CAM', 'Module preset: PSRAM + camera', 'CAM_DATA=PASS', 'board preset + VSYNC pulses'],
   ['Deep sleep', '3 boots, RTC memory survives', 'RESULT=PASS', 'none'],
   ['Dev buttons', 'RESET tap + BOOT hold, BOOT #1→#4', 'BOOT #4', 'presses RESET/BOOT buttons'],
 ];
