@@ -6536,7 +6536,6 @@ function applyBasicSetup(chip2, config, flash, rom) {
   }
 }
 function setupNativeWifiBridge(chip2, config) {
-  if (config.wifi === false) return;
   const loader = chip2._wasmLoader;
   const mem = chip2._wasmMemory;
   const boardMac = config.macAddress ? parseMacAddress(config.macAddress) : null;
@@ -6572,6 +6571,13 @@ function setupNativeWifiBridge(chip2, config) {
             loader.exports.native_wifi_mac_rx_frame(scratch, raw.length, 0);
             return;
           }
+          if (bytes.length >= 24 && (bytes[0] & 12) === 0) {
+            pcapBuffer.push({ timeUs: performance.now() * 1e3, data: bytes.slice() });
+            const v2 = new Uint8Array(mem, scratch, bytes.length);
+            v2.set(bytes);
+            loader.exports.native_wifi_mac_rx_frame(scratch, bytes.length, 0);
+            return;
+          }
           const eth = bytes;
           pcapBuffer.push({ timeUs: performance.now() * 1e3, data: eth });
           const v = new Uint8Array(mem, scratch, eth.length);
@@ -6582,6 +6588,16 @@ function setupNativeWifiBridge(chip2, config) {
           if (msg.startsWith("BOARD_IP:")) status.ip = msg.substring(9);
           else if (msg.startsWith("PORT_FORWARD:")) status.portForward = msg.substring(13);
           else if (msg.startsWith("UDP_FORWARD:")) status.udpForward = msg.substring(12);
+          else if (msg.startsWith("STACOUNT:")) {
+            const n = parseInt(msg.substring(9), 10);
+            if (Number.isFinite(n) && n >= 0) {
+              status.connectedClients = n;
+              try {
+                loader.exports.native_wifi_ap_set_stacount(n);
+              } catch (_) {
+              }
+            }
+          }
           console.log(msg);
         }
       };
@@ -6594,6 +6610,26 @@ function setupNativeWifiBridge(chip2, config) {
   };
   loader._wifiApRxFrame = (ptr, len) => {
     loader.exports.native_wifi_mac_rx_frame(ptr, len, 0);
+  };
+  const WIFI11_MAGIC = [69, 80, 87, 70];
+  const _apRxToMac = loader._wifiApRxFrame;
+  loader._wifiApRxFrame = (ptr, len) => {
+    try {
+      const bytes = new Uint8Array(mem, ptr, len);
+      if (len >= 24 && (bytes[0] & 12) === 0) {
+        pcapBuffer.push({ timeUs: performance.now() * 1e3, data: bytes.slice() });
+        const marked = new Uint8Array(4 + len);
+        marked.set(WIFI11_MAGIC, 0);
+        marked.set(bytes.subarray(0, len), 4);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(marked);
+        } else {
+          packetBuffer.push(marked);
+        }
+      }
+    } catch (_) {
+    }
+    _apRxToMac(ptr, len);
   };
   loader._wifiApSendEth = (ptr, len) => {
     const eth = new Uint8Array(mem, ptr, len).slice();
@@ -6623,8 +6659,13 @@ function setupNativeWifiBridge(chip2, config) {
     status.probeRequestCount = st.getInt32(20, true);
     status.connectedClients = st.getInt32(24, true);
   };
+  let lastBeaconWall = 0;
   const beaconEvent = chip2.clocks.cpu.createEvent(() => {
-    loader.exports.native_wifi_ap_send_beacon();
+    const now = performance.now();
+    if (now - lastBeaconWall >= 102) {
+      lastBeaconWall = now;
+      loader.exports.native_wifi_ap_send_beacon();
+    }
     beaconEvent.schedule(102e6);
   });
   beaconEvent.schedule(0);

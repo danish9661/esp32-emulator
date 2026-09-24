@@ -808,6 +808,27 @@ pub extern "C" fn native_wifi_ap_send_beacon() {
 // Status snapshot for the worker's SAB slots / CMD_GET_WIFI_STATS: 7 × i32 LE
 // (state, txFrames, txBytes, rxFrames, rxBytes, probeRequestCount,
 // connectedClients).
+//
+// Gateway-driven Soft-AP station count (vsta.go STACOUNT): the worker calls
+// this when the gateway reports associated virtual stations, so the native
+// connected_clients counter — the same one esp_wifi_ap_get_sta_list reads
+// via the driver — reflects gateway-side associations, not just frames the
+// engine happened to see.
+#[no_mangle]
+pub extern "C" fn native_wifi_ap_set_stacount(n: u32) {
+    unsafe {
+        if !WIFI_AP_INIT {
+            return;
+        }
+        // Gateway is authoritative for associated count; never let the local
+        // frame-seen counter exceed it (avoids double-count on reassoc).
+        let ap = wifi_ap();
+        if n > ap.connected_clients {
+            ap.connected_clients = n;
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn native_wifi_ap_get_status(ptr: u32) {
     unsafe {

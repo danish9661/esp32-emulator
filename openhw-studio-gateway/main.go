@@ -98,7 +98,7 @@ func main() {
 		room, exists := rooms[sessionId]
 		if !exists {
 			fmt.Printf("[Network Gateway] Creating new Virtual Network room: %s\n", sessionId)
-			
+
 			gatewayMode := os.Getenv("GATEWAY_MODE")
 			var currentVN *virtualnetwork.VirtualNetwork
 
@@ -333,6 +333,21 @@ func handleClient(client *Client, room *Room) {
 		}
 
 		if messageType == websocket.BinaryMessage {
+			// Virtual Soft-AP stations FIRST: EPWF-marked worker-tap
+			// 802.11 medium frames + raw py-vsta mgmt frames must never
+			// reach the Ethernet log/parse below (their bytes misparse
+			// as dst/src/ethertype) nor the VN pipe (gVisor chokes —
+			// the pipe is the shared hub<->gVisor ETHERNET channel).
+			// snoopVStaRaw claims them (skips pipe AND room broadcast);
+			// gateway-originated 802.11 (beacon observer-copies,
+			// probe/auth/assoc responses) is re-broadcast to room peers
+			// via DIRECT WebSocket in vstaDeliverBeacon — never the
+			// pipe. NOTE: packet is parsed lazily AFTER this (802.11
+			// bytes would misparse as Ethernet), so snoopVSta parses
+			// its own.
+			if snoopVStaRaw(msg, client, room) {
+				continue
+			}
 			if len(msg) >= 14 {
 				dst := msg[0:6]
 				src := msg[6:12]
@@ -395,7 +410,7 @@ func handleClient(client *Client, room *Room) {
 					vnPipeMu.Unlock()
 				}
 			}
-			
+
 			// 2. Broadcast frame to all *other* clients (Layer 2 Hub logic)
 			room.Lock()
 			targets := make([]*Client, 0, len(room.Clients))

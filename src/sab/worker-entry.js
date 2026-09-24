@@ -802,8 +802,13 @@ function applyBasicSetup(chip, config, flash, rom) {
 
 // Native WiFi AP wiring — Rust NativeInternetAP port (wifi_bridge.rs) with
 // JS-side gateway WebSocket + pcap records. Called after loadWasm + reset.
+// NOTE: runs even when config.wifi === false (Soft-AP board firmware calls
+// WiFi.softAP() itself with wifi:false). The wifi:false flag only skips the
+// *station* defaults (SSID/channel/room); the bridge + gateway socket still
+// come up so virtual stations (vsta.go) can associate to the board's AP and
+// STACOUNT/DHCP flow. There is no case where the bridge must stay down:
+// without a socket the AP is simply unreachable, same as before.
 function setupNativeWifiBridge(chip, config) {
-  if (config.wifi === false) return;
   const loader = chip._wasmLoader;
   const mem = chip._wasmMemory;
   const boardMac = config.macAddress ? parseMacAddress(config.macAddress) : null;
@@ -843,6 +848,16 @@ function setupNativeWifiBridge(chip, config) {
             loader.exports.native_wifi_mac_rx_frame(scratch, raw.length, 0);
             return;
           }
+          // Raw 802.11 MPDU (gateway vsta responses, direct-WS broadcast):
+          // enter the MAC RX path, NOT the ethernet path. pcap keeps the
+          // raw MPDU so captures stay 802.11-clean.
+          if (bytes.length >= 24 && (bytes[0] & 0x0C) === 0x00) {
+            pcapBuffer.push({ timeUs: performance.now() * 1000, data: bytes.slice() });
+            const v = new Uint8Array(mem, scratch, bytes.length);
+            v.set(bytes);
+            loader.exports.native_wifi_mac_rx_frame(scratch, bytes.length, 0);
+            return;
+          }
           const eth = bytes;
           pcapBuffer.push({ timeUs: performance.now() * 1000, data: eth });
           const v = new Uint8Array(mem, scratch, eth.length);
@@ -853,6 +868,19 @@ function setupNativeWifiBridge(chip, config) {
           if (msg.startsWith('BOARD_IP:')) status.ip = msg.substring(9);
           else if (msg.startsWith('PORT_FORWARD:')) status.portForward = msg.substring(13);
           else if (msg.startsWith('UDP_FORWARD:')) status.udpForward = msg.substring(12);
+          else if (msg.startsWith('STACOUNT:')) {
+            // Virtual Soft-AP station count from the gateway (vsta.go):
+            // mirrors the AP's associated-client count into the same
+            // connectedClients counter the engine reports via
+            // native_wifi_ap_get_status (status slot 24).
+            const n = parseInt(msg.substring(9), 10);
+            if (Number.isFinite(n) && n >= 0) {
+              status.connectedClients = n;
+              try {
+                loader.exports.native_wifi_ap_set_stacount(n);
+              } catch (_) {}
+            }
+          }
           console.log(msg);
         }
       };
@@ -860,6 +888,36 @@ function setupNativeWifiBridge(chip, config) {
     } catch(_) {}
   };
   loader._wifiApRxFrame = (ptr, len) => { loader.exports.native_wifi_mac_rx_frame(ptr, len, 0); };
+  // Beacon/offload TX tap: every 802.11 frame the Rust AP emits (beacons,
+  // probe/auth/assoc responses, ACKs, eth->wifi wraps) is ALSO forwarded to
+  // the gateway socket as a raw 802.11 medium frame. The gateway broadcasts
+  // room frames to peers and feeds DHCP-capable ones to its stacks; without
+  // this tap the board's beacons never leave the worker and virtual
+  // stations (vsta.go) can never discover the Soft-AP.
+  //
+  // Framing (mirrors ESP-NOW): 802.11 medium frames carry a 4-byte magic
+  // prefix ("EPWF" 45 50 57 46) so the hub can route them to snoopVSta and
+  // never to gVisor. The socket gets the marked bytes; the pcap ring stores
+  // the RAW MPDU (no magic — Wireshark dissects it as 802.11 directly).
+  const WIFI11_MAGIC = [0x45, 0x50, 0x57, 0x46];
+  const _apRxToMac = loader._wifiApRxFrame;
+  loader._wifiApRxFrame = (ptr, len) => {
+    try {
+      const bytes = new Uint8Array(mem, ptr, len);
+      if (len >= 24 && (bytes[0] & 0x0C) === 0x00) {
+        pcapBuffer.push({ timeUs: performance.now() * 1000, data: bytes.slice() });
+        const marked = new Uint8Array(4 + len);
+        marked.set(WIFI11_MAGIC, 0);
+        marked.set(bytes.subarray(0, len), 4);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(marked);
+        } else {
+          packetBuffer.push(marked);
+        }
+      }
+    } catch (_) {}
+    _apRxToMac(ptr, len);
+  };
   loader._wifiApSendEth = (ptr, len) => {
     const eth = new Uint8Array(mem, ptr, len).slice();
     pcapBuffer.push({ timeUs: performance.now() * 1000, data: eth });
@@ -889,9 +947,21 @@ function setupNativeWifiBridge(chip, config) {
     status.probeRequestCount = st.getInt32(20, true);
     status.connectedClients = st.getInt32(24, true);
   };
-  // Beacon every 102ms — sim-time (clock event), parity with the JS bridge.
+  // Beacon: wall-clock paced at ~10Hz (102ms), NOT sim-time. The old
+  // sim-time clock event (102e6 ns on the CPU cycle clock) fires 16.6x
+  // too fast: idle fast-forward advances CLK_CYCLES in 100us jumps, so
+  // the event fires once per 1024-instruction step instead of once per
+  // 102ms of wall time. Every sim-second then emits ~1000 beacons,
+  // which (a) floods the gateway room and (b) buries solicited frames
+  // (probe/auth/assoc responses, DHCP offers) under hundreds of queued
+  // beacons in every py-vsta observer's socket buffer.
+  let lastBeaconWall = 0;
   const beaconEvent = chip.clocks.cpu.createEvent(() => {
-    loader.exports.native_wifi_ap_send_beacon();
+    const now = performance.now();
+    if (now - lastBeaconWall >= 102) {
+      lastBeaconWall = now;
+      loader.exports.native_wifi_ap_send_beacon();
+    }
     beaconEvent.schedule(102e6);
   });
   beaconEvent.schedule(0);
