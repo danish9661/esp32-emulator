@@ -340,6 +340,10 @@ JS fallback traffic (0 `map_read`/`map_write` FFI calls).
 - **WASM is the only engine** — the JS CPU interpreter was removed.
 - **BLE full-stack advertising unsupported** — requires the ESP32 LL/baseband
   which is not emulated; `test-worker-bt` covers controller-init only.
+  ADV/GATT completion *marks* are reachable via engine-side guest callback
+  injection (advances `gap_cb`/`gatts_cb` past init/enable), but no real RF
+  advertising, baseband, HCI RESET CC, or GATT operations (read/write/
+  notify/connect) are emulated.
 
 ## Testing
 

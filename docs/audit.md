@@ -156,6 +156,8 @@ ESP32 boot ROM and arbitrary user firmware. Safety rests on the WASM sandbox.
   passes; the full BTDM `HCI_RESET` response requires the ESP32 LL/baseband (in
   ROM), which is not emulated. The Xtensa disassembler was used to confirm the
   VHCI delivery path (btrom `cb108`/`cb100`/`cb4c`) needs LL controller state.
+  ADV/GATT completion *marks* are reachable via engine-side guest callback
+  injection — no real RF advertising or GATT operations.
 - **Firmware tests need an external compile server** (`:5000`, arduino-cli) and
   (for WiFi) the gateway (`:5085`). No-compile-server tests (`wasm-bench`,
   `test-wasm-standalone`) run standalone.

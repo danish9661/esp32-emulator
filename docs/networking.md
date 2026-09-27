@@ -85,7 +85,10 @@ Implementation notes (earned the hard way):
 - **Enterprise WPA2 / WPS / promiscuous / monitor mode**: not modeled.
 - **BTDM advertising**: unsupported — the Link Layer/baseband lives in
   ROM and needs RF-hardware emulation (full analysis 2026-08-22);
-  controller-init (`test-worker-bt`) remains the supported scope.
+  controller-init (`test-worker-bt`) remains the supported scope. ADV/GATT
+  completion *marks* can be driven via engine-side guest callback injection
+  (real `gap_cb`/`gatts_cb` bodies run), but no real HCI RESET CC, RF
+  advertising, or GATT read/write/notify/connect is emulated.
 
 ## pcap capture
 

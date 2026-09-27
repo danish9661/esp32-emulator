@@ -60,4 +60,4 @@ only supplies host time.
 
 - ESP32 only (ESP32-C3/RV32 support was removed).
 - WASM is the only engine (the JS CPU interpreter was removed).
-- BLE full-stack advertising is unsupported (requires the ESP32 LL/baseband, which is not emulated; `test-worker-bt` covers controller-init only).
+- BLE full-stack advertising is unsupported (requires the ESP32 LL/baseband, which is not emulated; `test-worker-bt` covers controller-init only). ADV/GATT completion *marks* are reachable via engine-side guest callback injection (real `gap_cb`/`gatts_cb` bodies run) — no real HCI RESET CC, RF advertising, or GATT operations.
