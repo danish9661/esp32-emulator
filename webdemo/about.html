@@ -114,7 +114,7 @@ node tests/test-worker-gpio.mjs   <span class="c"># … one file per peripheral<
           <dt>Engine</dt><dd>Rust → wasm32-unknown-unknown, batched core_run</dd>
           <dt>Host</dt><dd>Node worker_threads · browser Web Worker + SharedArrayBuffer</dd>
           <dt>UART</dt><dd>Ring buffer over SAB, 115200 8-N-1 model</dd>
-          <dt>Honest limits</dt><dd>BLE advertising needs the baseband (not emulated); WiFi RF needs the gateway</dd>
+          <dt>Honest limits</dt><dd>BLE advertising needs the baseband (not emulated; ADV/GATT marks only via callback injection); WiFi RF needs the gateway</dd>
         </dl>
       </div>
     </div>

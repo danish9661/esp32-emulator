@@ -255,7 +255,7 @@ const rows = [
   ['RSA accelerator', YES, YES, 'Hardware RSA operation', 'Large-key timing', 'rsa'],
   ['Digital signature', YES, YES, 'DS register-file stub', 'HMAC-backed signing (no consumer)', 'ds'],
   ['BT controller', PART, PART, 'Controller init (HCI shim)', 'LL/baseband: advertising needs real RF — init only', 'bt'],
-  ['BLE stack init', PART, PART, 'Bluedroid init handshake', 'GATT services / ADV payloads need the baseband', 'ble-init'],
+  ['BLE stack init', PART, PART, 'Bluedroid init handshake', 'GATT services / ADV payloads need the baseband (marks via callback injection only)', 'ble-init'],
   ['WiFi scan', YES, YES, 'Station scan + STA connect, DHCP 192.168.4.2, ICMP to gateway (live audit)', 'Internet egress untested from this page', 'wifi'],
   ['Soft-AP', YES, YES, 'AP init, 192.168.4.1, derived MAC, station count', 'Association needs a 2nd station (count stays 0)', 'softap'],
   ['OTA update', YES, YES, 'esp_ota_begin/write/end over OTA slots', 'Rollback/bootloader OTA switch detail', 'ota'],

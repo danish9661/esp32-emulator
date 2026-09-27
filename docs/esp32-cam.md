@@ -32,7 +32,7 @@ node --import ./tests/board-hook.mjs tests/test-worker-gpio.mjs
 | GPIO, UART, SPI (+slave), I2C (+slave, RTC_I2C), I2S (+RX), timers, LEDC/PWM, MCPWM, RMT, PCNT, TWAI (+dual-node), ADC cont., DAC, touch, TSENS, BOD, SD/MMC/eMMC, SDIO slave, EMAC loopback, ULP (+wake), deep sleep, NVS/flash persist, OTA, WiFi scan/web | Same as ESP32 — PASS (cross-section gpio/uart/spi/i2c/timer/pwm/analog re-run on-board, all PASS; full suite PASS=53) |
 | Camera (OV2640, DVP via I2S) | PASS — `test-worker-esp32-cam`: SCCB probe + init over the module pinout, full QQVGA RGB565 frame byte-exact (`CAM_FB=38400 CAM_DATA=PASS`) |
 | PSRAM | PASS — `psramFound()=1`, 4KB SPIRAM heap write/read-back (`PSRAM_HEAP=PASS`); SPI1 JEDEC ID reports the configured chip |
-| BT | Controller-init only (full BTDM advertising unsupported — same as ESP32) |
+| BT | Controller-init only (full BTDM advertising unsupported — same as ESP32; ADV/GATT marks via guest callback injection only) |
 
 ## Firmware build requirements
 

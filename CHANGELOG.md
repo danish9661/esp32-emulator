@@ -473,5 +473,7 @@ Initial public package of the ESP32 (Xtensa LX6, dual-core) WASM emulator.
 ### Known limitations
 - Full BTDM advertising (beyond controller-init) is unsupported — it requires the
   ESP32 LL/baseband, which is not emulated. `test-worker-bt` covers controller-init only.
+  ADV/GATT completion *marks* are reachable via engine-side guest callback injection
+  (real `gap_cb`/`gatts_cb` bodies run), but no real RF advertising or GATT operations.
 - Running real firmware requires compiling it on an external Arduino/ESP-IDF
   compile server (not bundled).
