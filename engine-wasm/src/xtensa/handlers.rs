@@ -1893,6 +1893,31 @@ pub fn a_handler62(core: &mut CoreState, _tmp_val: u32) {
         unsafe { super::exports::trace_return(core.index, core.pc, core.next_pc, core.ar(2)); }
     }
     if clock_event == 0 || (rt != 0 && rt != clock_event) || core.ps_woe() == 0 || core.ps_excm() != 0 {
+        unsafe {
+            static mut RWIL_N: u32 = 0;
+            if RWIL_N < 4 {
+                RWIL_N += 1;
+                let hx = |mut v: u32, o: &mut [u8]| {
+                    for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+                };
+                let mut m = [0u8; 256];
+                let mut n = 0;
+                for &b in b"[RWIL] pc=" { m[n] = b; n += 1; }
+                let mut h = [0u8; 8]; hx(core.pc, &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" a0=" { m[n] = b; n += 1; } hx(idx_val, &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" ce=" { m[n] = b; n += 1; } hx(clock_event, &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" rt=" { m[n] = b; n += 1; } hx(rt, &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" woe=" { m[n] = b; n += 1; } hx(core.ps_woe(), &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" excm=" { m[n] = b; n += 1; } hx(core.ps_excm(), &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" il=" { m[n] = b; n += 1; } hx(core.ps_intlevel(), &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" sim=" { m[n] = b; n += 1; } hx(sim, &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" rr=" { m[n] = b; n += 1; } hx(rr, &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" xc=" { m[n] = b; n += 1; } hx(core.special_registers[crate::xtensa::constants::EXC_CAUSE], &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" ar5=" { m[n] = b; n += 1; } hx(core.ar(5), &mut h); for &b in &h { m[n] = b; n += 1; }
+                for &b in b" ar8=" { m[n] = b; n += 1; } hx(core.ar(8), &mut h); for &b in &h { m[n] = b; n += 1; }
+                crate::js_log_str(m.as_ptr() as u32, n as u32);
+            }
+        }
         core.exception(TRAP_ILLEGAL_INSTRUCTION);
     } else {
         let tmp = (sim.wrapping_sub(clock_event)) & 15;
@@ -1954,6 +1979,26 @@ pub fn _handler3(core: &mut CoreState, tmp_val: u32) {
             }
         }
         core.special_registers[INT_SET] = core.special_registers[DEPC_REGISTER + idx_val as usize - 2];
+        // Diag: an rfi restore that clears WOE precedes the retw-illegal
+        // crash signature; keep while BT/BLE injection is under test.
+        if core.ps_woe() == 0 {
+            unsafe {
+                static mut RFI0_N: u32 = 0;
+                if RFI0_N < 8 {
+                    RFI0_N += 1;
+                    let mut m = [0u8; 48];
+                    let hx = |mut v: u32, o: &mut [u8]| {
+                        for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+                    };
+                    let mut h = [0u8; 8];
+                    let mut n = 0;
+                    for &b in b"[RFI0] pc=" { m[n] = b; n += 1; }
+                    hx(core.pc, &mut h); for &b in &h { m[n] = b; n += 1; }
+                    for &b in b" idx=" { m[n] = b; n += 1; } hx(idx_val, &mut h); for &b in &h { m[n] = b; n += 1; }
+                    crate::js_log_str(m.as_ptr() as u32, n as u32);
+                }
+            }
+        }
         // HW-exact PS restore (PS <- EPS_level saved by take_interrupt /
         // exception). Without this, ISR levels whose stubs lack an explicit
         // wsr.ps (e.g. level-4) leave INTLEVEL stuck and wedge all

@@ -2145,6 +2145,13 @@ pub extern "C" fn native_bt_rf_reset() {
         ADV_SPOOF_TICK = 0;
         GATT_SPOOF_STAGE = 0;
         GATT_SPOOF_TICK = 0;
+        CBQ_N = 0;
+        CBQ_HEAD = 0;
+        CB_RUN = 0;
+        CB_TICK = 0;
+        CB_PUMP_N = 0;
+        CB_TCB = 0;
+        CB_LOG_N = 0;
         HOOK_BTRANSFER = 0;
         // run266: reset ALL per-boot one-shot diag budgets (function-static
         // counters survive WASM-instance reuse across boots in the same
@@ -2245,6 +2252,46 @@ static mut ADV_SPOOF_STAGE: u32 = 0;            // run302/run305: trigger state 
 static mut ADV_SPOOF_TICK: u32 = 0;             // run302: pump countdown between stages
 static mut GATT_SPOOF_STAGE: u32 = 0;           // run303/run305: trigger state only (pump prints REMOVED)
 static mut GATT_SPOOF_TICK: u32 = 0;            // run303: pump countdown between stages
+// ---- run306: guest callback injection (ADV/GATT completion chain) ----
+// The BTC task that would deliver ESP_GAP_BLE_ADV_DATA_SET_COMPLETE /
+// ADV_START_COMPLETE / ESP_GATTS_REG/CREATE/START events never runs (CAS
+// wedge starves it), so setup() stops at GATTAPPREG and the completion
+// marks never print. The queue below stages the EXACT callback invocations
+// the firmware expects (armed by the existing TR3/TR4 stage pumps); pop
+// hijacks an eligible core (save full ctx -> synthetic call8 frame -> the
+// real gap_cb/gatts_cb body prints the marks -> retw to sentinel -> restore).
+// Marks still come from REAL firmware code (no UART spoofing).
+static mut CBQ_N: u32 = 0;                      // entries queued (max 6)
+static mut CBQ_HEAD: u32 = 0;                   // ring head
+static mut CBQ_FN: [u32; 6] = [0; 6];           // target pc (gap_cb/gatts_cb)
+static mut CBQ_EV: [u32; 6] = [0; 6];           // a2 = event
+static mut CBQ_A3: [u32; 6] = [0; 6];           // kind1: a3 = gatt_if
+static mut CBQ_KIND: [u32; 6] = [0; 6];         // 0 = gap (a3=param), 1 = gatts (a3=if, a4=param)
+static mut CBQ_PW: [[u32; 8]; 6] = [[0; 8]; 6]; // param words (offsets 0..28)
+static mut CB_RUN: u32 = 0;                     // 1 = injection active
+static mut CB_CORE: u32 = 0;
+static mut CB_TICK: u32 = 0;                    // steps since inject (TCB-matched)
+static mut CB_PUMP_N: u32 = 0;                  // pumps since inject (stall guard)
+static mut CB_TCB: u32 = 0;                     // pxCurrentTCBs[CB_CORE] at inject
+static mut CB_LOG_N: u32 = 0;                   // diag budget
+static mut CB_S_PC: u32 = 0;
+static mut CB_S_NPC: u32 = 0;
+static mut CB_S_INTSET: u32 = 0;                // PS windowed fields (woe/excm/intlevel/callinc)
+static mut CB_S_PS: u32 = 0;                    // special_registers[PS_REGISTER]
+static mut CB_S_MISC: u32 = 0;
+static mut CB_S_BASE: u32 = 0;                  // MEM_FAULT_INFO
+static mut CB_S_CC: u32 = 0;                    // CACHE_CONTROL
+static mut CB_S_IDLE: u32 = 0;
+static mut CB_S_PEND: u32 = 0;
+static mut CB_S_LS: u32 = 0;
+static mut CB_S_PHYS: [u32; 128] = [0; 128];   // 2 cores x 64 phys regs
+// retw composes next_pc = (pc & 0xC0000000) | (a0 & 0x3FFFFFFF): with a0 =
+// 0x80000044 (call8 tag, low=0x44) the callback's final retw lands HERE.
+// 0x44 is NOT a vector (REG_OFF_* are multiples of 64; window/exception/
+// interrupt vectors never use +0x44), so nothing else vectors here.
+const CB_TRAMP_ABS: u32 = 0x40000044;
+const CB_TICK_MAX: u32 = 20_000_000;
+const CB_PUMP_MAX: u32 = 4000;
 static mut HOOK_BD_AW: u32 = 0x400e2ae4;      // run296: bluedroid_init await-ret site (beqz a10)
 static mut HOOK_SCAN_DONE: u32 = 0;         // per-boot: 0=need scan
 static mut HOOK_SWEEP_N: u32 = 0;            // per-boot full-sweep budget (reset with scan)
@@ -2598,18 +2645,32 @@ fn bt_hook_scan() {
             let mut a = await_eb2;
             while a < await_eb2.wrapping_add(0x40) {
                 // read 4B window, look for 70 a7 20 at any offset.
+                // run306: the 3-byte pattern can STRADDLE the word boundary
+                // (offset 2 = bytes 2..3 of w + byte 0 of the NEXT word —
+                // (w>>16)&0xFFFFFF only exposes 2 bytes there, so the old
+                // check could never match; measured on d3e7ae8a: pattern at
+                // await+0x26 = 0x4011020a, word 0x40110208 = d7 00 70 a7).
                 let w = flash_mirror_read_u32(a);
+                let w2 = flash_mirror_read_u32(a.wrapping_add(4));
                 if (w & 0xFFFFFF) == 0x20a770
                     || ((w >> 8) & 0xFFFFFF) == 0x20a770
-                    || ((w >> 16) & 0xFFFFFF) == 0x20a770
+                    || ((((w >> 16) & 0xFFFF) | ((w2 & 0xFF) << 16)) == 0x20a770)
                 {
-                    // refine to exact byte offset (byte-stepped check).
+                    // refine to exact byte offset (byte-stepped check with
+                    // boundary-safe top-up from the next word).
                     let mut b = a;
                     while b < a.wrapping_add(4) {
-                        // byte reads via word+shift.
-                        let wb = flash_mirror_read_u32(b & !3);
+                        let base = b & !3;
                         let sh = (b & 3) * 8;
-                        if ((wb >> sh) & 0xFFFFFF) == 0x20a770 {
+                        let w0 = flash_mirror_read_u32(base);
+                        let v = if sh > 8 {
+                            let w1 = flash_mirror_read_u32(base.wrapping_add(4));
+                            let have = 32 - sh;
+                            ((w0 >> sh) | ((w1 & ((1u32 << (24 - have)) - 1)) << have)) & 0xFFFFFF
+                        } else {
+                            (w0 >> sh) & 0xFFFFFF
+                        };
+                        if v == 0x20a770 {
                             HOOK_AWAIT_EB2 = b;
                             break;
                         }
@@ -3266,6 +3327,33 @@ pub fn bt_shim_step(core: &mut crate::xtensa::state::CoreState) -> bool {
     use crate::xtensa::memory::{dma_read_u32, dma_write_u32};
     if unsafe { BT_DIAG_DISABLE } != 0 {
         return false;
+    }
+    // run306: callback-injection completion + watchdog. The injected
+    // callback's final retw (a0 = 0x80000044) lands at CB_TRAMP_ABS; only
+    // restore when THIS core's current TCB still matches the one captured
+    // at inject (the callback may have yielded — then a different task is
+    // loaded and must be left alone; the injected task resumes later and
+    // hits the sentinel on its own).
+    if unsafe { CB_RUN } != 0 && core.index == unsafe { CB_CORE } {
+        let tcb = dma_read_u32(0x3ffc3ce0 + unsafe { CB_CORE } * 4);
+        if tcb != 0 && tcb == unsafe { CB_TCB } {
+            unsafe { CB_TICK = CB_TICK.wrapping_add(1); }
+            if core.pc == CB_TRAMP_ABS {
+                unsafe { bt_inject_restore(core); }
+                unsafe { CB_RUN = 0; CB_TICK = 0; CB_PUMP_N = 0; }
+                bt_cb_consume();
+                cb_diag_log(b"[CBIN] ok ", unsafe { CB_S_PC }, core.index);
+                return true;
+            }
+            if unsafe { CB_TICK } > CB_TICK_MAX {
+                let stuck = core.pc;
+                unsafe { bt_inject_restore(core); }
+                unsafe { CB_RUN = 0; CB_TICK = 0; CB_PUMP_N = 0; }
+                bt_cb_consume();
+                cb_diag_log(b"[CBIN] abort ", unsafe { CB_S_PC }, stuck);
+                return true;
+            }
+        }
     }
     // run264: resolve-once per boot; every pc below reads the HOOK_* cache
     // (e7f2 defaults = zero-cost fast path on e7f2; scanner fills them on
@@ -6573,7 +6661,18 @@ pub fn bt_shim_step(core: &mut crate::xtensa::state::CoreState) -> bool {
                     if WEDGE_DONE == 0 {
                         WEDGE_DONE = 2; // logged; re-arms on new mux
                         let lv = dma_read_u32(mux);
-                        let mut m = [0u8; 48];
+                        // run306: WHO is spinning? core index + caller
+                        // return addr (ar0 at CAS entry = Timeout's caller)
+                        // + ar2 (Timeout's own a2 = its first arg after the
+                        // prologue window) + TCB name word @+52 (the same
+                        // word the BTC_TCB identity check uses).
+                        let cx = core.index;
+                        let a0v = core.ar(0);
+                        let a2v = core.ar(2);
+                        let a1v = core.ar(1);
+                        let tv = dma_read_u32(0x3ffc3ce0 + cx * 4);
+                        let nm = if tv != 0 { dma_read_u32(tv + 52) } else { 0 };
+                        let mut m = [0u8; 96];
                         let hx = |mut v: u32| -> [u8; 8] {
                             let mut o = [0u8; 8];
                             for i in (0..8).rev() { o[i] = b"0123456789abcdef"[(v & 0xF) as usize]; v >>= 4; }
@@ -6581,11 +6680,21 @@ pub fn bt_shim_step(core: &mut crate::xtensa::state::CoreState) -> bool {
                         };
                         let mut n = 0;
                         for &b in b"[R] wedgenolock " { m[n] = b; n += 1; }
-                        for &b in &hx(mux) { if n < 48 { m[n] = b; n += 1; } }
-                        for &b in b" lv=" { if n < 48 { m[n] = b; n += 1; } }
-                        for &b in &hx(lv) { if n < 48 { m[n] = b; n += 1; } }
-                        for &b in b" c0=" { if n < 48 { m[n] = b; n += 1; } }
-                        for &b in &hx(dma_read_u32(0x3ffc3ce0)) { if n < 48 { m[n] = b; n += 1; } }
+                        for &b in &hx(mux) { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in b" lv=" { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in &hx(lv) { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in b" c0=" { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in &hx(dma_read_u32(0x3ffc3ce0)) { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in b" c=" { if n < 96 { m[n] = b; n += 1; } }
+                        m[n] = b'0' + cx as u8; n += 1;
+                        for &b in b" a0=" { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in &hx(a0v) { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in b" a1=" { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in &hx(a1v) { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in b" a2=" { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in &hx(a2v) { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in b" nm=" { if n < 96 { m[n] = b; n += 1; } }
+                        for &b in &hx(nm) { if n < 96 { m[n] = b; n += 1; } }
                         crate::js_log_str(m.as_ptr() as u32, n as u32);
                     }
                 }
@@ -7713,6 +7822,240 @@ fn bt_vhci_env_p() -> u32 {
 // must NEVER print into the guest UART ring: every UART mark has to come
 // from real firmware. Kept as pure state + log so the trigger point stays
 // visible in [ADV] lines; completion delivery is a real BT-stack fix.)
+// ---- run306: callback-injection helpers (see CBQ_* statics above) ----
+fn cb_diag_log(tag: &[u8], a: u32, b: u32) {
+    unsafe {
+        if CB_LOG_N >= 64 { return; }
+        CB_LOG_N += 1;
+        let mut m = [0u8; 72];
+        let hx = |mut v: u32| -> [u8; 8] {
+            let mut o = [0u8; 8];
+            for i in (0..8).rev() { o[i] = b"0123456789abcdef"[(v & 0xF) as usize]; v >>= 4; }
+            o
+        };
+        let mut n = 0;
+        for &b in tag { m[n] = b; n += 1; }
+        for &b in &hx(a) { if n < 72 { m[n] = b; n += 1; } }
+        m[n] = b' '; n += 1;
+        for &b in &hx(b) { if n < 72 { m[n] = b; n += 1; } }
+        crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+    }
+}
+
+// gap_cb/gatts_cb come from the (slot, value) pairs captured at cb_set
+// stores: the sketch registers gap FIRST then gatts; only these two
+// app-flash callbacks hit the hook (run1: exactly 2 [CBS] lines).
+fn bt_gap_cb_addr() -> u32 {
+    unsafe {
+        let v = CB_SLOT_TAB[1];
+        if v >= 0x400d0000 && v < 0x40120000 { v } else { 0 }
+    }
+}
+fn bt_gatts_cb_addr() -> u32 {
+    unsafe {
+        let first = CB_SLOT_TAB[1];
+        let mut i = 1;
+        while i < 8 {
+            let v = CB_SLOT_TAB[i * 2 + 1];
+            if v >= 0x400d0000 && v < 0x40120000 && v != first {
+                return v;
+            }
+            i += 1;
+        }
+        0
+    }
+}
+
+fn bt_cb_push(kind: u32, ev: u32, a3: u32, p: &[u32; 8]) {
+    unsafe {
+        let f = if kind == 0 { bt_gap_cb_addr() } else { bt_gatts_cb_addr() };
+        if f == 0 || CBQ_N >= 6 { return; }
+        let i = ((CBQ_HEAD + CBQ_N) % 6) as usize;
+        CBQ_FN[i] = f;
+        CBQ_EV[i] = ev;
+        CBQ_A3[i] = a3;
+        CBQ_KIND[i] = kind;
+        CBQ_PW[i] = *p;
+        CBQ_N += 1;
+        cb_diag_log(b"[CBQ] push ", (kind << 8) | ev, f);
+    }
+}
+
+unsafe fn bt_inject_restore(c: &mut crate::xtensa::state::CoreState) {
+    use crate::xtensa::constants::{CACHE_CONTROL, INT_SET, MEM_FAULT_INFO, MISC_REGISTER, PS_REGISTER};
+    c.pc = CB_S_PC;
+    c.next_pc = CB_S_NPC;
+    c.special_registers[INT_SET] = CB_S_INTSET;
+    c.special_registers[PS_REGISTER] = CB_S_PS;
+    c.special_registers[MISC_REGISTER] = CB_S_MISC;
+    c.special_registers[MEM_FAULT_INFO] = CB_S_BASE;
+    c.special_registers[CACHE_CONTROL] = CB_S_CC;
+    c.idle = CB_S_IDLE;
+    c.pending_interrupts = CB_S_PEND;
+    c.light_sleep = CB_S_LS;
+    let mut r = 0u32;
+    while r < 64 {
+        c.physical_registers[r as usize] = CB_S_PHYS[(c.index as usize) * 64 + r as usize];
+        r += 1;
+    }
+    // Capture state right after restore (own budget).
+    {
+        static mut CBR_N: u32 = 0;
+        if CBR_N < 12 {
+            CBR_N += 1;
+            let mut m = [0u8; 48];
+            let hx = |mut v: u32, o: &mut [u8]| {
+                for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+            };
+            let mut h = [0u8; 8];
+            let mut n = 0;
+            for &b in b"[CBR] pc=" { m[n] = b; n += 1; }
+            hx(c.pc, &mut h); for &b in &h { m[n] = b; n += 1; }
+            for &b in b" intset=" { m[n] = b; n += 1; } hx(c.special_registers[INT_SET], &mut h); for &b in &h { m[n] = b; n += 1; }
+            crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+            n = 0;
+            for &b in b"[CBBR] wb=" { m[n] = b; n += 1; }
+            hx(c.special_registers[MEM_FAULT_INFO], &mut h); for &b in &h { m[n] = b; n += 1; }
+            for &b in b" a5=" { m[n] = b; n += 1; } hx(c.ar(5), &mut h); for &b in &h { m[n] = b; n += 1; }
+            crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+        }
+    }
+}
+
+fn bt_cb_consume() {
+    unsafe {
+        if CBQ_N > 0 { CBQ_N -= 1; }
+        CBQ_HEAD = (CBQ_HEAD + 1) % 6;
+    }
+}
+
+// Pop one queued callback onto an eligible core. Called ONLY from
+// native_pump_events (between run_instruction chunks — never from the RF
+// MMIO path, which runs mid-instruction). Eligibility: enabled, WOE=1,
+// EXCM=0, window bit(base) SET and bits(base+1)/(base+2) CLEAR (so the
+// callee's entry neither overflows nor breaks the retw rt check).
+fn bt_inject_pump() {
+    use crate::xtensa::constants::{CACHE_CONTROL, INT_SET, MEM_FAULT_INFO};
+    use crate::xtensa::memory::{dma_read_u32, dma_write_u32};
+    use crate::xtensa::state::CoreState;
+    unsafe {
+        if CB_RUN != 0 {
+            CB_PUMP_N = CB_PUMP_N.wrapping_add(1);
+            if CB_PUMP_N > CB_PUMP_MAX {
+                let tcb = dma_read_u32(0x3ffc3ce0 + CB_CORE * 4);
+                if tcb == CB_TCB && tcb != 0 {
+                    let c = CoreState::from_index(CB_CORE);
+                    bt_inject_restore(c);
+                    cb_diag_log(b"[CBIN] pump-abort ", CB_CORE, CB_S_PC);
+                } else {
+                    cb_diag_log(b"[CBIN] pump-leak ", CB_CORE, tcb);
+                }
+                CB_RUN = 0;
+                CB_TICK = 0;
+                CB_PUMP_N = 0;
+                bt_cb_consume();
+            }
+            return;
+        }
+        if CBQ_N == 0 { return; }
+        let order = [1u32, 0u32];
+        let mut k = 0;
+        while k < 2 {
+            let idx = order[k];
+            k += 1;
+            let c = CoreState::from_index(idx);
+            if c.enabled == 0 { continue; }
+            if c.ps_woe() == 0 || c.ps_excm() != 0 { continue; }
+            let wb = c.special_registers[MEM_FAULT_INFO] & 15;
+            let cc = c.special_registers[CACHE_CONTROL];
+            if (cc & (1 << wb)) == 0 { continue; }
+            if (cc & (1 << ((wb + 1) & 15))) != 0 { continue; }
+            if (cc & (1 << ((wb + 2) & 15))) != 0 { continue; }
+            let i = CBQ_HEAD as usize;
+            // Save full context.
+            CB_S_PC = c.pc;
+            CB_S_NPC = c.next_pc;
+            CB_S_INTSET = c.special_registers[INT_SET];
+            CB_S_PS = c.special_registers[crate::xtensa::constants::PS_REGISTER];
+            CB_S_MISC = c.special_registers[crate::xtensa::constants::MISC_REGISTER];
+            CB_S_BASE = c.special_registers[MEM_FAULT_INFO];
+            CB_S_CC = c.special_registers[CACHE_CONTROL];
+            CB_S_IDLE = c.idle;
+            CB_S_PEND = c.pending_interrupts;
+            CB_S_LS = c.light_sleep;
+            let mut r = 0u32;
+            // Save the whole physical register file by absolute slot
+            // (the cb's own window overlaps alias these slots).
+            let k = (idx as usize) * 64;
+            while r < 64 {
+                CB_S_PHYS[k + r as usize] = c.physical_registers[r as usize];
+                r += 1;
+            }
+            // Capture state at SAVE (own budget, not CB_LOG_N).
+            {
+                static mut CBS_N: u32 = 0;
+                if CBS_N < 12 {
+                    CBS_N += 1;
+                    let mut m = [0u8; 48];
+                    let hx = |mut v: u32, o: &mut [u8]| {
+                        for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+                    };
+                    let mut h = [0u8; 8];
+                    let mut n = 0;
+                    for &b in b"[CBS] pc=" { m[n] = b; n += 1; }
+                    hx(CB_S_PC, &mut h); for &b in &h { m[n] = b; n += 1; }
+                    for &b in b" intset=" { m[n] = b; n += 1; } hx(CB_S_INTSET, &mut h); for &b in &h { m[n] = b; n += 1; }
+                    crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+                    n = 0;
+                    for &b in b"[CBSB] wb=" { m[n] = b; n += 1; }
+                    hx(CB_S_BASE, &mut h); for &b in &h { m[n] = b; n += 1; }
+                    // a5 read from its save-window physical slot.
+                    for &b in b" a5=" { m[n] = b; n += 1; } hx(CB_S_PHYS[((idx as usize) * 64) + ((((CB_S_BASE & 15) << 2) + 5) % 64) as usize], &mut h); for &b in &h { m[n] = b; n += 1; }
+                    crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+                }
+            }
+            CB_TCB = dma_read_u32(0x3ffc3ce0 + idx * 4);
+            // Synthetic call8 frame: param block at SP-256 (inside the 512B
+            // red zone below the interrupted frame, above the callee's frame
+            // which lands at SP-512-framesize; nested calls go lower still).
+            let sp = CB_S_PHYS[((idx as usize) * 64) + ((((wb << 2) + 1) % 64)) as usize];
+            let param = sp.wrapping_sub(256);
+            let mut w = 0;
+            while w < 8 { dma_write_u32(param.wrapping_add(w * 4), CBQ_PW[i][w as usize]); w += 1; }
+            // Args: gap(event, param) -> a2=ev, a3=param;
+            // gatts(event, gatt_if, param) -> a2=ev, a3=if, a4=param.
+            c.set_ar(10, CBQ_EV[i]);
+            if CBQ_KIND[i] == 1 {
+                c.set_ar(11, CBQ_A3[i]);
+                c.set_ar(12, param);
+            } else {
+                c.set_ar(11, param);
+                c.set_ar(12, 0);
+            }
+            // a0 = call8 return tag with our retw sentinel (low 30 bits),
+            // a1 = SP-512. PS: callinc must be 2 (callee entry rotates
+            // base += callinc — the interrupted core's callinc could be 1
+            // from a call4); INTLEVEL forced to 0 (the target may sit in a
+            // masked critical section / waiti). WOE/EXCM untouched (both
+            // already required above).
+            c.set_ar(8, 0x80000000 | (CB_TRAMP_ABS & 0x3FFFFFFF));
+            c.set_ar(1, sp.wrapping_sub(512));
+            c.special_registers[INT_SET] = (CB_S_INTSET & !0xF) | (2 << 16);
+            c.pending_interrupts = 0;
+            c.idle = 0;
+            c.pc = CBQ_FN[i];
+            c.next_pc = CBQ_FN[i];
+            CB_CORE = idx;
+            CB_RUN = 1;
+            CB_TICK = 0;
+            CB_PUMP_N = 0;
+            cb_diag_log(b"[CBIN] inj ", idx, CBQ_FN[i]);
+            return;
+        }
+        // No eligible core this pump — stay queued (retried next pump).
+    }
+}
+
 fn bt_adv_spoof_pump() {
     unsafe {
         if ADV_SPOOF_STAGE == 0 || !bt_bluedroid_started() {
@@ -7730,6 +8073,11 @@ fn bt_adv_spoof_pump() {
             let mut n = 0;
             for &b in msg { m[n] = b; n += 1; }
             crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+            // run306: deliver ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT (0).
+            // gap_cb(0) prints ADV_DATA_DONE and calls
+            // esp_ble_gap_start_advertising inline (disasm 0x400d1bee).
+            let p = [0u32; 8];
+            bt_cb_push(0, 0, 0, &p);
         } else if ADV_SPOOF_STAGE == 2 {
             ADV_SPOOF_STAGE = 3;
             let mut m = [0u8; 32];
@@ -7737,6 +8085,11 @@ fn bt_adv_spoof_pump() {
             let mut n = 0;
             for &b in msg { m[n] = b; n += 1; }
             crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+            // run306: ESP_GAP_BLE_ADV_START_COMPLETE_EVT (6); param->status
+            // u32 @0 (disasm: l32i a11,a3,0 at 0x400d1c05) = SUCCESS.
+            let mut p = [0u32; 8];
+            p[0] = 0;
+            bt_cb_push(0, 6, 0, &p);
         }
     }
 }
@@ -7760,6 +8113,10 @@ fn bt_gatt_spoof_pump() {
             let mut n = 0;
             for &b in msg { m[n] = b; n += 1; }
             crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+            // run306: ESP_GATTS_REG_EVT (0). Param unread by gatts_cb(0)
+            // (disasm 0x400d1b46); a3 = gatt_if (extui) -> 0.
+            let p = [0u32; 8];
+            bt_cb_push(1, 0, 0, &p);
         } else if GATT_SPOOF_STAGE == 2 {
             GATT_SPOOF_STAGE = 3;
             GATT_SPOOF_TICK = 50;
@@ -7768,6 +8125,16 @@ fn bt_gatt_spoof_pump() {
             let mut n = 0;
             for &b in msg { m[n] = b; n += 1; }
             crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+            // run306: ESP_GATTS_CREATE_EVT (7). Layout measured (disasm
+            // 0x400d1b72/l8ui a11,a4,24 = inst_id; 0x400d1b78/l16ui
+            // a10,a4,4 = service_handle): handle u16 @4, inst_id u8 @24,
+            // status u16 @0. handle=1 (BTC never assigned a real one —
+            // the mark prints unconditionally; start_service posts a10=1).
+            let mut p = [0u32; 8];
+            p[0] = 0;
+            p[1] = 1;
+            p[6] = 0;
+            bt_cb_push(1, 7, 0, &p);
         } else if GATT_SPOOF_STAGE == 3 {
             GATT_SPOOF_STAGE = 4;
             let mut m = [0u8; 32];
@@ -7775,6 +8142,12 @@ fn bt_gatt_spoof_pump() {
             let mut n = 0;
             for &b in msg { m[n] = b; n += 1; }
             crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+            // run306: ESP_GATTS_START_EVT (12); service_handle u16 @4
+            // (disasm 0x400d1b8d/l16ui a11,a4,4). Print unconditional.
+            let mut p = [0u32; 8];
+            p[0] = 0;
+            p[1] = 1;
+            bt_cb_push(1, 12, 0, &p);
         }
     }
 }
@@ -11287,6 +11660,10 @@ pub extern "C" fn native_pump_events() {
         // when the guest mostly spins on non-RF registers. BT_WAKE_ARMED /
         // UNMASK gates live inside bt_hci_poll; zero cost otherwise.
         bt_hci_poll();
+        // run306: pop one queued callback injection (safe here — between
+        // run_instruction chunks; NEVER from bt_hci_poll itself, which the
+        // RF MMIO write path calls mid-instruction).
+        bt_inject_pump();
         // Demand-driven BT LL re-wake (zero-cost unless a doorbell armed
         // it): repairs the scheduler-queue plumbing and re-unblocks the
         // task whenever it is parked with LL-signaled work.
@@ -11430,6 +11807,8 @@ pub fn reset_shim_diag() {
         DG_RST_N = 0; DG_GIVE_N = 0; DG_ENTRYPLANT_N = 0; DG_BTCB_N = 0; DG_NULLTAKE_DIAG = 0;
         DG_SENDNULL2_N2 = 0;
         WEDGE_N = 0; WEDGE_MUX = 0; WEDGE_DONE = 0; WEDGE_GAP = 0;
+        CBQ_N = 0; CBQ_HEAD = 0; CB_RUN = 0; CB_TICK = 0;
+        CB_PUMP_N = 0; CB_TCB = 0; CB_LOG_N = 0;
         QSTALE_LOGGED = 0; UNMASK25_DONE = 0; VEC25_LOGGED = 0;
         BTRF_LOG_LEFT = 800; BT_ALARM_LOG_LEFT = 8; BT_HWAKE_LOG_LEFT = 8;
         BT_POST_FIRE_LOG_LEFT = 0;

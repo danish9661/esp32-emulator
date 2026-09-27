@@ -1501,6 +1501,27 @@ pub(crate) fn read_special_register(core: &CoreState, reg: u32) -> u32 {
 pub(crate) fn write_special_register(core: &mut CoreState, reg: u32, val: u32) {
     match reg as usize {
         INT_SET => {
+            // Diag: full PS writes that clear WOE predate crash diagnosis
+            // (RWIL, INT_SET=0). Keep while the BT/BLE callback-injection
+            // path is under test.
+            if val & (1 << 18) == 0 {
+                unsafe {
+                    static mut PSW_N: u32 = 0;
+                    if PSW_N < 8 {
+                        PSW_N += 1;
+                        let mut m = [0u8; 40];
+                        let hx = |mut v: u32, o: &mut [u8]| {
+                            for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+                        };
+                        let mut n = 0;
+                        for &b in b"[PSW] pc=" { m[n] = b; n += 1; }
+                        let mut h = [0u8; 8];
+                        hx(core.pc, &mut h); for &b in &h { m[n] = b; n += 1; }
+                        for &b in b" val=" { m[n] = b; n += 1; } hx(val, &mut h); for &b in &h { m[n] = b; n += 1; }
+                        crate::js_log_str(m.as_ptr() as u32, n as u32);
+                    }
+                }
+            }
             core.special_registers[INT_SET] = val;
             core.pending_interrupts = 1;
         }
