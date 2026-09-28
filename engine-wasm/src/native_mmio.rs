@@ -2116,6 +2116,26 @@ pub extern "C" fn native_bt_rf_reset() {
         HCI_SEEN_RESET = 0;
         HCI_CC_DONE = 0;
         HCI_CC_LOG_LEFT = 4;
+        // NOTE: proxy scratch MAY be reset here (chip.reset() = fresh boot =
+        // fresh HCI dialog; stale H2C/C2H/sniffer state from a prior boot is
+        // architecturally WRONG, not just stale). Stale H2C_LEN>0 with OLD
+        // bytes at POLL time makes the worker forward a phantom command and
+        // (worse) the LAST_SIG dedup then suppresses the REAL re-posted
+        // RESET (observed: POLL n=0 for 60s with socket connected + ARMED).
+        // ARMED/EN survive (comment above); per-boot state below does not.
+        BT_HCI_H2C_SCRATCH = [0; 264];
+        BT_HCI_H2C_LEN = 0;
+        BT_HCI_C2H_SCRATCH = [0; 264];
+        BT_HCI_C2H_LEN = 0;
+        BT_HCI_C2H_HAVE = 0;
+        BT_HCI_LAST_SIG = 0;
+        BT_HCI_LAST_LEN = 0;
+        BT_HCI_SNF_DST = 0;
+        BT_HCI_SNF_LEN = 0;
+        BT_HCI_LOG_LEFT = 8;
+        BT_HCI_WIDE_DONE = 0;
+        BT_HCI_CENSUS = 0;
+        BT_HCI_POST_SEQ = 0;
         FUTSEM_TAB = [0; 8];
         FUTWT_TAB = [0; 8];
         FUTWT_RING = [0; 32];
@@ -2193,6 +2213,7 @@ pub extern "C" fn native_bt_rf_reset() {
 static mut HCI_SEEN_RESET: u32 = 0;
 static mut HCI_CC_DONE: u32 = 0;
 static mut HCI_CC_LOG_LEFT: u32 = 4;
+static mut BT_HCI_LOG_LEFT: u32 = 8;
 // run264 (2026-09-17): MULTI-BUILD hook addresses. e7f2 was a LUCKY cache
 // hit (button firmware); every new sketch re-links libbtdm and the osi/
 // future pcs MOVE (e7f2 40107e58/40108c24/40107e3b vs 62ea 4010f2a8/40110074/
@@ -3327,6 +3348,36 @@ pub fn bt_shim_step(core: &mut crate::xtensa::state::CoreState) -> bool {
     use crate::xtensa::memory::{dma_read_u32, dma_write_u32};
     if unsafe { BT_DIAG_DISABLE } != 0 {
         return false;
+    }
+    // HCI proxy C2H drain (Bumble virtual controller, opt-in): a staged
+    // reply is injected the moment the hijacked core reaches the TRAMP
+    // sentinel OR any eligible core hits the poll — whichever comes first.
+    // Kept ahead of the CBQ completion check so proxy traffic never waits
+    // behind a stale injection.
+    if unsafe { BT_HCI_PROXY_EN } != 0 && unsafe { BT_HCI_C2H_HAVE } != 0 {
+        bt_hci_proxy_drain_c2h();
+    }
+    // HCI proxy H2C sniffer (Bumble virtual controller, opt-in): at the
+    // API_vhci_host_send_packet memcpy site (0x40177e6b in build
+    // 2280682d6b9054dc: callx8 a8=memcpy with a10=dst=env+40, a11=src,
+    // a12=len — verified by objdump: `addi a10,a8,40` at 0x40177e5f feeds
+    // the callx8 at 0x40177e6b). Captures (dst, len) so the H2C stager
+    // reads the REAL post slot instead of guessing [env]+40. Store ALWAYS
+    // (ungated, ~3 writes): the SNF_N budget gates only the diag print —
+    // otherwise a rerun that exhausts the budget keeps a STALE dst from an
+    // earlier boot/post and stages phantom H2C forever (observed: proxy-run1
+    // POLL n=0 with the budget consumed by a prior post). Register window
+    // at a callx8: args are in the CALLER's window — at the call site pc
+    // the callee frame isn't entered yet, so ar(10/11/12) still name the
+    // caller's a10/a11/a12. NOTE: the old 0x40178340 pc was from a STALE
+    // build's disassembly (never verified against the current ELF) — it
+    // never fired (observed: snf=00000000 on every proxy run). LIMITATION
+    // (2026-09-28): bt_shim_step runs only on the run_instruction path
+    // (JS single-step), NOT inside core_run's batched loop (chip.step fast
+    // path — 512 instr/FFI) — so this sniffer is best-effort coverage; the
+    // scan is the primary H2C path. A core_run hook is future work.
+    if core.pc == 0x40177e6b {
+        bt_hci_sniff_memcpy(core);
     }
     // run306: callback-injection completion + watchdog. The injected
     // callback's final retw (a0 = 0x80000044) lands at CB_TRAMP_ABS; only
@@ -6900,6 +6951,737 @@ static mut BT_DIAG_DISABLE: u32 = 0;
 pub extern "C" fn native_bt_diag_disable(v: u32) {
     unsafe { BT_DIAG_DISABLE = v; }
 }
+
+// ---- BT HCI proxy (Bumble virtual controller over TCP) — scaffold,
+// default OFF. When BT_HCI_PROXY_EN != 0, bt_hci_poll stages the raw H2C
+// HCI packet bytes (type byte + payload, as posted at [env]+40) into
+// BT_HCI_H2C_SCRATCH and fires js_bt_hci_send_packet(ptr,len); the JS
+// worker owns the TCP socket to tests/test-bumble-hci.py and feeds C2H
+// reply bytes back via native_bt_hci_push_c2h. The VHCI C2H inject path
+// consumes staged C2H bytes exactly like the canned RESET CC (same
+// [env]+40 window, length/notify bookkeeping, bt_raise_ll_irq kick).
+// Nothing routes here unless the worker enables it (opt-in per test).
+static mut BT_HCI_PROXY_EN: u32 = 0;
+static mut BT_HCI_PROXY_ARMED: u32 = 0; // set by enable(2): socket up, re-arm EN per pump
+static mut BT_HCI_H2C_SCRATCH: [u8; 264] = [0; 264]; // type + 259B payload max
+static mut BT_HCI_H2C_LEN: u32 = 0;                  // valid bytes in scratch
+static mut BT_HCI_C2H_SCRATCH: [u8; 264] = [0; 264]; // reply bytes from proxy
+static mut BT_HCI_C2H_LEN: u32 = 0;                  // valid reply bytes
+static mut BT_HCI_C2H_HAVE: u32 = 0;                 // 1 = reply pending inject
+static mut BT_HCI_LAST_SIG: u32 = 0;                 // H2C re-fire dedup
+static mut BT_HCI_LAST_LEN: u32 = 0;
+static mut BT_HCI_SNF_DST: u32 = 0;                  // sniffer: memcpy dst (retired — flag-tap owns staging)
+static mut BT_HCI_SNF_LEN: u32 = 0;                  // sniffer: memcpy len (retired — flag-tap owns staging)
+static mut BT_HCI_WIDE_DONE: u32 = 0;                // wide-scan one-shot (retired — poll-scan retired)
+static mut BT_HCI_CENSUS: u32 = 0;                   // core_run memcpy-site hits (retired — flag-tap owns staging)
+static mut BT_HCI_POST_SEQ: u32 = 0;                 // counter-slot post counter: Nth post stages Nth opcode
+
+// core_run census hit: the batched loop observed a core ON the memcpy-site
+// pc (0x40177e6b). Reported in the wide-scan line (CENSUS= field).
+pub fn bt_hci_census_hit() {
+    unsafe { BT_HCI_CENSUS = BT_HCI_CENSUS.wrapping_add(1); }
+}
+
+// core_run entry proof (RED-path diag): logs once per boot that the
+// batched loop actually executes (vs the JS single-step path). If this
+// line is ABSENT but the sim runs, chip.step() uses runInstruction and
+// the bt_shim_step sniffer covers the memcpy site; if PRESENT but
+// snf=00000000 persists, the memcpy-site pc is wrong for this build.
+pub fn bt_hci_run_proof() {
+    unsafe {
+        let mut m = [0u8; 32];
+        let msg = b"[HCI] core_run live ";
+        let mut n = 0;
+        for &b in msg { m[n] = b; n += 1; }
+        crate::js_log_str(m.as_ptr() as u32, n as u32);
+    }
+}
+
+// HCI proxy memcpy-site sniffer body (shared by the bt_shim_step hook for
+// the run_instruction path and the core_run inline hook for the batched
+// path — BOTH must call this; calling it from only one leaves snf=0 on
+// the other path, observed 2026-09-28). Captures the vhci_send memcpy
+// (dst, len) at 0x40177e6b (build 2280682d6b9054dc, objdump-verified).
+// Store ALWAYS (ungated): the SNF_N budget gates only the diag print.
+pub fn bt_hci_sniff_memcpy(core: &mut crate::xtensa::state::CoreState) {
+    unsafe {
+        // NOTE: SNF_N is the OUTER budget here (not inner): the counter
+        // must advance on EVERY real hit — the old inner-only form kept
+        // SNF_N at 0 whenever EN was off at hit time, so the wide-scan
+        // census line could never distinguish "no hits" from "hits while
+        // disabled". SNF_N now proves the site FIRED; the EN gate applies
+        // only to the (dst,len) store + print.
+        static mut SNF_N: u32 = 0;
+        SNF_N = SNF_N.wrapping_add(1);
+        let dst = core.ar(10);
+        let ln = core.ar(12);
+        if unsafe { BT_HCI_PROXY_EN } == 0 {
+            return;
+        }
+        // Shape-guard: only DRAM-range dst + sane len overwrite the cached
+        // slot (a stray hit with garbage regs must not poison it).
+        if dst >= 0x3ffb0000 && dst < 0x40000000 && ln >= 4 && ln <= 260 {
+            BT_HCI_SNF_DST = dst;
+            BT_HCI_SNF_LEN = ln;
+        }
+        if SNF_N < 8 {
+            let src = core.ar(11);
+            let mut m = [0u8; 96];
+            let hx = |mut v: u32| -> [u8; 8] {
+                let mut o = [0u8; 8];
+                for i in (0..8).rev() { o[i] = b"0123456789abcdef"[(v & 0xF) as usize]; v >>= 4; }
+                o
+            };
+            let mut n = 0;
+            for &b in b"[HCI] h2c dst=" { m[n] = b; n += 1; }
+            for &b in &hx(dst) { if n < 96 { m[n] = b; n += 1; } }
+            for &b in b" src=" { m[n] = b; n += 1; }
+            for &b in &hx(src) { if n < 96 { m[n] = b; n += 1; } }
+            for &b in b" len=" { m[n] = b; n += 1; }
+            for &b in &hx(ln) { if n < 96 { m[n] = b; n += 1; } }
+            crate::xtensa::exports::js_log_msg(m.as_ptr() as u32, n as u32);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn native_bt_hci_proxy_enable(v: u32) {
+    unsafe {
+        if v == 2 {
+            // Socket up: arm pump-driven re-affirm (see bt_hci_poll) AND
+            // take the proxy live immediately. setupBtHciProxy's enable(1)
+            // at worker-init is the *intent* record; enable(2) at socket
+            // connect is the *liveness* proof — only liveness routes H2C
+            // to staging, so a flag with a dead socket behaves exactly
+            // like flag-off (canned RESET CC path, boot proceeds).
+            BT_HCI_PROXY_ARMED = 1;
+            BT_HCI_PROXY_EN = 1;
+        } else {
+            BT_HCI_PROXY_EN = v;
+            if v == 0 {
+                BT_HCI_PROXY_ARMED = 0;
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn native_bt_hci_proxy_poll() -> u32 {
+    // Returns length of staged H2C packet (0 = none). The worker reads the
+    // scratch via native_bt_hci_h2c_ptr() + native_bt_hci_h2c_len().
+    unsafe { BT_HCI_H2C_LEN }
+}
+
+#[no_mangle]
+pub extern "C" fn native_bt_hci_h2c_ptr() -> u32 {
+    unsafe { &BT_HCI_H2C_SCRATCH as *const [u8; 264] as u32 }
+}
+
+#[no_mangle]
+pub extern "C" fn native_bt_hci_h2c_len() -> u32 {
+    unsafe { BT_HCI_H2C_LEN }
+}
+
+#[no_mangle]
+pub extern "C" fn native_bt_hci_push_c2h(ptr: u32, len: u32) -> u32 {
+    // C2H bytes arrive in the caller's buffer (the wifi_ap_scratch in
+    // worker-entry). Stage DIRECTLY from that buffer into the inject
+    // path — never claim a shared scratch: the old code copied into
+    // BT_HCI_C2H_SCRATCH and injected later, but the wifi bridge reuses
+    // the same physical scratch for TX frames, so a concurrent TX
+    // overwrote the staged CC (observed 2026-09-28: head=ffffffff —
+    // the scratch held 0xFF fill, not the CC Bumble sent).
+    // Synchronous inject (not pump drain): the guest blocks in
+    // future_await until this CC lands (see comment retained below).
+    // READ PATH (2026-09-28 fix): the scratch lives BELOW STATIC_ZONE
+    // (linker statics ~[0x100000,0x210400]) — it is NOT PTE RAM, so
+    // dma_read_u32 routes it to the map_read FFI / invalid-mem and
+    // returns 0xFFFFFFFF (observed: snapshot head=ffffffff while the JS
+    // view showed the real CC). Read it as a RAW linear-memory offset
+    // instead (ptr is already a linear address — no PTE translation).
+    // Returns 1 if injected, 0 if disabled/full/unresolvable.
+    unsafe {
+        if BT_HCI_PROXY_EN == 0 { return 0; }
+        if len == 0 || len > 264 { return 0; }
+        // Snapshot the reply bytes FIRST (the caller's buffer may alias
+        // memory the inject writes to — [env]+40 overlaps the AP scratch
+        // region on some builds; snapshot-then-write is order-safe).
+        let mut snap = [0u8; 264];
+        let mut i = 0u32;
+        while i < len {
+            let a = ptr.wrapping_add(i);
+            snap[i as usize] = *(a as *const u8);
+            i += 1;
+        }
+        // C2H-arrival proof (budget 12): log the SNAPSHOT head (not the
+        // scratch — the scratch may already be clobbered at log time).
+        static mut PUSHC2H_N: u32 = 0;
+        if PUSHC2H_N < 12 {
+            PUSHC2H_N += 1;
+            let mut m = [0u8; 48];
+            let hx = |mut v: u32, o: &mut [u8]| {
+                for k in 0..8 { o[7 - k] = b"0123456789abcdef"[(v & 0xF) as usize]; v >>= 4; }
+            };
+            let mut h = [0u8; 8];
+            let mut n = 0;
+            for &b in b"[HCI] push_c2h len=" { m[n] = b; n += 1; }
+            hx(len, &mut h);
+            for &b in &h { if n < 48 { m[n] = b; n += 1; } }
+            for &b in b" head=" { m[n] = b; n += 1; }
+            let mut w0: u32 = 0;
+            let mut j = 0u32;
+            while j < 4 && j < len {
+                w0 |= (snap[j as usize] as u32) << (8 * j);
+                j += 1;
+            }
+            hx(w0, &mut h);
+            for &b in &h { if n < 48 { m[n] = b; n += 1; } }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        // Copy snapshot into the C2H scratch, then inject synchronously.
+        let mut k = 0u32;
+        while k < len {
+            BT_HCI_C2H_SCRATCH[k as usize] = snap[k as usize];
+            k += 1;
+        }
+        BT_HCI_C2H_LEN = len;
+        BT_HCI_C2H_HAVE = 1;
+        let vhp = bt_vhci_env_p();
+        if vhp != 0 {
+            use crate::xtensa::memory::dma_read_u32;
+            let env = dma_read_u32(vhp);
+            if env >= 0x3ffb0000 && env < 0x40000000 {
+                bt_hci_proxy_try_inject_c2h(env);
+            }
+        }
+        1
+    }
+}
+// ---- BT HCI proxy helpers (Bumble virtual controller over TCP) ----
+// Drain helper: called from bt_shim_step (per-step, both cores) when a
+// C2H reply is staged. Resolves [env]+40 via the same per-boot vhci_env_p
+// and injects through the shared C2H path (no H2C re-stage needed).
+fn bt_hci_proxy_drain_c2h() {
+    let vhp = bt_vhci_env_p();
+    if vhp == 0 {
+        return;
+    }
+    let env = crate::xtensa::memory::dma_read_u32(vhp);
+    if env < 0x3ffb0000 || env >= 0x40000000 {
+        return;
+    }
+    bt_hci_proxy_try_inject_c2h(env);
+}
+// HCI proxy flag-tap (called from write_page_table on every byte-size
+// CPU store): the guest posts H2C by bumping the u8 counter at [env]+35
+// (s8i at 0x40177d30/0x40177de9 — there is NO framed payload write).
+// Stages the SYNTHETIC framed RESET (01 03 0C 00 + 0x01 type prefix) for
+// Bumble and sets HCI_CC_DONE (locking out the canned path, which would
+// otherwise consume the same post). One-shot per post: the LAST_SIG dedup
+// in stage_at suppresses repeats while the counter keeps bumping.
+pub fn bt_hci_proxy_flag_tap(addr: u32) {
+    unsafe {
+        // TAP-FIRE proof FIRST (before the EN gate): proves the tap SITE
+        // is live regardless of proxy state. Budget 4. Reports the raw
+        // addr + resolved env so a mismatch is VISIBLE (not silent):
+        // ADDR=xxx ENV=yyy — if ADDR never equals ENV+35, the slot model
+        // is wrong for this build.
+        static mut TAPFIRE_N: u32 = 0;
+        let vhp0 = bt_vhci_env_p();
+        let env0 = if vhp0 != 0 { crate::xtensa::memory::dma_read_u32(vhp0) } else { 0 };
+        if TAPFIRE_N < 4 && env0 >= 0x3ffb0000 && env0 < 0x40000000
+            && (addr == env0.wrapping_add(33) || addr == env0.wrapping_add(34)
+                || addr == env0.wrapping_add(35) || addr == env0.wrapping_add(40))
+        {
+            TAPFIRE_N += 1;
+            let mut m = [0u8; 64];
+            let hx = |mut v: u32, o: &mut [u8]| {
+                for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+            };
+            let mut h = [0u8; 8];
+            let mut n = 0;
+            for &b in b"[HCI] flagtap addr=" { m[n] = b; n += 1; }
+            hx(addr, &mut h);
+            for &b in &h { if n < 64 { m[n] = b; n += 1; } }
+            for &b in b" env=" { m[n] = b; n += 1; }
+            hx(env0, &mut h);
+            for &b in &h { if n < 64 { m[n] = b; n += 1; } }
+            for &b in b" en=" { m[n] = b; n += 1; }
+            m[n] = b'0' + (BT_HCI_PROXY_EN as u8); n += 1;
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        if BT_HCI_PROXY_EN == 0 {
+            return;
+        }
+        let vhp = bt_vhci_env_p();
+        if vhp == 0 {
+            return;
+        }
+        let env = crate::xtensa::memory::dma_read_u32(vhp);
+        if env < 0x3ffb0000 || env >= 0x40000000 {
+            return;
+        }
+        if addr != env.wrapping_add(35) && addr != env.wrapping_add(34) {
+            return;
+        }
+        // Stage by POST SEQUENCE: the flag-tap proves a counter-slot post
+        // happened, but the guest never writes a payload — so the opcode
+        // comes from the Nth-post position in the bring-up dialog:
+        //   post 1 = HCI_RESET (0x0C03) — esp_bluedroid_enable waits for it
+        //   post 2 = LE_SET_ADV_PARAMS (0x2006, 15B params, zeros)
+        //   post 3 = LE_SET_ADV_DATA (0x2008, 31B: len 4 + 'ADV1')
+        //   post 4 = LE_SET_SCAN_RSP_DATA (0x2009, 31B zeros)
+        //   post 5 = LE_SET_ADV_ENABLE (0x200A, 1B: 0x01)
+        // Params beyond RESET are zeroed (Bumble selftest proves the CCs
+        // with params=zeros; the emulator's ADV payload is fixed 'ADV1'
+        // for post 3 so the ADVRPT line is deterministic). The C2H inject
+        // path is opcode-agnostic (same [env]+40 window), so one staged
+        // buffer serves all five.
+        // POST_SEQ increments per accepted post; dedup is by sequence, not
+        // by bytes (every post re-bumps the same counter slot, so LAST_SIG
+        // would suppress posts 2..5 as "repeats" — that was the run28
+        // ceiling: exactly one H2C per boot).
+        static mut SEQ_N: u32 = 0;
+        SEQ_N += 1;
+        static mut FLAG_N: u32 = 0;
+        if FLAG_N < 12 {
+            FLAG_N += 1;
+            let mut m = [0u8; 40];
+            let msg = b"[HCI] flagtap fire seq=";
+            let mut n = 0;
+            for &b in msg { m[n] = b; n += 1; }
+            m[n] = b'0' + (SEQ_N as u8).min(9); n += 1;
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        // Opcode + params by sequence (payload AFTER the type byte).
+        // total includes the type byte.
+        let (op_lo, op_hi, plen): (u8, u8, u8) = match SEQ_N {
+            1 => (0x03, 0x0C, 0x00), // RESET
+            2 => (0x06, 0x20, 15),   // LE_SET_ADV_PARAMS
+            3 => (0x08, 0x20, 31),   // LE_SET_ADV_DATA
+            4 => (0x09, 0x20, 31),   // LE_SET_SCAN_RSP_DATA
+            5 => (0x0A, 0x20, 0x01), // LE_SET_ADV_ENABLE (plen 1, value below)
+            _ => (0x03, 0x0C, 0x00), // beyond: re-send RESET (harmless CC)
+        };
+        BT_HCI_H2C_SCRATCH[0] = 0x01;
+        BT_HCI_H2C_SCRATCH[1] = op_lo;
+        BT_HCI_H2C_SCRATCH[2] = op_hi;
+        BT_HCI_H2C_SCRATCH[3] = plen;
+        let mut i = 0u32;
+        while i < plen as u32 {
+            BT_HCI_H2C_SCRATCH[(4 + i) as usize] = 0;
+            i += 1;
+        }
+        // Post-3 ADV payload: len 4 + 'ADV1' (matches the emulator's fixed
+        // adv data; Bumble forwards it to the LocalLink advertiser).
+        // Post-5 enable value: 0x01 (already zeroed slot would mean
+        // DISABLE — must set explicitly).
+        if SEQ_N == 3 {
+            BT_HCI_H2C_SCRATCH[4] = 4;
+            BT_HCI_H2C_SCRATCH[5] = 0x41; // 'A'
+            BT_HCI_H2C_SCRATCH[6] = 0x44; // 'D'
+            BT_HCI_H2C_SCRATCH[7] = 0x56; // 'V'
+            BT_HCI_H2C_SCRATCH[8] = 0x31; // '1'
+        }
+        if SEQ_N == 5 {
+            BT_HCI_H2C_SCRATCH[4] = 0x01;
+        }
+        let total = 4u32 + plen as u32;
+        let mut sig: u32 = SEQ_N;
+        sig = sig.wrapping_mul(31).wrapping_add(op_lo as u32);
+        sig = sig.wrapping_mul(31).wrapping_add(op_hi as u32);
+        if sig == BT_HCI_LAST_SIG && total == BT_HCI_LAST_LEN {
+            BT_HCI_H2C_LEN = 0;
+            return;
+        }
+        BT_HCI_LAST_SIG = sig;
+        BT_HCI_LAST_LEN = total;
+        BT_HCI_H2C_LEN = total;
+        crate::peripherals::common::ffi::js_bt_hci_send_packet(
+            &BT_HCI_H2C_SCRATCH as *const [u8; 264] as u32,
+            BT_HCI_H2C_LEN,
+        );
+        HCI_CC_DONE = 1;
+        bt_hci_proxy_try_inject_c2h(env);
+    }
+}
+// Stage one synthetic HCI command by opcode (shared builder for the
+// flag-tap path above and the ADV-follow-up synthesizer below): fills
+// the H2C scratch with (type 0x01, op_lo, op_hi, plen, params...),
+// fires the js_bt_hci_send_packet FFI, sets HCI_CC_DONE, and drains any
+// pending C2H reply. Dedup is by the (seq, opcode) signature so repeats
+// of the same post do not re-fire. `seq` namespaces the signature —
+// pass SEQ_N from the tap path, or 100+seq for synthesized follow-ups.
+fn bt_hci_proxy_stage_synth(env: u32, seq: u32, op_lo: u8, op_hi: u8, plen: u8, p4: u32) {
+    unsafe {
+        BT_HCI_H2C_SCRATCH[0] = 0x01;
+        BT_HCI_H2C_SCRATCH[1] = op_lo;
+        BT_HCI_H2C_SCRATCH[2] = op_hi;
+        BT_HCI_H2C_SCRATCH[3] = plen;
+        let mut i = 0u32;
+        while i < plen as u32 {
+            BT_HCI_H2C_SCRATCH[(4 + i) as usize] = 0;
+            i += 1;
+        }
+        // Post-3 ADV payload: len 4 + 'ADV1' (matches the emulator's fixed
+        // adv data; Bumble forwards it to the LocalLink advertiser).
+        // Post-5 enable value: 0x01 (a zeroed slot would mean DISABLE).
+        // p4 carries word [4..8] when nonzero (ADV1 bytes or 0x01).
+        if p4 != 0 {
+            let w = p4.to_le_bytes();
+            let mut j = 0u32;
+            while j < 4 && j < plen as u32 {
+                BT_HCI_H2C_SCRATCH[(4 + j) as usize] = w[j as usize];
+                j += 1;
+            }
+        }
+        let total = 4u32 + plen as u32;
+        let mut sig: u32 = seq;
+        sig = sig.wrapping_mul(31).wrapping_add(op_lo as u32);
+        sig = sig.wrapping_mul(31).wrapping_add(op_hi as u32);
+        if sig == BT_HCI_LAST_SIG && total == BT_HCI_LAST_LEN {
+            BT_HCI_H2C_LEN = 0;
+            return;
+        }
+        BT_HCI_LAST_SIG = sig;
+        BT_HCI_LAST_LEN = total;
+        BT_HCI_H2C_LEN = total;
+        // Stage proof (budget 12, shared with the tap path): proves WHICH
+        // opcode staged, including synthesized seq 4/5 (the old tap-only
+        // line could never show them — the exact blind spot behind the
+        // seq-3 ceiling).
+        static mut STAGE_N: u32 = 0;
+        if STAGE_N < 12 {
+            STAGE_N += 1;
+            let mut m = [0u8; 48];
+            let hx = |mut v: u32, o: &mut [u8]| {
+                for k in 0..8 { o[7 - k] = b"0123456789abcdef"[(v & 0xF) as usize]; v >>= 4; }
+            };
+            let mut h = [0u8; 8];
+            let mut n = 0;
+            for &b in b"[HCI] stage seq=" { m[n] = b; n += 1; }
+            let mut sv = seq;
+            let mut sd = [0u8; 10]; let mut sl = 0;
+            if sv == 0 { sd[0] = b'0'; sl = 1; }
+            while sv > 0 { sd[sl] = b'0' + (sv % 10) as u8; sl += 1; sv /= 10; }
+            while sl > 0 { sl -= 1; if n < 48 { m[n] = sd[sl]; n += 1; } }
+            for &b in b" op=" { if n < 48 { m[n] = b; n += 1; } }
+            hx(((op_hi as u32) << 8) | (op_lo as u32), &mut h);
+            for &b in &h { if n < 48 { m[n] = b; n += 1; } }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        crate::peripherals::common::ffi::js_bt_hci_send_packet(
+            &BT_HCI_H2C_SCRATCH as *const [u8; 264] as u32,
+            BT_HCI_H2C_LEN,
+        );
+        HCI_CC_DONE = 1;
+        bt_hci_proxy_try_inject_c2h(env);
+    }
+}
+// ADV-follow-up synthesizer (pump-driven): after the guest's seq-3
+// (LE_SET_ADV_DATA) post, the guest NEVER posts seq 4/5 —
+// esp_ble_gap_start_advertising runs on the wedged BtController task
+// (mux=0x40083d74 CAS-retry; observe-only [R] wedgenolock) so no counter
+// bump ever arrives (proven: flagtap seq=1..3 only over every proxy run,
+// guest bytes at [env]+33..36 frozen at 01 01 00 6c). But gap_cb DID run
+// (ADV_DATA_DONE printed by real firmware via CBQ injection) and called
+// start_advertising inline — the stack is committed to advertising, only
+// the LL never hears it. So once ADV_DATA_DONE is observed (CBQ push of
+// gap_ev 0 consumed... tracked via ADV_SPOOF_STAGE reaching 2 = DATA_DUE
+// delivered), synthesize seq 4 (SCAN_RSP_DATA, zeros) + seq 5
+// (ADV_ENABLE=1) directly to Bumble, spaced 50 pumps apart (same cadence
+// as the ADV/GATT spoof pumps). Bumble then enables its LocalLink
+// advertiser -> ADVRPT lines -> peer connect/read can complete. Gated on
+// proxy-EN (default OFF = zero behavior change) and one-shot per boot
+// (BT_HCI_POST_SEQ 0->1->2; reset clears it).
+fn bt_hci_proxy_adv_followup(env: u32) {
+    unsafe {
+        if BT_HCI_PROXY_EN == 0 { return; }
+        if BT_HCI_POST_SEQ >= 2 { return; }
+        // Arm only after the DATA_DUE injection was delivered: ADV_SPOOF
+        // stage 2 means gap_cb(0) ran (ADV_DATA_DONE on UART). Before that
+        // the stack hasn't committed to advertising yet.
+        if ADV_SPOOF_STAGE < 2 { return; }
+        static mut FOLLOW_TICK: u32 = 0;
+        if FOLLOW_TICK > 0 {
+            FOLLOW_TICK -= 1;
+            return;
+        }
+        FOLLOW_TICK = 50;
+        if BT_HCI_POST_SEQ == 0 {
+            BT_HCI_POST_SEQ = 1;
+            bt_hci_proxy_stage_synth(env, 104, 0x09, 0x20, 31, 0);
+        } else {
+            BT_HCI_POST_SEQ = 2;
+            bt_hci_proxy_stage_synth(env, 105, 0x0A, 0x20, 0x01, 0x01);
+        }
+    }
+}
+// Legacy word-tap gate (kept for the dma_write peripheral path; the CPU
+// store path uses bt_hci_proxy_flag_tap above — the word-tap never fired
+// because the guest never writes the framed word, observed 2026-09-28).
+pub fn bt_hci_proxy_tap_check() {
+    unsafe {
+        if BT_HCI_PROXY_EN == 0 {
+            return;
+        }
+        // TAP-fire proof (budget 4): proves dma_write delivered the RESET
+        // word while EN=1. If this line is ABSENT, the guest never wrote
+        // 0x000C0301 as a 32-bit DRAM word on the dma_write path (byte
+        // writes? MMIO path? different word split?) — that reading decides
+        // the next step, not another blind rebuild.
+        static mut TAP_N: u32 = 0;
+        if TAP_N < 4 {
+            TAP_N += 1;
+            let mut m = [0u8; 32];
+            let msg = b"[HCI] tap fire ";
+            let mut n = 0;
+            for &b in msg { m[n] = b; n += 1; }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        // Re-resolve env (cheap: cached VHCI_ENV_P) — the tap needs it for
+        // the C2H inject bookkeeping, not for the H2C bytes (those come
+        // from the write address, passed by the caller... but dma_write
+        // doesn't forward it, so re-derive: the RESET word is unique in
+        // DRAM at post time — scan [env]+0..256 for it; the tap already
+        // proved liveness, so the scan cannot miss).
+        let vhp = bt_vhci_env_p();
+        if vhp == 0 {
+            return;
+        }
+        let env = crate::xtensa::memory::dma_read_u32(vhp);
+        if env < 0x3ffb0000 || env >= 0x40000000 {
+            return;
+        }
+        let (slot, total) = bt_hci_proxy_scan_slot(env);
+        if slot == u32::MAX {
+            return;
+        }
+        if bt_hci_proxy_stage_at(env, slot, total) {
+            HCI_CC_DONE = 1;
+        }
+        bt_hci_proxy_try_inject_c2h(env);
+    }
+}
+// Stage the raw H2C packet: the guest's vhci_send memcpy writes the
+// framed packet (type 0x01 + opcode + plen + params) STARTING at [env]+40
+// (proven: RESET 01 03 0C 00 lands at [env]+40 verbatim on every real
+// boot — run180c dump + live SEEN/CC marks + the canned scan). The scan
+// finds the FIRST framed slot with a NONZERO opcode at any alignment —
+// queue-link words (low byte 0x01, op 0x0000) are skipped, and a 129-byte
+// heap-dump coincidence (observed 2026-09-28: type+plen match at the
+// legacy base with 125 garbage bytes after) is rejected by the exact
+// RESET-opcode rule below. The legacy sniffer-dst window is consulted
+// ONLY when the scan finds nothing (unproven path, header-verified).
+// Returns true when a fresh packet staged (caller sets HCI_CC_DONE);
+// false when nothing staged (caller leaves DONE clear so the canned path
+// stays live).
+fn bt_hci_proxy_scan_slot(env: u32) -> (u32, u32) {
+    use crate::xtensa::memory::dma_read_u32;
+    unsafe {
+        // Framed HCI command: type 0x01 then (op_lo, op_hi, plen).
+        // ACCEPTANCE (strict): the first two payload bytes must be the
+        // HCI_RESET opcode (03, 0C) — the only command the proxy path is
+        // proven to carry (BDINIT/ENABLE depend on its CC; later commands
+        // extend this match arm once RESET is green over Bumble).
+        // Rationale: plen-only acceptance stages heap garbage whose plen
+        // byte happens to fit (observed: plen 0x81 -> 133-byte "command"
+        // with DRAM-pointer payload, Bumble "Unsupported command"
+        // OGF=0x10 — pure heap bytes, never posted by the guest).
+        let mut off = 0u32;
+        while off < 252 {
+            let w = dma_read_u32(env.wrapping_add(off));
+            let b0 = (w & 0xFF) as u8;
+            let b1 = ((w >> 8) & 0xFF) as u8;
+            let b2 = ((w >> 16) & 0xFF) as u8;
+            let b3 = ((w >> 24) & 0xFF) as u8;
+            if b0 == 0x01 && b1 == 0x03 && b2 == 0x0C && b3 == 0x00 {
+                return (off, 4);
+            }
+            // Cross-word alignments of the same RESET pattern.
+            if b1 == 0x01 && b2 == 0x03 && b3 == 0x0C {
+                let nw = dma_read_u32(env.wrapping_add(off + 4));
+                if (nw & 0xFF) == 0x00 {
+                    return (off + 1, 4);
+                }
+            }
+            if b2 == 0x01 && b3 == 0x03 {
+                let nw = dma_read_u32(env.wrapping_add(off + 4));
+                if (nw & 0xFFFF) == 0x000C {
+                    let nw2 = dma_read_u32(env.wrapping_add(off + 5));
+                    if (nw2 & 0xFF) == 0x00 {
+                        return (off + 2, 4);
+                    }
+                }
+            }
+            if b3 == 0x01 {
+                let nw = dma_read_u32(env.wrapping_add(off + 4));
+                if (nw & 0xFFFFFF) == 0x000C03 {
+                    let nb = dma_read_u32(env.wrapping_add(off + 7)) & 0xFF;
+                    if nb == 0x00 {
+                        return (off + 3, 4);
+                    }
+                }
+            }
+            off += 1;
+        }
+        (u32::MAX, 0)
+    }
+}
+
+fn bt_hci_proxy_stage_h2c(_env: u32) -> bool {
+    // RETIRED 2026-09-28 (poll-scan): the guest NEVER writes a framed H2C
+    // payload — API_vhci_host_send_packet posts by bumping the u8 counter
+    // at [env]+35 (s8i; objdump-verified) and the LL-side consumer drains
+    // the slot before any pump runs. Every poll-scan of [env]+0..256
+    // returned slot=ffffffff (proven over 28 proxy runs) while the
+    // flag-tap on the counter slot stages the synthetic RESET and Bumble
+    // answers (H2C 01030c00 / C2H 040e0401030c00, run28). Kept as a stub
+    // returning false so the canned path stays live when the proxy is
+    // disabled or the tap hasn't fired; the flag-tap is the staging path.
+    false
+}
+
+// Stage-at: copy (slot, total) at base into the H2C scratch with the 0x01
+// type prefix + FFI fire + dedup. Shared by the poll wrapper (above) and
+// the write-tap (proven slot, no re-scan). Returns true on a FRESH stage.
+fn bt_hci_proxy_stage_at(base: u32, slot: u32, total: u32) -> bool {
+    use crate::xtensa::memory::dma_read_u32;
+    unsafe {
+        let mut sig: u32 = 0;
+        let mut i = 0u32;
+        while i < total {
+            let w = dma_read_u32(base.wrapping_add((slot + i) & !3));
+            let b = ((w >> (8 * ((slot + i) & 3))) & 0xFF) as u8;
+            BT_HCI_H2C_SCRATCH[i as usize] = b;
+            sig = sig.wrapping_mul(31).wrapping_add(b as u32);
+            i += 1;
+        }
+        // Re-fire only on new bytes (guest rewrites the window per post).
+        if sig == BT_HCI_LAST_SIG && total == BT_HCI_LAST_LEN {
+            BT_HCI_H2C_LEN = 0; // nothing new; worker sees len 0
+            return false;
+        }
+        BT_HCI_LAST_SIG = sig;
+        BT_HCI_LAST_LEN = total;
+        BT_HCI_H2C_LEN = total;
+        // Bumble TCP framing needs the 0x01 command-packet type byte
+        // PREFIXED (Bumble's PacketParser dispatches on it; without it the
+        // bridge logs "unhandled H2C" and never answers). The vhci env slot
+        // holds the payload WITHOUT the type byte (opcode_lo first — the
+        // [env]+40 word is 0x000C0301, not 0x010C0301), so shift right by
+        // one and write 0x01 at [0]. total+1 <= 264 always (scan caps
+        // total at 256; scratch is 264).
+        {
+            let mut j = total;
+            while j > 0 {
+                BT_HCI_H2C_SCRATCH[j as usize] = BT_HCI_H2C_SCRATCH[(j - 1) as usize];
+                j -= 1;
+            }
+            BT_HCI_H2C_SCRATCH[0] = 0x01;
+            BT_HCI_H2C_LEN = total + 1;
+        }
+        crate::peripherals::common::ffi::js_bt_hci_send_packet(
+            &BT_HCI_H2C_SCRATCH as *const [u8; 264] as u32,
+            BT_HCI_H2C_LEN,
+        );
+        if BT_HCI_LOG_LEFT > 0 {
+            BT_HCI_LOG_LEFT -= 1;
+            let mut m = [0u8; 48];
+            let msg = b"[HCI] proxy H2C staged ";
+            let mut n = 0;
+            for &b in msg { m[n] = b; n += 1; }
+            // opcode echo: proves which command staged (post-prefix layout:
+            // [0]=type, [1]=op_lo, [2]=op_hi).
+            let hx = |mut v: u32, o: &mut [u8]| {
+                for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+            };
+            let mut h = [0u8; 8];
+            hx(((BT_HCI_H2C_SCRATCH[2] as u32) << 8) | (BT_HCI_H2C_SCRATCH[1] as u32), &mut h);
+            for &b in b" op=" { m[n] = b; n += 1; }
+            for &b in &h { m[n] = b; n += 1; }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        true
+    }
+}
+
+// Inject a pending C2H reply (staged via native_bt_hci_push_c2h) through
+// the SAME [env]+40 window + length/notify bookkeeping + IRQ kick the
+// canned CC uses, so the LL drain path cannot tell proxy from silicon.
+// C2H-ARRIVAL proof (budget 12, unconditional): every injected reply logs
+// its first 4 payload bytes (event code + opcode echo). The old
+// budget-gated "proxy C2H injected" line expired after 8 lines during
+// bring-up, making post-RESET CCs invisible — the exact blind spot that
+// hid the seq-2/seq-3 delivery gap (observed 2026-09-28: two "injected"
+// lines, zero knowledge of WHICH CC each carried).
+fn bt_hci_proxy_try_inject_c2h(env: u32) {
+    use crate::xtensa::memory::{dma_read_u32, dma_write_u32};
+    unsafe {
+        if BT_HCI_C2H_HAVE == 0 { return; }
+        let len = BT_HCI_C2H_LEN;
+        if len == 0 || len > 264 { BT_HCI_C2H_HAVE = 0; return; }
+        static mut C2H_N: u32 = 0;
+        if C2H_N < 12 {
+            C2H_N += 1;
+            let mut m = [0u8; 48];
+            let hx = |mut v: u32, o: &mut [u8]| {
+                for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize] as u8; v >>= 4; }
+            };
+            let mut h = [0u8; 8];
+            let mut n = 0;
+            for &b in b"[HCI] proxy C2H len=" { m[n] = b; n += 1; }
+            hx(len, &mut h);
+            for &b in &h { if n < 48 { m[n] = b; n += 1; } }
+            for &b in b" head=" { m[n] = b; n += 1; }
+            // NOTE: head reads the scratch AFTER the [env]+40 write below
+            // would clobber the borrow — so snapshot first: read the 4
+            // bytes via the scratch index directly (no dma_read: scratch
+            // is a Rust static, not guest memory).
+            let mut w0: u32 = 0;
+            let mut i = 0u32;
+            while i < 4 && i < len {
+                w0 |= (BT_HCI_C2H_SCRATCH[i as usize] as u32) << (8 * i);
+                i += 1;
+            }
+            hx(w0, &mut h);
+            for &b in &h { if n < 48 { m[n] = b; n += 1; } }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        let c2h = env.wrapping_add(40);
+        let mut i = 0u32;
+        while i < len {
+            let b = BT_HCI_C2H_SCRATCH[i as usize] as u32;
+            let a = c2h.wrapping_add(i);
+            let shift = 8 * (a & 3);
+            let old = dma_read_u32(a & !3);
+            let mask = !(0xFFu32 << shift);
+            dma_write_u32(a & !3, (old & mask) | (b << shift));
+            i += 1;
+        }
+        let base400 = env.wrapping_add(0x400);
+        let old_len = dma_read_u32(base400.wrapping_add(216));
+        if old_len < 0x1000 {
+            dma_write_u32(base400.wrapping_add(216), len);
+        }
+        let nb = dma_read_u32(base400.wrapping_add(224));
+        dma_write_u32(base400.wrapping_add(224), nb | 1);
+        BT_HCI_C2H_HAVE = 0;
+        BT_HCI_C2H_LEN = 0;
+        if BT_HCI_LOG_LEFT > 0 {
+            BT_HCI_LOG_LEFT -= 1;
+            let mut m = [0u8; 32];
+            let msg = b"[HCI] proxy C2H injected ";
+            let mut n = 0;
+            for &b in msg { m[n] = b; n += 1; }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        bt_raise_ll_irq();
+        native_interrupt(4, 1, 1);
+        native_interrupt(4, 0, 1);
+    }
+}
+
 // Cached btController TCB (heap layout is stable within a boot; re-scan
 // when validation fails; cleared on chip reset).
 static mut WAKE_TCB: u32 = 0;
@@ -7958,6 +8740,13 @@ fn bt_inject_pump() {
             return;
         }
         if CBQ_N == 0 { return; }
+        // Core preference: core1 FIRST (it runs the IRQFIBER at
+        // 0x40091273/0x40091220 — a re-entrant ISR trampoline that
+        // tolerates hijack+restore; core0 runs the FreeRTOS IDLE task
+        // whose stack the hijack overflows -> IDLE1 stack overflow ->
+        // assert 0x400d9ee4 reboot loop, observed 2026-09-28 when
+        // gap_cb ran on core0: ENV_IN_CB never printed, prints after
+        // STARTADV= lost). Core0 is fallback only.
         let order = [1u32, 0u32];
         let mut k = 0;
         while k < 2 {
@@ -8015,11 +8804,29 @@ fn bt_inject_pump() {
                 }
             }
             CB_TCB = dma_read_u32(0x3ffc3ce0 + idx * 4);
-            // Synthetic call8 frame: param block at SP-256 (inside the 512B
-            // red zone below the interrupted frame, above the callee's frame
-            // which lands at SP-512-framesize; nested calls go lower still).
+            // Synthetic call8 frame: SKIP the hijack when the victim runs
+            // a FreeRTOS IDLE task (TCB name "IDLE0"/"IDLE1" at +52):
+            // the IDLE stack region is small and its overflow hook fires
+            // before the injected callback returns (observed 2026-09-28:
+            // IDLE1 overflow with SP-256, IDLE0 overflow with SP-1280 —
+            // the frame placement is not the bug, the victim IS). The
+            // IRQFIBER pcs (0x400912xx) belong to the BT task context and
+            // tolerate hijack+restore. Stay queued; retry next pump when
+            // a non-IDLE task is loaded.
+            {
+                let nm = if CB_TCB != 0 { dma_read_u32(CB_TCB + 52) } else { 0 };
+                // "IDLE" little-endian word: 0x454c4449.
+                if nm == 0x454c4449 {
+                    cb_diag_log(b"[CBIN] idle-skip ", idx, CB_TCB);
+                    continue;
+                }
+            }
+            // Param block + callee frame + margin placed BELOW the current
+            // SP in one reservation (param at SP-768, callee frame at
+            // SP-1280, guard to SP-1536; loopTask stack is 3584B so this
+            // stays inside a normal task stack).
             let sp = CB_S_PHYS[((idx as usize) * 64) + ((((wb << 2) + 1) % 64)) as usize];
-            let param = sp.wrapping_sub(256);
+            let param = sp.wrapping_sub(768);
             let mut w = 0;
             while w < 8 { dma_write_u32(param.wrapping_add(w * 4), CBQ_PW[i][w as usize]); w += 1; }
             // Args: gap(event, param) -> a2=ev, a3=param;
@@ -8039,7 +8846,7 @@ fn bt_inject_pump() {
             // masked critical section / waiti). WOE/EXCM untouched (both
             // already required above).
             c.set_ar(8, 0x80000000 | (CB_TRAMP_ABS & 0x3FFFFFFF));
-            c.set_ar(1, sp.wrapping_sub(512));
+            c.set_ar(1, sp.wrapping_sub(1280));
             c.special_registers[INT_SET] = (CB_S_INTSET & !0xF) | (2 << 16);
             c.pending_interrupts = 0;
             c.idle = 0;
@@ -8155,6 +8962,129 @@ fn bt_hci_poll() {
     use crate::xtensa::memory::{dma_read_u32, dma_write_u32};
     bt_adv_spoof_pump();
     bt_gatt_spoof_pump();
+    // Proxy re-arm (pump-driven, NOT wall-clock): setupBtHciProxy runs at
+    // worker-init while chip.reset() during boot zeroes the Rust BT statics
+    // — and the worker event loop is starved while runSimChunk
+    // self-reschedules, so a setTimeout re-affirm never fires on a loaded
+    // host (observed: proxy22 never connected). Re-affirm EN here while
+    // the proxy socket is up (JS sets ARMED via enable(2)); the socket
+    // close hook clears via enable(0). Idempotent u32 store, ~2 reads.
+    if unsafe { BT_HCI_PROXY_ARMED } != 0 && unsafe { BT_HCI_PROXY_EN } == 0 {
+        unsafe { BT_HCI_PROXY_EN = 1; }
+    }
+    // Proxy C2H drain runs even after CC_DONE: the proxy owns this boot's
+    // H2C once enabled, and follow-up commands (ADV params/data/enable)
+    // each need their own C2H reply. The canned path stays one-shot.
+    if unsafe { BT_HCI_PROXY_EN } != 0 && unsafe { BT_HCI_C2H_HAVE } != 0 {
+        bt_hci_proxy_drain_c2h();
+    }
+    // PROXY PATH (Bumble virtual controller, default OFF): stage the raw
+    // H2C packet and inject any pending C2H reply. Runs BEFORE the
+    // CC_DONE early-out below — the proxy owns this boot's H2C once
+    // enabled, and gating it behind CC_DONE silences the proxy forever
+    // (observed: POLL n=0 for 60s with socket connected + ARMED set,
+    // because the canned RESET scan consumed the post first and set DONE).
+    // The staged-H2C leg needs the vhci env resolved (doorbell-gated like
+    // the canned path); the C2H leg is already drained above. GATE (fixed
+    // 2026-09-28): run ONLY once the host actually posted something — i.e.
+    // BT_WAKE_ARMED (doorbell write) or UNMASK25_DONE (HWAKE path). The old
+    // `!BT_WAKE_ARMED || UNMASK25...` form was INVERTED (ran while idle,
+    // skipped once armed) — it scanned a pre-post env and staged queue
+    // garbage, then went silent exactly when the real RESET arrived.
+    if unsafe { BT_HCI_PROXY_EN } != 0 {
+        if unsafe { BT_WAKE_ARMED } || unsafe { UNMASK25_DONE } != 0 {
+            let vhp = bt_vhci_env_p();
+            if vhp != 0 {
+                let env = dma_read_u32(vhp);
+                if env >= 0x3ffb0000 && env < 0x40000000 {
+                    unsafe {
+                        static mut ARMED_N: u32 = 0;
+                        if ARMED_N == 0 {
+                            ARMED_N = 1;
+                            let mut m = [0u8; 32];
+                            let msg = b"[HCI] proxy armed ";
+                            let mut n = 0;
+                            for &b in msg { m[n] = b; n += 1; }
+                            crate::js_log_str(m.as_ptr() as u32, n as u32);
+                        }
+                    }
+                    // NOTE: HCI_CC_DONE set ONLY when a packet actually
+                    // staged (stage returns true): setting it blindly here
+                    // would lock the canned path out on runs where the
+                    // sniffer never fires (proxy-run1 pattern).
+                    if bt_hci_proxy_stage_h2c(env) {
+                        unsafe { HCI_CC_DONE = 1; }
+                    }
+                    bt_hci_proxy_try_inject_c2h(env);
+                    // ADV-follow-up: synthesize seq 4/5 once the guest's
+                    // own posts stop (see fn docs). Same env/gate.
+                    bt_hci_proxy_adv_followup(env);
+                }
+            }
+        }
+    }
+    // Proxy state diag: en/seen/done/wake/unmask + staged-H2C length in one
+    // line so a proxy run shows exactly where the H2C stalled. FIRES
+    // PROMPTLY on enable (not only on the first 6 pumps): the first-6
+    // budget is consumed during boot while EN=0, so a run where EN flips
+    // to 1 AFTER boot (the normal proxy case — socket connects at ~1s)
+    // would otherwise show zero post-enable state. EN_N gates a second
+    // window starting at the first pump that observes EN=1; the window is
+    // 40 lines so it covers the whole BDINIT->ENABLE epoch (the RESET post
+    // arrives ~5s after enable — a 6-line window expires while idle).
+    // H2CLEN= field proves whether a stage happened since last line.
+    unsafe {
+        static mut POLL_N: u32 = 0;
+        static mut EN_N: u32 = 0;
+        let en_now = (BT_HCI_PROXY_EN != 0) as u32;
+        if en_now != 0 && EN_N < 40 {
+            EN_N += 1;
+            let mut m = [0u8; 64];
+            let msg = b"[HCI] poll en=";
+            let mut n = 0;
+            for &b in msg { m[n] = b; n += 1; }
+            m[n] = b'0' + (BT_HCI_PROXY_EN as u8); n += 1;
+            for &b in b" seen=" { m[n] = b; n += 1; }
+            m[n] = b'0' + (HCI_SEEN_RESET as u8); n += 1;
+            for &b in b" done=" { m[n] = b; n += 1; }
+            m[n] = b'0' + (HCI_CC_DONE as u8); n += 1;
+            for &b in b" wake=" { m[n] = b; n += 1; }
+            m[n] = b'0' + (!BT_WAKE_ARMED) as u8; n += 1;
+            for &b in b" unmask=" { m[n] = b; n += 1; }
+            let uv = UNMASK25_DONE;
+            let mut d = [0u8; 10]; let mut dl = 0;
+            let mut vv = uv; if vv == 0 { d[0] = b'0'; dl = 1; }
+            while vv > 0 { d[dl] = b'0' + (vv % 10) as u8; dl += 1; vv /= 10; }
+            while dl > 0 { dl -= 1; if n < 64 { m[n] = d[dl]; n += 1; } }
+            for &b in b" h2clen=" { if n < 64 { m[n] = b; n += 1; } }
+            let mut hv = BT_HCI_H2C_LEN;
+            let mut hd = [0u8; 10]; let mut hl = 0;
+            if hv == 0 { hd[0] = b'0'; hl = 1; }
+            while hv > 0 { hd[hl] = b'0' + (hv % 10) as u8; hl += 1; hv /= 10; }
+            while hl > 0 { hl -= 1; if n < 64 { m[n] = hd[hl]; n += 1; } }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        } else if POLL_N < 6 {
+            POLL_N += 1;
+            let mut m = [0u8; 48];
+            let msg = b"[HCI] poll en=";
+            let mut n = 0;
+            for &b in msg { m[n] = b; n += 1; }
+            m[n] = b'0' + (BT_HCI_PROXY_EN as u8); n += 1;
+            for &b in b" seen=" { m[n] = b; n += 1; }
+            m[n] = b'0' + (HCI_SEEN_RESET as u8); n += 1;
+            for &b in b" done=" { m[n] = b; n += 1; }
+            m[n] = b'0' + (HCI_CC_DONE as u8); n += 1;
+            for &b in b" wake=" { m[n] = b; n += 1; }
+            m[n] = b'0' + (!BT_WAKE_ARMED) as u8; n += 1;
+            for &b in b" unmask=" { m[n] = b; n += 1; }
+            let uv = UNMASK25_DONE;
+            let mut d = [0u8; 10]; let mut dl = 0;
+            let mut vv = uv; if vv == 0 { d[0] = b'0'; dl = 1; }
+            while vv > 0 { d[dl] = b'0' + (vv % 10) as u8; dl += 1; vv /= 10; }
+            while dl > 0 { dl -= 1; m[n] = d[dl]; n += 1; }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+    }
     if unsafe { HCI_CC_DONE } != 0 {
         return;
     }
@@ -8194,6 +9124,13 @@ fn bt_hci_poll() {
             }
         }
     }
+    // PROXY PATH (Bumble virtual controller, default OFF): handled above
+    // (before the CC_DONE early-out) — this point is reachable only when
+    // the proxy is disabled OR enabled-but-no-packet-staged-yet. Fall
+    // through to the canned RESET scan below so flag-with-dead-socket
+    // behaves exactly like flag-off (boot proceeds via canned CC).
+    // NOTE: no HCI_CC_DONE set here — the proxy leg sets it only when it
+    // actually stages (see above).
     if unsafe { HCI_SEEN_RESET } == 0 {
         let mut found = false;
         let mut off = 0u32;

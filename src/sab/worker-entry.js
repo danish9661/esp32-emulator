@@ -45,7 +45,7 @@ function hashMem(data, maxBytes) {
   return h;
 }
 
-const CMD_NONE = 0, CMD_RUN = 1, CMD_RESET = 2, CMD_SEED_MMU = 3, CMD_WRITE_UINT32 = 4, CMD_READ_MEMORY = 5, CMD_GET_PCAP = 6, CMD_GET_WIFI_STATS = 7, CMD_STEP = 8, CMD_DESTROY = 9, CMD_GET_FFI_COUNTS = 10, CMD_READ_MMIO = 11, CMD_UART_RX = 12, CMD_SET_PIN_INPUT = 13, CMD_SET_TOUCH_INPUT = 14, CMD_SET_VOLTAGE = 15, CMD_FEED_I2S_RX = 16, CMD_SEND_TWAI = 17, CMD_PUSH_TWAI = 18, CMD_GET_TWAI_TX = 19, CMD_WATCHPOINT = 20, CMD_PCTRACE = 21, CMD_PRESS_RESET = 22, CMD_PRESS_BOOT = 23;
+const CMD_NONE = 0, CMD_RUN = 1, CMD_RESET = 2, CMD_SEED_MMU = 3, CMD_WRITE_UINT32 = 4, CMD_READ_MEMORY = 5, CMD_GET_PCAP = 6, CMD_GET_WIFI_STATS = 7, CMD_STEP = 8, CMD_DESTROY = 9, CMD_GET_FFI_COUNTS = 10, CMD_READ_MMIO = 11, CMD_UART_RX = 12, CMD_SET_PIN_INPUT = 13, CMD_SET_TOUCH_INPUT = 14, CMD_SET_VOLTAGE = 15, CMD_FEED_I2S_RX = 16, CMD_SEND_TWAI = 17, CMD_PUSH_TWAI = 18, CMD_GET_TWAI_TX = 19, CMD_WATCHPOINT = 20, CMD_PCTRACE = 21, CMD_PRESS_RESET = 22, CMD_PRESS_BOOT = 23, CMD_BT_HCI_POLL = 24, CMD_BT_HCI_PUSH = 25, CMD_BT_HCI_RESP = 26, CMD_BT_HCI_SEND = 27;
 const _RESP_IDLE = 0, RESP_DONE = 1, RESP_ERROR = 2;
 
 const UART_RING_SIZE = 16384;
@@ -266,7 +266,7 @@ function syncClockState(exp) {
   e.native_set_clock_state(Number(chip.cycles ?? 0) >>> 0);
 }
 
-function runSimChunk() {
+async function runSimChunk() {
   if (!chip || !ctrl || !Atomics.load(ctrl, SAB_RUN)) {
     finishSim();
     setTimeout(() => commandLoop(), 0);
@@ -405,6 +405,77 @@ function runSimChunk() {
         Atomics.store(ctrl, SAB_RESP, RESP_DONE);
         Atomics.store(ctrl, SAB_CMD, CMD_NONE);
       }
+      // BT HCI proxy CMDs inline (same bodies as processCommand; keep in
+      // sync): the commandLoop never runs mid-chunk, so without these the
+      // host's CMD_BT_HCI_POLL spin-waits forever (observed: proxy23 hung
+      // at ENABLE= with zero BT-HCI lines — the poll was posted but never
+      // serviced until the chunk ended, which never came).
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_POLL) {
+        let n = 0;
+        try {
+          const ex = chip?._wasmLoader?.exports;
+          const len = ex?.native_bt_hci_proxy_poll?.() >>> 0;
+          if (len > 0 && len <= 264 && readResp) {
+            const ptr = ex.native_bt_hci_h2c_ptr() >>> 0;
+            const mem = chip?._wasmMemory;
+            if (ptr && mem) {
+              readResp.set(new Uint8Array(mem, ptr, len).slice(0, Math.min(len, readResp.length)));
+              n = Math.min(len, readResp.length);
+            }
+          }
+        } catch {}
+        Atomics.store(ctrl, SAB_CMD_ARG1, n);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_PUSH) {
+        let ok = 0;
+        try {
+          const ex = chip?._wasmLoader?.exports;
+          const len = Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0;
+          const mem = chip?._wasmMemory;
+          const apScratch = ex?.native_wifi_ap_scratch?.() >>> 0;
+          if (len > 0 && len <= 264 && readResp && apScratch && mem) {
+            new Uint8Array(mem, apScratch, len).set(readResp.subarray(0, len));
+            ok = ex?.native_bt_hci_push_c2h?.(apScratch, len) >>> 0;
+          }
+        } catch {}
+        Atomics.store(ctrl, SAB_CMD_ARG1, ok ? 1 : 0);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_RESP) {
+        let n = 0;
+        try {
+          const loader = chip?._wasmLoader;
+          const line = loader?._btHciJsonLine || null;
+          if (line && readResp) {
+            const bytes = Buffer.from(line, 'utf8');
+            readResp.set(bytes.subarray(0, Math.min(bytes.length, readResp.length)));
+            n = Math.min(bytes.length, readResp.length);
+            loader._btHciJsonLine = null;
+          }
+        } catch {}
+        Atomics.store(ctrl, SAB_CMD_ARG1, n);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_SEND) {
+        let n = 0;
+        try {
+          const loader = chip?._wasmLoader;
+          const len = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+          const sock = loader?._btHciSock || null;
+          if (sock?.writable && len > 0 && readResp) {
+            const bytes = Buffer.from(readResp.subarray(0, Math.min(len, readResp.length)));
+            sock.write(bytes);
+            n = bytes.length;
+          }
+        } catch {}
+        Atomics.store(ctrl, SAB_CMD_ARG0, n);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
       chip.step();
       steps++;
       cycles = chip.cycles;
@@ -429,6 +500,18 @@ function runSimChunk() {
       }
       if ((cycles & 524287) === 0) writeSABState();
       if (!Atomics.load(ctrl, SAB_RUN)) break;
+      // Yield to the event loop every 512 steps so socket I/O callbacks
+      // (BT HCI proxy TCP, gateway WebSocket) can fire mid-chunk. A chunk
+      // is 500k steps; without this the loop never turns and connect/data
+      // callbacks starve (observed: proxy socket created but 'connect'
+      // never fired). Await a zero-delay macrotask — costs microseconds
+      // per 512 steps. 4096 proved too coarse (connect raced past the
+      // 15s observation window); 512 keeps I/O latency <100ms.
+      // NOTE (2026-09-28): per-step yield was tried (every-step await) and
+      // REVERTED — a zero-delay macrotask costs ~50-100us, so 500k steps
+      // balloon from ~1s to ~60s wall (ADVBOOT took 30s, CTL_ENABLE 99s).
+      // C2H latency is fixed differently (see btHciProxyPump below).
+      if ((steps & 511) === 0) await new Promise((r) => setTimeout(r, 0));
     }
   } catch (err) {
     console.error('[SIM-ERROR]', err.message, err.stack);
@@ -690,6 +773,89 @@ function processCommand(cmd) {
       Atomics.store(ctrl, SAB_CMD_ARG1, written);
       break;
     }
+    // BT HCI proxy (Bumble virtual controller, opt-in): host-side pump.
+    // CMD_BT_HCI_POLL: copy the staged H2C packet (if any) into readResp
+    // and report its length in ARG1 (0 = nothing staged). Runs in
+    // commandLoop AND inline in runSimChunk (see below), so H2C pickup
+    // never waits for a chunk boundary.
+    case CMD_BT_HCI_POLL: {
+      let n = 0;
+      try {
+        // NOTE: no lazy connect here — the socket opens eagerly at setup
+        // (see setupBtHciProxy/btHciProxyConnectNow); the POLL path only
+        // reads staged H2C. A lazy connect here would run synchronously
+        // inside runSimChunk's inline servicing with a starved event loop.
+        const ex = chip?._wasmLoader?.exports;
+        const len = ex?.native_bt_hci_proxy_poll?.() >>> 0;
+        if (len > 0 && len <= 264 && readResp) {
+          const ptr = ex.native_bt_hci_h2c_ptr() >>> 0;
+          const mem = chip?._wasmMemory;
+          if (ptr && mem) {
+            readResp.set(new Uint8Array(mem, ptr, len).slice(0, Math.min(len, readResp.length)));
+            n = Math.min(len, readResp.length);
+          }
+        }
+      } catch {}
+      Atomics.store(ctrl, SAB_CMD_ARG1, n);
+      break;
+    }
+    // CMD_BT_HCI_PUSH: copy ARG1 bytes from readResp into wasm memory
+    // (via the wifi AP scratch, always reserved) and push as C2H reply.
+    // Reports 1 in ARG1 on staged, 0 otherwise.
+    case CMD_BT_HCI_PUSH: {
+      let ok = 0;
+      try {
+        const ex = chip?._wasmLoader?.exports;
+        const len = Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0;
+        const mem = chip?._wasmMemory;
+        const apScratch = ex?.native_wifi_ap_scratch?.() >>> 0;
+        if (len > 0 && len <= 264 && readResp && apScratch && mem) {
+          new Uint8Array(mem, apScratch, len).set(readResp.subarray(0, len));
+          ok = ex?.native_bt_hci_push_c2h?.(apScratch, len) >>> 0;
+        }
+      } catch {}
+      Atomics.store(ctrl, SAB_CMD_ARG1, ok ? 1 : 0);
+      break;
+    }
+    // CMD_BT_HCI_SEND: write ARG0 bytes from readResp[0..ARG0] to the
+    // worker-owned proxy socket (host control messages ride the same
+    // connection Bumble's Controller listens to). Reports bytes accepted
+    // in ARG0 (0 = no socket). Runs inline in runSimChunk too (below).
+    case CMD_BT_HCI_SEND: {
+      let n = 0;
+      try {
+        const loader = chip?._wasmLoader;
+        const len = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+        const sock = loader?._btHciSock || null;
+        if (sock?.writable && len > 0 && readResp) {
+          const bytes = Buffer.from(readResp.subarray(0, Math.min(len, readResp.length)));
+          sock.write(bytes);
+          n = bytes.length;
+        }
+      } catch {}
+      Atomics.store(ctrl, SAB_CMD_ARG0, n);
+      break;
+    }
+    // CMD_BT_HCI_RESP: copy the last stashed JSON control line (see the
+    // socket 'data' handler) into readResp, report length in ARG1
+    // (0 = none pending). Lets the host test consume connect/read results
+    // without a second TCP connection (Bumble binds one Controller per
+    // connection, so a second socket would talk to a different radio).
+    case CMD_BT_HCI_RESP: {
+      let n = 0;
+      try {
+        const loader = chip?._wasmLoader;
+        const line = loader?._btHciJsonLine || null;
+        if (line && readResp) {
+          const bytes = Buffer.from(line, 'utf8');
+          readResp.set(bytes.subarray(0, Math.min(bytes.length, readResp.length)));
+          n = Math.min(bytes.length, readResp.length);
+          loader._btHciJsonLine = null;
+        }
+      } catch {}
+      Atomics.store(ctrl, SAB_CMD_ARG1, n);
+      break;
+    }
   }
   return false;
 }
@@ -705,7 +871,13 @@ function commandLoop() {
         setError(err.message);
       }
       Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+      Atomics.notify(ctrl, SAB_RESP, 1);
     }
+    // Yield to the event loop every iteration (not just via setTimeout):
+    // socket connect/data/close callbacks (BT HCI proxy, gateway WS) can
+    // only fire when the loop turns. runSimChunk self-reschedules through
+    // here between chunks, so I/O stays live mid-run.
+    Atomics.wait(ctrl, SAB_CMD, CMD_NONE, 5);
     setTimeout(() => commandLoop(), 0);
     return;
   }
@@ -719,7 +891,7 @@ function blockingCommandLoop() {
     if (cmd !== CMD_NONE) {
       let ok = true;
       try {
-        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT) {
+        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT || cmd === CMD_BT_HCI_POLL || cmd === CMD_BT_HCI_PUSH || cmd === CMD_BT_HCI_RESP || cmd === CMD_BT_HCI_SEND) {
           processCommand(cmd);
         } else if (cmd === CMD_RUN) {
           ctrl[SAB_STATUS] = 0;
@@ -798,6 +970,157 @@ function applyBasicSetup(chip, config, flash, rom) {
       chip.cores[0].writeUint32(0x3ff5a008, ((crc << 16) | (mac[0] << 8) | mac[1]) >>> 0);
     } catch(_) {}
   }
+}
+
+// BT HCI proxy wiring — Bumble virtual controller over TCP
+// (tests/test-bumble-hci.py). Opt-in ONLY via config.btHciProxy:
+//   config.btHciProxy = { host: '127.0.0.1', port: 14821 }
+// or `true` for the defaults. When enabled, the worker opens the TCP
+// socket EAGERLY at setup (event loop live — never mid-run) and the Rust
+// VHCI poll stages raw H2C HCI packets via js_bt_hci_send_packet; this
+// JS side forwards H2C bytes to Bumble, and feeds C2H reply bytes back
+// via native_bt_hci_push_c2h. Without the flag the proxy stays down and
+// the engine keeps its existing behavior (canned RESET CC + CBQ injection).
+// There is no case where the proxy must come up unasked: without a
+// socket the virtual controller is simply unreachable, same as before.
+function setupBtHciProxy(chip, config) {
+  const loader = chip._wasmLoader;
+  const opt = config.btHciProxy;
+  if (!opt || !loader?.exports?.native_bt_hci_proxy_enable) return;
+  const proxyHost = (opt.host || '127.0.0.1');
+  const proxyPort = (opt.port || 14821) >>> 0;
+  // NOTE: no enable(1) here. enable(1) at setup would route the boot's
+  // RESET to proxy staging before any socket exists (observed: flag +
+  // dead socket stalls BDINIT — staged H2C with no Bumble to answer, and
+  // the canned CC path skipped). Liveness comes only from enable(2) at
+  // socket connect (see below); flag-with-dead-socket behaves exactly
+  // like flag-off.
+  loader._btHciHost = proxyHost;
+  loader._btHciPort = proxyPort;
+  loader._btHciSock = null;
+  loader._btHciTx = null;
+  // EAGER connect (worker init, event loop live — NOT lazy on first POLL:
+  // the POLL path runs synchronously inside runSimChunk's inline servicing
+  // where the event loop is starved, so a lazy connect never completes its
+  // handshake — observed: 'socket object created' but 'connect' never
+  // fired until the 512-step yield was added, and even then only
+  // intermittently). Pre-import node:net here, then connect immediately;
+  // the 'connect' callback arms the Rust side via enable(2).
+  import('node:net').then((mod) => {
+    loader._btHciNet = mod;
+    btHciProxyConnectNow(chip);
+  }).catch((e) => console.error('[BT-HCI] net import FAILED:', e?.message || e));
+}
+
+// Eager TCP connect body (shared by setup path; retry on failure with a
+// bounded backoff so a slow Bumble start still attaches — the Rust side
+// treats flag-with-dead-socket as flag-off, so retries are safe).
+function btHciProxyConnectNow(chip, attempt) {
+  const loader = chip?._wasmLoader;
+  if (!loader || loader._btHciSock) return;
+  const net = loader._btHciNet;
+  if (!net) return;
+  const host = loader._btHciHost || '127.0.0.1';
+  const port = (loader._btHciPort || 14821) >>> 0;
+  const n = attempt >>> 0;
+  try {
+    const sock = net.createConnection({ host, port });
+    loader._btHciSock = sock;
+    sock.on('connect', () => {
+      console.log(`[BT-HCI] proxy connected ${host}:${port}`);
+      // Arm pump-driven re-affirm (enable(2)): a one-shot enable(1) races
+      // chip.reset(); the Rust pump re-arms EN itself while ARMED.
+      try { loader.exports.native_bt_hci_proxy_enable(2); } catch (e) { console.error('[BT-HCI] enable FAILED:', e?.message || e); }
+      try {
+        console.log(`[BT-HCI] enable called, has push_c2h=${typeof loader.exports.native_bt_hci_push_c2h}, has h2c_ptr=${typeof loader.exports.native_bt_hci_h2c_ptr}`);
+      } catch (e) { console.error('[BT-HCI] enable FAILED:', e?.message || e); }
+    });
+    sock.on('data', (chunk) => {
+      try {
+        // NOTE: chip._wasmMemory is the buffer object captured at init —
+        // STALE after wasm memory.grow (same detach hazard as the loader's
+        // this.memory.buffer; observed 2026-09-28: C2H snapshot read
+        // 0xFFFFFFFF because the view was detached). Always use the live
+        // WebAssembly.Memory buffer.
+        const mem = chip._wasmLoader?.memory?.buffer || chip._wasmMemory;
+        const apScratch = loader.exports.native_wifi_ap_scratch?.() >>> 0;
+        if (!apScratch || !mem) return;
+        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        // C2H framing: the Bumble bridge sends HCI event packets AND JSON
+        // control lines ({"op":...} responses) over the same TCP stream.
+        // Only HCI packets (type 0x02/0x04) go to the engine; JSON lines
+        // are control-channel replies (connect/read results) consumed by
+        // the test via CMD_BT_HCI_RESP. HCI events are self-delimiting
+        // (hdr+len); buffer across chunks and extract complete packets.
+        // PUSH-BASED inject (not poll-based): the reply is injected the
+        // moment it arrives — the guest blocks in future_await until the
+        // CC lands, and the 512-step sim yield (~100ms) races the host's
+        // spin window (observed 2026-09-28: C2H#2 never arrived before the
+        // FUTSPIN wedge; the push path removes the poll round-trip).
+        if (!loader._btHciRxBuf) loader._btHciRxBuf = Buffer.alloc(0);
+        loader._btHciRxBuf = Buffer.concat([loader._btHciRxBuf, Buffer.from(bytes)]);
+        for (;;) {
+          const buf = loader._btHciRxBuf;
+          if (buf.length < 1) break;
+          const t = buf[0];
+          let need = -1;
+          if (t === 0x04) need = buf.length >= 3 ? 3 + buf[2] : -1; // event: type+code+len
+          else if (t === 0x02) need = buf.length >= 5 ? 5 + (buf[3] | (buf[4] << 8)) : -1; // ACL
+          else if (t === 0x7b) { // '{' = JSON control line; stash the full
+            // line for CMD_BT_HCI_RESP (host test consumes connect/read
+            // results) AND continue framing (a packet may follow it).
+            const nl = buf.indexOf(0x0a);
+            if (nl < 0) break;
+            try { loader._btHciJsonLine = buf.subarray(0, nl + 1).toString('utf8'); } catch {}
+            loader._btHciRxBuf = buf.subarray(nl + 1);
+            continue;
+          } else break; // unknown type: wait for more bytes
+          if (need < 0 || buf.length < need) break;
+          const pkt = buf.subarray(0, need);
+          loader._btHciRxBuf = buf.subarray(need);
+          const v = new Uint8Array(mem, apScratch, pkt.length);
+          v.set(pkt);
+          loader.exports.native_bt_hci_push_c2h?.(apScratch, pkt.length);
+        }
+      } catch (e) { console.error('[BT-HCI] C2H feed FAILED:', e?.message || e); }
+    });
+    sock.on('error', (e) => console.error('[BT-HCI] socket error:', e?.message || e));
+    sock.on('close', () => {
+      loader._btHciSock = null;
+      try { loader.exports.native_bt_hci_proxy_enable(0); } catch {}
+      // Bounded retry: Bumble may start after the worker.
+      if (n < 5) setTimeout(() => btHciProxyConnectNow(chip, n + 1), 2000);
+    });
+    loader._btHciTx = (pkt) => {
+      try {
+        // Write completion closes the H2C->C2H loop: Bumble answers every
+        // staged command within milliseconds, but its reply arrives as a
+        // socket 'data' callback — which needs the event loop. Flush the
+        // write synchronously (no yield cadence change: the FFI runs inside
+        // the sim step, the callback fires on the next loop turn, and the
+        // synchronous C2H inject in push_c2h lands the CC before the guest
+        // re-spins — observed 2026-09-28: seq-3's CC arrived but seq-2's
+        // never did under the 512-step yield).
+        // TX-ACK proof (not TEMP-DIAG — permanent): bytesWritten delta
+        // proves the kernel accepted the bytes. `writable=true` alone is
+        // NOT proof (observed 2026-09-28: writable=true on an orphaned
+        // socket after bridge restart, zero bytes arrived, zero H2C
+        // logged). If the delta is 0 the socket is dead — drop it so the
+        // close hook fires and the bounded retry reconnects.
+        console.log(`[BT-HCI] TX len=${pkt.length} writable=${sock?.writable}`);
+        if (sock?.writable) {
+          const before = sock.bytesWritten >>> 0;
+          sock.write(Buffer.from(pkt));
+          const delta = (sock.bytesWritten >>> 0) - before;
+          if (delta === 0) {
+            console.error('[BT-HCI] TX zero-ack, dropping dead socket');
+            try { sock.destroy(); } catch {}
+            loader._btHciSock = null;
+          }
+        }
+      } catch {}
+    };
+  } catch (e) { console.error('[BT-HCI] connect FAILED:', e?.message || e); }
 }
 
 // Native WiFi AP wiring — Rust NativeInternetAP port (wifi_bridge.rs) with
@@ -1189,6 +1512,10 @@ async function onMessage(type, data) {
             // 8. Native WiFi AP (NativeInternetAP port) — must run AFTER
             // loadWasm + reset (needs chip._wasmLoader exports).
             setupNativeWifiBridge(chip, config);
+
+            // 8b. BT HCI proxy (Bumble virtual controller) — opt-in ONLY
+            // via config.btHciProxy; default OFF (no behavior change).
+            try { setupBtHciProxy(chip, config); } catch (e) { console.error('[BT-HCI] setup FAILED:', e?.message || e); }
 
             // 9. Virtual-camera frame size (finite sensor frame per capture;
             // host-known, e.g. 160*120*2 for QQVGA RGB565).

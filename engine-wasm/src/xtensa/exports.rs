@@ -307,6 +307,25 @@ pub extern "C" fn core_step(core_idx: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn core_run(max_steps: u32) -> u32 {
     let mut n: u32 = 0;
+    // HCI proxy sniffer one-shot report (RED path): proves whether the
+    // batched loop ever executes the memcpy-site pc. Compared against
+    // SNF_N (the bt_shim_step path): if SNF_N stays 0 but this counter
+    // advances, the loop runs but never hits the pc (wrong pc); if BOTH
+    // stay 0, core_run itself never runs (JS uses single-step).
+    unsafe {
+        static mut RUN_N: u32 = 0;
+        if RUN_N == 0 {
+            RUN_N = 1;
+            crate::native_mmio::bt_hci_run_proof();
+        }
+    }
+    // HCI proxy sniffer census (RED path): count batched-loop iterations
+    // where EITHER core sits exactly on the memcpy-site pc. Proves whether
+    // the loop ever executes the site (vs the pc being wrong for this
+    // build). One u32 store per hit; the report fires from the stager's
+    // wide-scan line (CENSUS= field). NOTE: core_run ALSO captures the
+    // regs on hit (not just counts) — the memcpy args are only live at
+    // the site, so capture-then-report beats count-then-guess.
     while n < max_steps {
         let mut ran: u32 = 0;
         {
@@ -314,6 +333,15 @@ pub extern "C" fn core_run(max_steps: u32) -> u32 {
             if core.enabled != 0 {
                 core.sync_ccount();
                 run_instruction(core);
+                // POST-step census: run_instruction ADVANCES pc, so the
+                // pre-step compare above can never equal the site pc on
+                // entry (pc always trails by one instruction in the batched
+                // loop — observed: census=0 despite the guest provably
+                // executing the memcpy). Compare AFTER the step instead.
+                if core.pc == 0x40177e6b {
+                    unsafe { crate::native_mmio::bt_hci_census_hit(); }
+                    crate::native_mmio::bt_hci_sniff_memcpy(core);
+                }
                 ran = ran.wrapping_add(1);
             }
         }
@@ -322,6 +350,10 @@ pub extern "C" fn core_run(max_steps: u32) -> u32 {
             if core.enabled != 0 {
                 core.sync_ccount();
                 run_instruction(core);
+                if core.pc == 0x40177e6b {
+                    unsafe { crate::native_mmio::bt_hci_census_hit(); }
+                    crate::native_mmio::bt_hci_sniff_memcpy(core);
+                }
                 ran = ran.wrapping_add(1);
             }
         }

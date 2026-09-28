@@ -99,6 +99,20 @@ export class WasmLoader {
     /** @type {function|null} */ this._wifiApRxFrame = null;
     /** @type {function|null} */ this._wifiApSendEth = null;
     /** @type {function|null} */ this._wifiApConnected = null;
+    /** @type {function|null} */ this._btHciTx = null;
+  }
+
+  // Live linear-memory views (NOT this.memory.buffer: the buffer object
+  // captured at load() detaches on wasm memory.grow — observed 2026-09-28:
+  // FFI readers using the stale buffer saw zero-length views, slice threw,
+  // and the throw aborted the Rust poll mid-stage. this.memory IS the
+  // WebAssembly.Memory (stable identity); only .buffer goes stale, so every
+  // reader must go through these helpers, never this.memory.buffer inline.
+  memBytes() { return new Uint8Array(this.memory.buffer); }
+  memU32(byteOff = 0, len) {
+    return len === undefined
+      ? new Uint32Array(this.memory.buffer, byteOff)
+      : new Uint32Array(this.memory.buffer, byteOff, len);
   }
 
   async load(wasmBytes, esp32, memoryObj) {
@@ -274,8 +288,7 @@ js_log_u32: (val) => {
       },
       js_log_str: (ptr, len) => {
         this._mmioCount[43]++;
-        const buf = new Uint8Array(this.memory.buffer);
-        const bytes = buf.slice(ptr, ptr + len);
+        const bytes = this.memBytes().slice(ptr, ptr + len);
         console.log(`[WASM] ${new TextDecoder().decode(bytes)}`);
       },
       js_spi_flash_get_byte: (off) => {
@@ -297,7 +310,7 @@ js_log_u32: (val) => {
       },
       js_sd_read_block: (block, ptr) => {
         const sd = this.esp32?.sdData;
-        const mem = new Uint8Array(this.memory.buffer);
+        const mem = this.memBytes();
         if (!sd || block * 512 + 512 > sd.length) {
           mem.fill(0, ptr, ptr + 512);
           return;
@@ -307,7 +320,7 @@ js_log_u32: (val) => {
       js_sd_write_block: (block, ptr) => {
         const sd = this.esp32?.sdData;
         if (!sd || block * 512 + 512 > sd.length) return;
-        const mem = new Uint8Array(this.memory.buffer);
+        const mem = this.memBytes();
         sd.set(mem.subarray(ptr, ptr + 512), block * 512);
       },
 
@@ -316,8 +329,7 @@ js_log_u32: (val) => {
       // host (JS parity with I2sPeripheral.onTxData).
       js_i2s_tx_data: (idx, ptr, len) => {
         if (!this._i2sTxDataHook) return;
-        const buf = new Uint8Array(this.memory.buffer);
-        const words = new Uint32Array(buf.slice(ptr, ptr + len * 4).buffer);
+        const words = new Uint32Array(this.memBytes().slice(ptr, ptr + len * 4).buffer);
         this._i2sTxDataHook(idx, words);
       },
       // Native RTC bridge: sleep wakeup on the rcSlow clock event queue.
@@ -375,15 +387,13 @@ js_log_u32: (val) => {
       // Native WiFi MAC TX frame bridge — JS parity with the JS peripheral's
       // writeUint32 DMA_TXBUF arm calling this.onTX(hVal) synchronously.
       js_wifi_send_frame: (ptr, len) => {
-        const buf = new Uint8Array(this.memory.buffer);
-        const frame = buf.slice(ptr, ptr + len);
+        const frame = this.memBytes().slice(ptr, ptr + len);
         this._wifiMacTx?.(frame);
       },
       // ESP-NOW action-frame TX bridge — raw 802.11 MPDU bytes for the host
       // medium hook (installed by worker-entry; two-node delivery).
       js_espnow_tx_frame: (ptr, len) => {
-        const buf = new Uint8Array(this.memory.buffer);
-        const frame = buf.slice(ptr, ptr + len);
+        const frame = this.memBytes().slice(ptr, ptr + len);
         this._espnowTx?.(frame);
       },
       // Native WiFi AP (NativeInternetAP) host bridges — the Rust AP builds
@@ -399,6 +409,21 @@ js_log_u32: (val) => {
       },
       js_wifi_ap_connected: () => {
         this._wifiApConnected?.();
+      },
+      // BT HCI proxy bridge — the Rust VHCI poll stages a raw H2C HCI
+      // packet (type byte + payload) in linear-memory scratch and hands
+      // the pointer here; the worker owns the TCP socket to the Bumble
+      // virtual controller (tests/test-bumble-hci.py) and feeds C2H reply
+      // bytes back via native_bt_hci_push_c2h. Opt-in per test (proxy
+      // disabled by default; see setupBtHciProxy in worker-entry.js).
+      js_bt_hci_send_packet: (ptr, len) => {
+        try {
+          const pkt = this.memBytes().slice(ptr, ptr + len);
+          // TEMP-DIAG (proxy bring-up): prove the FFI fires and the TX
+          // hook is installed. Remove once H2C flows (op=0c03 staged).
+          console.log(`[BT-HCI] FFI h2c len=${len} tx=${typeof this._btHciTx} head=${[...pkt.slice(0, 4)].map((b) => b.toString(16).padStart(2, '0')).join('')}`);
+          this._btHciTx?.(pkt);
+        } catch (e) { console.error('[BT-HCI] FFI FAILED:', e?.message || e); }
       },
       // Native DPORT shell bridges — behavioral side-effects of the native
       // DPORT handler (clock tree, core1 reset/stall, peripheral clock-gate
@@ -504,7 +529,7 @@ js_log_u32: (val) => {
         if (seg3) this.exports.native_flash_seg3_off(seg3);
       } catch {}
     }
-    const ptU32 = new Uint32Array(this.memory.buffer, WM.PAGE_TABLE_OFFSET);
+    const ptU32 = this.memU32(WM.PAGE_TABLE_OFFSET);
 
     // Override pages with Rust native MMIO handlers
     const setPTE = (addr, hid) => {
@@ -770,7 +795,7 @@ js_log_u32: (val) => {
   get wasmCores() { return this._wasmCores; }
 
   setDebugLog(enabled) {
-    const u32 = new Uint32Array(this.memory.buffer);
+    const u32 = this.memU32();
     for (let i = 0; i < this._wasmCores.length; i++) {
       const baseOff = i * WM.CORE_STATE_SIZE;
       const DEBUG_LOG_OFF = 2584 + 7 * 4; // pc(2584) next_pc ccompare0 ccompare1 ccompare2 debug_opcode inst_count debug_log
@@ -787,7 +812,7 @@ js_log_u32: (val) => {
     const gpio = this.esp32?.gpio;
     if (!gpio?.pins) return;
     const ptr = this.exports.native_gpio_seed_scratch();
-    const u32 = new Uint32Array(this.memory.buffer, ptr, 41);
+    const u32 = this.memU32(ptr, 41);
     for (let i = 0; i < gpio.pins.length; i++) {
       const pin = gpio.pins[i];
       u32[i] = pin.inputValue ? 1 : 0;

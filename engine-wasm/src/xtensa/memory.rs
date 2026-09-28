@@ -303,6 +303,25 @@ pub fn read_page_table(core: &mut CoreState, addr: u32, size: u32) -> u32 {
 
 // _writePageTable (faithful)
 pub fn write_page_table(core: &mut CoreState, addr: u32, val: u32, size: u32) {
+    // HCI proxy H2C flag-tap (Bumble virtual controller, opt-in): the
+    // guest's API_vhci_host_send_packet posts by BUMPING the u8 counter at
+    // [env]+35 (s8i a8,a9,35 at 0x40177d30/0x40177de9 — objdump-verified
+    // build 2280682d6b9054dc; there is NO framed 01 03 0C 00 payload write
+    // — the old word-tap on 0x000C0301 never fired, observed 2026-09-28).
+    // Tap rule: byte-size store to the [env]+35 counter slot while EN=1.
+    // The slot address is re-resolved per boot (cached VHCI_ENV_P); the
+    // tap stages the SYNTHETIC framed RESET (the guest never wrote one —
+    // the LL-side consumer reads the counter, not a payload, so Bumble
+    // gets the canonical 01 03 0C 00 and answers the CC the stack waits
+    // for). Later commands extend this once RESET is green over Bumble.
+    // TAP-FIRE proof (budget 4, unconditional on EN): a single line per
+    // counter-slot store proves the tap SITE is live. If flagtap lines are
+    // ABSENT, the guest never executed the s8i on the write_page_table
+    // path (fast-path store? MMIO page? different slot?) — that reading
+    // decides the next step, not another blind rebuild.
+    if size == 8 {
+        crate::native_mmio::bt_hci_proxy_flag_tap(addr);
+    }
     if unsafe { crate::native_mmio::BT_VHCI_TRACE_LEFT } > 0
         && addr >= 0x3ffa0000 && addr <= 0x3ffdffff
     {

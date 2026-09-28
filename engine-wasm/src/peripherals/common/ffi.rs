@@ -130,6 +130,17 @@ extern "C" {
     pub fn js_wifi_ap_connected();
 }
 
+// BT HCI proxy bridges (Bumble virtual controller over TCP) — scaffold,
+// default OFF. The engine stages a raw H2C HCI packet (type byte + payload)
+// in a linear-memory scratch and hands the pointer to the JS worker, which
+// owns the TCP socket to tests/test-bumble-hci.py. C2H bytes come back via
+// native_bt_hci_push_c2h (length-prefixed scratch write + poll flag), and
+// the VHCI C2H inject path consumes them exactly like the canned CC.
+extern "C" {
+    // H2C packet staged at (ptr,len) for the JS TCP proxy to forward.
+    pub fn js_bt_hci_send_packet(data_ptr: u32, len: u32);
+}
+
 // DPORT native bridge — behavioral side effects stay in JS (clock tree, core
 // state, peripheral resets). The interrupt matrix runs fully in Rust
 // (InterruptMatrixPeripheral instances wired into the native DPORT handler —
