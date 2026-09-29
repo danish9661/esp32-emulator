@@ -60,6 +60,32 @@ try:
         return _orig_on_gatt_pdu(self, bearer, att_pdu)
 
     _gsmod.Server.on_gatt_pdu = _patched_on_gatt_pdu
+
+    # Peer-side double-delivery guard (2026-09-29): with the async patch
+    # above, Bumble's stock emit path AND our sync dispatch both reach the
+    # peer Device handler, so every ATT response lands TWICE -> the 2nd
+    # set_result on an already-done future raises "InvalidStateError:
+    # invalid state" x18/run (bridge-log noise only; reads still succeed).
+    # Guard: drop responses with no live pending future.
+    try:
+        from bumble import gatt_client as _gcmod
+
+        _orig_client_pdu = _gcmod.Client.on_gatt_pdu
+
+        def _patched_client_pdu(self, att_pdu):
+            try:
+                from bumble import att as _attmod2
+                if att_pdu.op_code in _attmod2.ATT_RESPONSES:
+                    _pend = getattr(self, 'pending_response', None)
+                    if _pend is None or getattr(_pend, 'done', lambda: True)():
+                        return
+            except Exception:
+                pass
+            return _orig_client_pdu(self, att_pdu)
+
+        _gcmod.Client.on_gatt_pdu = _patched_client_pdu
+    except Exception as _e2:
+        print('gatt_client patch FAILED:', str(_e2)[:120])
 except Exception as _e:
     print('gatt_server patch FAILED:', str(_e)[:120])
 
