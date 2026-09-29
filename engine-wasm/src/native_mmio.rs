@@ -6503,6 +6503,18 @@ pub fn bt_shim_step(core: &mut crate::xtensa::state::CoreState) -> bool {
     // (that was mis-mapped file bytes; IRAM file offsets are remapped by
     // the bootloader MMU — NEVER trust file view for 0x4009xxxx, only
     // dma). Gate on low24 == 0x008136.
+    // WEDGE ROOT CAUSE, PROVEN 2026-09-29 (QBUG2B, core_run batched path):
+    // a Send invocation on c1 (BtController task, FENT a0=8010c789 =
+    // return into btc_transfer_context) runs with q=0x40083d20 (IRAM
+    // _xt_user_exit code — a corrupt queue pointer) so a4=q+84=0x40083d74
+    // becomes the xPortEnterCriticalTimeout mux; the CAS-retry then spins
+    // on an IRAM code word whose value (0x6246) is never 0. The corrupt q
+    // is NOT an emulator artifact: the window check (q+84==a4, q!=0, a4 in
+    // IRAM) fires inside the guest's own Send body at 937f3/5/7/9 with the
+    // correct Send frame (entry-window ar() reads verified via T-line
+    // register dumps). No engine write is safe here (the queue storage is
+    // code); the adv_followup synthesis + CBQ injection already route
+    // around the wedged posts 4/5, so observe-only is correct.
     if core.pc == 0x40093798 {
         let w0 = dma_read_u32(0x40093798);
         // run284 DIAG: log every 93798 hit once (w0 + a2 + core).
