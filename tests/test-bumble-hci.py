@@ -261,6 +261,23 @@ class EngineSide(asyncio.Protocol):
 
     def connection_lost(self, exc):
         LOG.info('%s engine disconnected', ts())
+        # Drop this connection's eng controller from the shared link so
+        # its stale le_connections/pending state can never answer the
+        # NEXT run's air traffic (observed: run2 ATT routed to run1's
+        # dead eng_ctrl -> GATT timeout; plus "reuses the same handle"
+        # + stale-conn drop spam). peer_link is reachable via any live
+        # controller's .link; guard everything (disconnect races setup).
+        try:
+            _ctrl = getattr(self, 'controller', None)
+            _link = getattr(_ctrl, 'link', None)
+            if _link is not None and _ctrl is not None:
+                try:
+                    _link.remove_controller(_ctrl)
+                    LOG.info('dropped dead eng controller from link')
+                except Exception as _e2:
+                    LOG.info('drop dead ctrl FAILED: %s', str(_e2)[:80])
+        except Exception as _e:
+            LOG.info('drop dead ctrl outer FAILED: %s', str(_e)[:80])
 
 
 async def selftest(port: int):
@@ -518,6 +535,17 @@ async def emu_dev_setup(state, eng_ctrl):
         # reaches the Device handler, so the extra direct call made the
         # GATT server answer twice -> peer "InvalidStateError: invalid
         # state" x18/run. Stock emit path only.)
+        # 8. Publish the CURRENT binding so the NEXT make_proto call can
+        # rebind it to the fresh eng controller (see binding handoff in
+        # make_proto). Without this the 2nd run's ATT uplink hits the 1st
+        # run's dead eng_ctrl (observed: run1 HELLO PASS, run2 GATT
+        # timeout — EHostToCtrl closed over the stale controller).
+        state['emu_bind'] = {
+            'emu_holder': emu_holder,
+            'ehost': ehost,
+            'emu_dev': emu_dev,
+            'tcp_forward': _emu_tcp_forward,
+        }
         LOG.info('emu-side GATT server up (0x00FF/0xFF01=HELLO, no RESET)')
     except Exception as e:
         LOG.info('emu-side GATT server FAILED: %s', str(e)[:160])
@@ -558,6 +586,92 @@ async def serve(port: int):
         def send_and_forward(packet):
             proto.send_to_engine(bytes(packet))
         eng_ctrl.send_hci_packet = send_and_forward
+        # Binding handoff (2nd+ TCP run): the FIRST run's emu_dev_setup
+        # published state['emu_bind'] = shared ehost/emu_dev/holder. The
+        # fresh eng_ctrl object needs the SAME wiring re-pointed at it
+        # (host sink, send_hci_packet override, random_address, create_le
+        # hook, EHostToCtrl uplink closure) — else run N+1's ATT uplink
+        # hits run 1's dead controller (observed: run1 HELLO PASS, run2
+        # GATT timeout). Reuse the SAME ehost/emu_dev (no RESET, no
+        # re-power); only swap the controller reference. Runs synchronously
+        # here (make_proto is sync, all ops are plain attribute swaps).
+        _bind = state.get('emu_bind')
+        if _bind is not None and _bind.get('ehost') is not None:
+            try:
+                _ehost = _bind['ehost']
+                _holder = _bind['emu_holder']
+                _emu_dev = _bind.get('emu_dev')
+
+                class _EHostToCtrl2:
+                    def on_packet(self, packet: bytes):
+                        ptype = packet[0]
+                        if ptype == hci.HCI_COMMAND_PACKET:
+                            eng_ctrl.on_hci_command_packet(
+                                hci.HCI_Command.from_bytes(packet))
+                        elif ptype == hci.HCI_ACL_DATA_PACKET:
+                            acl = hci.HCI_AclDataPacket.from_bytes(packet)
+                            conn = eng_ctrl.find_connection_by_handle(
+                                acl.connection_handle)
+                            if conn is None:
+                                return
+                            conn.on_hci_acl_data_packet(acl)
+
+                _ehost.hci_sink = _EHostToCtrl2()
+
+                class _EmuCtrlSink2:
+                    def on_packet(self, packet: bytes):
+                        _holder['host'].on_packet(packet)
+
+                eng_ctrl.host = _EmuCtrlSink2()
+                _tcp_fwd = eng_ctrl.send_hci_packet
+
+                def _emu_send_and_forward2(packet, _f=_tcp_fwd):
+                    try:
+                        _holder['host'].on_packet(bytes(packet))
+                    except Exception:
+                        pass
+                    _f(packet)
+
+                eng_ctrl.send_hci_packet = _emu_send_and_forward2
+                try:
+                    eng_ctrl.random_address = hci.Address(
+                        'AA:BB:CC:DD:EE:FF')
+                except Exception:
+                    pass
+                _orig2 = eng_ctrl.create_le_connection
+
+                def _emu_create_le2(peer_address, _o=_orig2):
+                    _o(peer_address)
+                    try:
+                        from bumble.device import Connection as DevConn
+                        from bumble.host import Connection as HostConn
+                        from bumble.core import PhysicalTransport as PhysT
+                        for _addr, _lc in eng_ctrl.le_connections.items():
+                            _h = _lc.handle
+                            if _h not in _holder['host'].connections:
+                                _holder['host'].connections[_h] = HostConn(
+                                    _holder['host'], _h, _lc.peer_address,
+                                    PhysT.LE)
+                            if (_emu_dev is not None
+                                    and _h not in _emu_dev.connections):
+                                _emu_dev.connections[_h] = DevConn(
+                                    device=_emu_dev,
+                                    handle=_h,
+                                    transport=PhysT.LE,
+                                    self_address=_lc.self_address,
+                                    self_resolvable_address=None,
+                                    peer_address=_lc.peer_address,
+                                    peer_resolvable_address=None,
+                                    role=hci.Role.PERIPHERAL,
+                                    parameters=DevConn.Parameters(
+                                        0.0, 0, 0.0))
+                    except Exception:
+                        pass
+
+                eng_ctrl.create_le_connection = _emu_create_le2
+                LOG.info('emu binding handed off to new eng controller')
+            except Exception as _e:
+                LOG.info('emu binding handoff FAILED: %s', str(_e)[:120])
         # Emu-side GATT server (per-connection, AFTER eng_ctrl exists):
         # the ESP32 emulator never answers ATT (its LL posts HCI commands
         # only; no GATT server runs in emulated firmware), so peer-to-emu
