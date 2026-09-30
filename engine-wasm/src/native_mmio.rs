@@ -2116,6 +2116,11 @@ pub extern "C" fn native_bt_rf_reset() {
         HCI_SEEN_RESET = 0;
         HCI_CC_DONE = 0;
         HCI_CC_LOG_LEFT = 4;
+        // run310: the heap-scan fallback is per-boot one-shot state (an env
+        // pointer resolved on boot N is stale on boot N+1 — same rule as
+        // VHCI_ENV_P, which re-verifies via its cached-read shape check).
+        VHCI_ENV_P = 0;
+        VHCI_SCAN_DONE = 0;
         // NOTE: proxy scratch MAY be reset here (chip.reset() = fresh boot =
         // fresh HCI dialog; stale H2C/C2H/sniffer state from a prior boot is
         // architecturally WRONG, not just stale). Stale H2C_LEN>0 with OLD
@@ -3105,7 +3110,16 @@ fn bt_hook_scan() {
 }
 // vhci_env_p candidates per known build (resolved per boot by verify).
 // init-test/ADV-1055: 0x3ffc7a14, BLE-a36d: 0x3ffc4fbc.
+// run310 (2026-10-01): heap-scan fallback for builds that never populate
+// the three static slots (MicroPython NimBLE: all three read 0 post
+// active(1) — its vhci env is heap-allocated elsewhere, so the candidate
+// list can never resolve and the flag-tap stays blind). The heap scan is
+// one-shot per boot (VHCI_SCAN_DONE): sweep 0x3ffb0000..0x40000000 word
+// stepped for a DRAM pointer whose target parses as a vhci env (nonzero,
+// not 0xFFFFFFFF/a5a5a5a5 fill, and [env+33..35] live ring bytes). Cost:
+// ~320k dma reads once per boot, negligible vs a firmware step batch.
 static mut VHCI_ENV_P: u32 = 0;
+static mut VHCI_SCAN_DONE: u32 = 0;
 
 pub static mut BTRF_LOG_LEFT: u32 = 800;
 pub static mut BT_ALARM_LOG_LEFT: u32 = 8;
@@ -8605,6 +8619,60 @@ fn bt_vhci_env_p() -> u32 {
             // a5a5-poisoned heap fails here. Read via word + shift.
             unsafe { VHCI_ENV_P = v; }
             return v;
+        }
+    }
+    // run310 fallback: heap-scan for the env POINTER (not the env). The
+    // static slots above are .bss words inside libbtdm.a builds; firmware
+    // that links BT differently (MicroPython NimBLE: all three slots read
+    // 0 even after active(1) returns ACTIVE) keeps its env pointer
+    // elsewhere. One-shot per boot: sweep DRAM for a word that parses as
+    // a vhci env pointer (target in DRAM, not poison/fill) AND whose
+    // target's [env+33..35] ring bytes are live (not a5a5/zero-fill).
+    // Verified harmless on non-BT images: nothing parses, returns 0.
+    unsafe {
+        if VHCI_SCAN_DONE == 0 {
+            VHCI_SCAN_DONE = 1;
+            let mut hits: u32 = 0;
+            let mut a = 0x3ffb0000u32;
+            while a < 0x40000000 {
+                let e = dma_read_u32(a);
+                if e >= 0x3ffb0000 && e < 0x40000000 && e != 0xFFFFFFFF && e != 0xa5a5a5a5 {
+                    // env+33 lives in word [env+32]: bytes 33..35 = bits 8..31.
+                    let w = dma_read_u32(e.wrapping_add(32));
+                    let b33 = (w >> 8) & 0xFF;
+                    let b34 = (w >> 16) & 0xFF;
+                    let b35 = (w >> 24) & 0xFF;
+                    // Live ring state: not fill (a5a5/00/ff-uniform) and
+                    // the env head word itself is nonzero (posted or idle,
+                    // but allocated — never zero-fill on a live struct).
+                    let head = dma_read_u32(e);
+                    if head != 0 && head != 0xFFFFFFFF && head != 0xa5a5a5a5
+                        && !(b33 == b34 && b34 == b35 && (b33 == 0 || b33 == 0xFF || b33 == 0xA5))
+                    {
+                        VHCI_ENV_P = a;
+                        hits = a;
+                        break;
+                    }
+                }
+                a = a.wrapping_add(4);
+            }
+            // One-shot census (budget 1/boot): proves the scan RAN and what
+            // it found (0 = nothing parses on this image).
+            {
+                let mut m = [0u8; 48];
+                let hx = |mut v: u32, o: &mut [u8]| {
+                    for i in 0..8 { o[7 - i] = b"0123456789abcdef"[(v & 0xF) as usize]; v >>= 4; }
+                };
+                let mut h = [0u8; 8];
+                let mut n = 0;
+                for &b in b"[HCI] vhciscan hit=" { m[n] = b; n += 1; }
+                hx(hits, &mut h);
+                for &b in &h { if n < 48 { m[n] = b; n += 1; } }
+                crate::js_log_str(m.as_ptr() as u32, n as u32);
+            }
+            if hits != 0 {
+                return hits;
+            }
         }
     }
     0
