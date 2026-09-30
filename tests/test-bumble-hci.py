@@ -100,6 +100,13 @@ class EngineSide(asyncio.Protocol):
         self.transport = transport
         LOG.info('%s engine connected from %s', ts(),
                  transport.get_extra_info('peername'))
+        # 2026-09-30: reset the per-connection ADVRPT budget (see on_adv):
+        # each engine run advertises fresh; the 8-line flood-guard must not
+        # be spent by a previous run while the new run's ADV stays silent.
+        try:
+            reset_advrpt_budget()
+        except Exception:
+            pass
 
     def on_packet(self, packet: bytes):
         # PacketParser emits the full HCI packet (type byte first).
@@ -190,15 +197,30 @@ class EngineSide(asyncio.Protocol):
                 except Exception as e:
                     LOG.info('do_connect stale-drop exc=%s', str(e)[:80])
             LOG.info('do_connect stop_scanning...')
-            await peer.stop_scanning()
+            # NOTE (2026-09-30): do NOT actually stop scanning here. The
+            # controller creates the LE connection ONLY on a live ADV PDU
+            # (on_advertising_pdu: pending==advertiser_address per air
+            # packet) — a scan-disabled peer never sees the ADV, so
+            # peer.connect() hangs to timeout (proven: stop_scanning +
+            # PUBLIC-typed addr still timed out with ADVRPT flowing).
+            # Scanning stays ON; connect() cancels it internally on success.
             LOG.info('do_connect stopped, connecting to %s...', addr)
             # Pass a parsed Address so connect() skips the by-name scan
             # (our ADV payload has no local name; find_peer_by_name would
-            # hang until timeout).
+            # hang until timeout). The eng controller is constructed with
+            # plain Address('AA:BB:CC:DD:EE:FF') whose type defaults to
+            # RANDOM(1) — so the air address is RANDOM-typed and the target
+            # MUST use the same default typing (a PUBLIC(0)-typed target
+            # never == the RANDOM air address; proven 2026-09-30: the
+            # PUBLIC "fix" broke connects that passed before). NO timeout=
+            # here either: Bumble's default connect timeout is None (wait
+            # forever); a 20s timeout only masks a slow air path. The
+            # harness (btHciControl, 60s) owns the timeout; the bridge must
+            # not fail the attempt first (proven: in-proc minimal repro
+            # with identical topology hangs >10s before completing).
             target = hci.Address(addr)
             conn = await peer.connect(target,
-                                      transport=bumble_core.PhysicalTransport.LE,
-                                      timeout=20.0)
+                                       transport=bumble_core.PhysicalTransport.LE)
             LOG.info('do_connect connected handle=%s', conn.handle)
             self.conn = conn
             self.send_json({'ok': True, 'event': 'connected',
@@ -285,6 +307,31 @@ class EngineSide(asyncio.Protocol):
         # dead eng_ctrl -> GATT timeout; plus "reuses the same handle"
         # + stale-conn drop spam). peer_link is reachable via any live
         # controller's .link; guard everything (disconnect races setup).
+        # FIX (2026-09-30): ALSO clear the peer controller's pending LE
+        # connection slot (ctrl.pending_le_connection). A connect attempt
+        # that never completed (harness timeout while the bridge DID
+        # connect: C2H#6 043e + "connected handle=1" but no JSON reply)
+        # leaves pending set; the NEXT do_connect then hits Bumble's
+        # "connection already pending" InvalidStateError path — the peer
+        # never issues a fresh Create Connection and the harness times
+        # out again. Clearing forces a fresh attempt per CTL request.
+        # ALSO reset the Device-level flag (peer.le_connecting): with
+        # is_le_connecting stuck True, connect_le raises immediately.
+        try:
+            _peer = self._get_peer()
+            _pctrl = self._get_peer_ctrl()
+            if _pctrl is not None:
+                try:
+                    _pctrl.pending_le_connection = None
+                except Exception:
+                    pass
+            if _peer is not None:
+                try:
+                    _peer.le_connecting = False
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             _ctrl = getattr(self, 'controller', None)
             _link = getattr(_ctrl, 'link', None)
@@ -342,6 +389,19 @@ async def selftest(port: int):
     print('SELFTEST PASS: RESET CC + ADV CCs + advertiser enabled')
 
 
+def reset_advrpt_budget():
+    """Reset the per-connection ADVRPT line budget (called on engine
+    (re)connect; the closures are registered in _advrpt_resetters)."""
+    for _fn in list(_advrpt_resetters):
+        try:
+            _fn.n = 0
+        except Exception:
+            pass
+
+
+_advrpt_resetters = []
+
+
 async def peer_task(link: LocalLink, state: dict):
     """Virtual LE peer: own controller+host wired in-process, GATT server
     with one readable characteristic, always scanning. Discovered ESP32
@@ -352,7 +412,11 @@ async def peer_task(link: LocalLink, state: dict):
 
     class CtrlSink:
         def on_packet(self, packet: bytes):
-            loop.call_soon(holder['host'].on_packet, packet)
+            # Route DIRECTLY (no call_soon): the controller's own
+            # send_hci_packet already defers via call_soon, so a second
+            # deferral here is pure latency with zero ordering benefit
+            # (single-threaded loop).
+            holder['host'].on_packet(packet)
 
     ctrl = Controller('peer0', host_source=None, host_sink=CtrlSink(),
                       link=link)
@@ -400,10 +464,16 @@ async def peer_task(link: LocalLink, state: dict):
         # spins at 5% CPU writing them. Cap at 8 lines per bridge process
         # lifetime — enough to prove over-the-air delivery, then silent
         # (the radio stays live; only the log is gated).
+        # 2026-09-30: the cap must be PER-ENGINE-CONNECTION, not per bridge
+        # process (observed: run1 spent the 8 lines, run2+ showed ADV marks
+        # in the emu UART but zero ADVRPT, and do_connect then hung to
+        # btHciControl timeout even though C2H#6 043e connected). Reset the
+        # counter on every engine (re)connect in connection_made.
         if getattr(on_adv, 'n', 0) < 8:
             on_adv.n = getattr(on_adv, 'n', 0) + 1
             LOG.info('ADVRPT addr=%s data=%s', adv.address, data.hex())
 
+    _advrpt_resetters.append(on_adv)
     peer.on('advertisement', on_adv)
     await peer.start_scanning()
     LOG.info('peer scanning')
@@ -481,12 +551,20 @@ async def emu_dev_setup(state, eng_ctrl):
         ehost.ready = True
         state['emu_dev'] = emu_dev
 
-        # 4. Downlink: sync COPY to emu Host, then TCP-forward original.
-        # EmuCtrlSink is DIRECT (no call_soon): stock send_hci_packet
-        # already defers via call_soon, so a second deferral pushes
-        # Connection Complete past the peer's ATT arrival (observed:
-        # emu host conns=[] at ATT time). Direct call here = single
-        # deferral, matching probe27/28 which got conns=[1].
+        # 4. Downlink: eng_ctrl.host sink + TCP-forward. TYPE-FILTERED
+        # single delivery (2026-10-01 fix): the host sink (EmuCtrlSink,
+        # DIRECT — no call_soon since stock send_hci_packet already defers
+        # once) feeds controller->host packets to the emu Host; the
+        # send_hci_packet override TCP-forwards to the engine. Command
+        # Complete (0x04/0x0E) + Command Status (0x04/0x0F) replies answer
+        # the ENGINE's own H2C commands — ehost never sent them, so copying
+        # them to ehost only logs 5x "!!! no pending response future to
+        # set" noise per run (RESET + 4 ADV CCs). They go TCP-ONLY.
+        # Everything else (LE Connection Complete, disconnect, ACL) goes
+        # to BOTH: ehost needs the connection for its ATT server state +
+        # ATT-request delivery, and the engine needs the CC/C2H for its
+        # own dialog (proven: dropping the ehost copy breaks GATT reads
+        # with ATT_READ_BY_GROUP_TYPE timeout, run r19).
         class EmuCtrlSink:
             def on_packet(self, packet: bytes):
                 emu_holder['host'].on_packet(packet)
@@ -497,10 +575,13 @@ async def emu_dev_setup(state, eng_ctrl):
         _emu_tcp_forward = eng_ctrl.send_hci_packet
 
         def emu_send_and_forward(packet):
-            try:
-                emu_holder['host'].on_packet(bytes(packet))
-            except Exception as e:
-                LOG.info('emu-host forward exc=%s', str(e)[:80])
+            raw = bytes(packet)
+            if not (len(raw) >= 2 and raw[0] == 0x04
+                    and raw[1] in (0x0E, 0x0F)):
+                try:
+                    emu_holder['host'].on_packet(raw)
+                except Exception as e:
+                    LOG.info('emu-host forward exc=%s', str(e)[:80])
             _emu_tcp_forward(packet)
 
         eng_ctrl.send_hci_packet = emu_send_and_forward
@@ -643,11 +724,18 @@ async def serve(port: int):
                 eng_ctrl.host = _EmuCtrlSink2()
                 _tcp_fwd = eng_ctrl.send_hci_packet
 
+                # TYPE-FILTERED single delivery (2026-10-01 fix, same rule
+                # as emu_send_and_forward): Command Complete/Status go
+                # TCP-ONLY (they answer the engine's own H2C; ehost never
+                # sent them), everything else goes to BOTH.
                 def _emu_send_and_forward2(packet, _f=_tcp_fwd):
-                    try:
-                        _holder['host'].on_packet(bytes(packet))
-                    except Exception:
-                        pass
+                    raw = bytes(packet)
+                    if not (len(raw) >= 2 and raw[0] == 0x04
+                            and raw[1] in (0x0E, 0x0F)):
+                        try:
+                            _holder['host'].on_packet(raw)
+                        except Exception:
+                            pass
                     _f(packet)
 
                 eng_ctrl.send_hci_packet = _emu_send_and_forward2
