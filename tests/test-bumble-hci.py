@@ -55,37 +55,16 @@ try:
         from bumble import att as _attmod
         _handler = getattr(self, f'on_{att_pdu.name.lower()}', None)
         if _handler is not None and _inspect.iscoroutinefunction(_handler):
+            # FIX (2026-09-29): schedule the async handler as a task INSTEAD
+            # of calling the stock sync dispatch (which would call the same
+            # handler again and drop the coroutine -> double delivery AND
+            # "coroutine was never awaited"). The stock path is skipped
+            # entirely, so each ATT request is answered EXACTLY once.
             asyncio.get_running_loop().create_task(_handler(bearer, att_pdu))
             return
         return _orig_on_gatt_pdu(self, bearer, att_pdu)
 
     _gsmod.Server.on_gatt_pdu = _patched_on_gatt_pdu
-
-    # Peer-side double-delivery guard (2026-09-29): with the async patch
-    # above, Bumble's stock emit path AND our sync dispatch both reach the
-    # peer Device handler, so every ATT response lands TWICE -> the 2nd
-    # set_result on an already-done future raises "InvalidStateError:
-    # invalid state" x18/run (bridge-log noise only; reads still succeed).
-    # Guard: drop responses with no live pending future.
-    try:
-        from bumble import gatt_client as _gcmod
-
-        _orig_client_pdu = _gcmod.Client.on_gatt_pdu
-
-        def _patched_client_pdu(self, att_pdu):
-            try:
-                from bumble import att as _attmod2
-                if att_pdu.op_code in _attmod2.ATT_RESPONSES:
-                    _pend = getattr(self, 'pending_response', None)
-                    if _pend is None or getattr(_pend, 'done', lambda: True)():
-                        return
-            except Exception:
-                pass
-            return _orig_client_pdu(self, att_pdu)
-
-        _gcmod.Client.on_gatt_pdu = _patched_client_pdu
-    except Exception as _e2:
-        print('gatt_client patch FAILED:', str(_e2)[:120])
 except Exception as _e:
     print('gatt_server patch FAILED:', str(_e)[:120])
 
@@ -171,6 +150,17 @@ class EngineSide(asyncio.Protocol):
         if peer is None:
             self.send_json({'ok': False, 'error': 'no peer yet'})
             return
+        # Serialize connect attempts per TCP connection: the harness sends
+        # at most one, but a retried/duplicate CTL line (or a stale engine
+        # reconnect racing the previous attempt) must NEVER start a second
+        # concurrent peer.connect() — the first attempt's reply would be
+        # lost and the harness would time out while the bridge log shows a
+        # connection that nobody reports (observed 2026-09-30: two
+        # "connected handle=1" lines, zero JSON replies, harness timeout).
+        if getattr(self, '_connect_busy', False):
+            LOG.info('do_connect busy: dropping duplicate attempt')
+            return
+        self._connect_busy = True
         try:
             # START FRESH: a previous attempt leaves BOTH the Device flag
             # (le_connecting) and the controller slot (pending_le_connection)
@@ -218,6 +208,8 @@ class EngineSide(asyncio.Protocol):
             LOG.info('do_connect exc=%s', str(e)[:120])
             self.send_json({'ok': False, 'event': 'connect-failed',
                             'error': str(e)[:200]})
+        finally:
+            self._connect_busy = False
 
     async def do_read(self, req):
         conn = getattr(self, 'conn', None)

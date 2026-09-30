@@ -6512,9 +6512,13 @@ pub fn bt_shim_step(core: &mut crate::xtensa::state::CoreState) -> bool {
     // is NOT an emulator artifact: the window check (q+84==a4, q!=0, a4 in
     // IRAM) fires inside the guest's own Send body at 937f3/5/7/9 with the
     // correct Send frame (entry-window ar() reads verified via T-line
-    // register dumps). No engine write is safe here (the queue storage is
-    // code); the adv_followup synthesis + CBQ injection already route
-    // around the wedged posts 4/5, so observe-only is correct.
+    // register dumps). The task itself is UNRECOVERABLE (its frame points
+    // at code, not a queue — nothing the engine writes can give it a live
+    // mux without breaking the ADV path, verified by the reverted
+    // re-point experiments of 2026-09-29). Observe-only is correct: the
+    // adv_followup synthesis + CBQ injection already route around the
+    // wedged posts 4/5, so all marks + e2e still PASS with the wedge
+    // present (6-11 observe-only hits/run, zero functional impact).
     if core.pc == 0x40093798 {
         let w0 = dma_read_u32(0x40093798);
         // run284 DIAG: log every 93798 hit once (w0 + a2 + core).
