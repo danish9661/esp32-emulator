@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-This package (`esp32emu`) bundles a copy of the Espressif ESP32 boot ROM so it can
+This package (`esp32-emu`) bundles a copy of the Espressif ESP32 boot ROM so it can
 emulate the chip out of the box.
 
 ## ESP32 Boot ROM — `src/rom/esp32-v3-rom.bin`

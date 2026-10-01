@@ -3,24 +3,32 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docs — esp32emu</title>
-<meta name="description" content="esp32emu documentation: peripheral and module support matrix, demo catalogue, build and test instructions.">
+<meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
+<title>Docs — esp32-emu</title>
+<meta name="description" content="esp32-emu documentation: peripheral and module support matrix, demo catalogue, build and test instructions.">
 <meta name="theme-color" content="#101418">
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="manifest" href="./manifest.webmanifest">
+<link rel="canonical" href="https://danish9661.github.io/esp32-emulator/docs.html">
+<meta name="robots" content="index, follow">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="esp32emu">
-<meta property="og:title" content="Docs — esp32emu">
+<meta property="og:site_name" content="esp32-emu">
+<meta property="og:title" content="Docs — esp32-emu">
 <meta property="og:description" content="ESP32 vs ESP32-CAM peripheral support matrix, per-demo MIPS table, build and test instructions.">
 <meta property="og:url" content="https://danish9661.github.io/esp32-emulator/docs.html">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="https://danish9661.github.io/esp32-emulator/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Docs — esp32-emu">
+<meta name="twitter:description" content="ESP32 vs ESP32-CAM peripheral support matrix, per-demo MIPS table, build and test instructions.">
+<meta name="twitter:image" content="https://danish9661.github.io/esp32-emulator/og-image.png">
 <link rel="stylesheet" href="./styles.css">
 <script src="./coi-serviceworker.js"></script>
 </head>
 <body>
 <header class="topbar">
   <div class="wrap">
-    <a class="brand" href="./index.html"><span class="brand-mark">32</span><span><b>esp32emu</b><br><small>WASM dual-core Xtensa</small></span></a>
+    <a class="brand" href="./index.html"><span class="brand-mark">32</span><span><b>esp32-emu</b><br><small>WASM dual-core Xtensa</small></span></a>
     <nav>
       <a href="./index.html">Demo</a>
       <a href="./about.html">About</a>
@@ -43,6 +51,10 @@
     <h2>Peripheral support matrix</h2>
     <p class="sub">ESP32 silicon vs ESP32-CAM module. &ldquo;Demo&rdquo; jumps back to the console
       with that firmware selected.</p>
+    <figure class="shot">
+      <img src="./shot-docs.png" width="1200" height="630" alt="esp32-emu peripheral support matrix: UART, GPIO, SPI, I2C, WiFi, camera and more marked native on ESP32 and ESP32-CAM" loading="lazy">
+      <figcaption>The support matrix — every peripheral below runs on the same native Rust model.</figcaption>
+    </figure>
     <div class="table-scroll">
       <table class="matrix" id="supportTable">
         <thead>
@@ -202,7 +214,7 @@ node tests/test-worker-gpio.mjs
 
 <footer>
   <div class="wrap">
-    <span>esp32emu &middot; WASM Xtensa core, native peripheral models</span>
+    <span>esp32-emu &middot; WASM Xtensa core, native peripheral models</span>
     <nav><a href="./index.html">Demo</a><a href="./about.html">About</a><a href="https://github.com/danish9661/esp32-emulator" target="_blank" rel="noopener">GitHub</a></nav>
   </div>
 </footer>

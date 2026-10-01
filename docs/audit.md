@@ -1,4 +1,4 @@
-# Audit — ESP32 WASM Emulator (`esp32emu`)
+# Audit — ESP32 WASM Emulator (`esp32-emu`)
 
 Operational and security audit of the fully-WASM ESP32 (Xtensa LX6, dual-core)
 emulator. Measurements below were taken on this machine (Linux, Node 22,

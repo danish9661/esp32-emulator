@@ -1,11 +1,11 @@
-// Consumer smoke test for the `esp32emu` package.
+// Consumer smoke test for the `esp32-emu` package.
 // Validates two things:
 //   A) The package entry (src/index.js) boots the ESP32 directly via the
 //      ESP32 class — proving the WASM engine + bundled boot ROM work end to
 //      end (no compile server needed; ROM-only boot).
 //   B) The high-level SimulatorWorker auto-loads the bundled WASM + boot ROM
 //      (no rom/wasm passed in) — proving the published file layout resolves
-//      from the package root, i.e. `npm install esp32emu` works out of the box.
+//      from the package root, i.e. `npm install esp32-emu` works out of the box.
 import { ESP32, SimulatorWorker } from '../src/index.js';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';

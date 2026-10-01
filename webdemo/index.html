@@ -3,26 +3,33 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>esp32emu — ESP32 in your browser</title>
+<meta name="google-site-verification" content="15oUGn7tDY5qFKh0oX7q0zWcuUJ_nFIIjjZk6ixculo" />
+<title>esp32-emu — ESP32 in your browser</title>
 <meta name="description" content="Run real ESP32 firmware in your browser. Pick a peripheral demo, watch the UART log stream out of a live dual-core Xtensa simulation.">
 <meta name="theme-color" content="#101418">
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="manifest" href="./manifest.webmanifest">
+<link rel="canonical" href="https://danish9661.github.io/esp32-emulator/">
+<meta name="robots" content="index, follow">
+<meta name="keywords" content="ESP32 emulator, ESP32 simulator, ESP32 online, ESP32 browser, Xtensa emulator, ESP32 Arduino simulator, ESP32 MicroPython online, IoT simulator">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="esp32emu">
-<meta property="og:title" content="esp32emu — ESP32 in your browser">
+<meta property="og:site_name" content="esp32-emu">
+<meta property="og:title" content="esp32-emu — ESP32 in your browser">
 <meta property="og:description" content="53 prebuilt Arduino firmware images on a WASM dual-core Xtensa core. Live UART terminal, per-run MIPS readout, no install.">
 <meta property="og:url" content="https://danish9661.github.io/esp32-emulator/">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="esp32emu — ESP32 in your browser">
+<meta property="og:image" content="https://danish9661.github.io/esp32-emulator/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="esp32-emu — ESP32 in your browser">
 <meta name="twitter:description" content="Real ESP32 firmware, live in your browser: UART terminal + MIPS per run.">
+<meta name="twitter:image" content="https://danish9661.github.io/esp32-emulator/og-image.png">
 <link rel="stylesheet" href="./styles.css">
 <script src="./coi-serviceworker.js"></script>
 </head>
 <body>
 <header class="topbar">
   <div class="wrap">
-    <a class="brand" href="./index.html"><span class="brand-mark">32</span><span><b>esp32emu</b><br><small>WASM dual-core Xtensa</small></span></a>
+    <a class="brand" href="./index.html"><span class="brand-mark">32</span><span><b>esp32-emu</b><br><small>WASM dual-core Xtensa</small></span></a>
     <nav>
       <a href="./index.html" aria-current="page">Demo</a>
       <a href="./about.html">About</a>
@@ -50,6 +57,10 @@
       <div class="stat"><div class="v">2 &times; LX6</div><div class="l">cores per run, 240 MHz model</div></div>
       <div class="stat"><div class="v" id="statDemoCount">45</div><div class="l">prebuilt firmware images on this page</div></div>
     </div>
+    <figure class="shot">
+      <img src="./shot-console.png" width="1200" height="630" alt="esp32-emu running the GPIO demo in the browser: UART terminal showing ALL TESTS PASSED with live MIPS readout" loading="lazy">
+      <figcaption>Live run of the GPIO demo — real boot ROM banner, chip-printed pass mark, per-run MIPS.</figcaption>
+    </figure>
   </section>
 
   <section class="section" id="console">
@@ -154,7 +165,7 @@
 
 <footer>
   <div class="wrap">
-    <span>esp32emu &middot; WASM Xtensa core, native peripheral models</span>
+    <span>esp32-emu &middot; WASM Xtensa core, native peripheral models</span>
     <nav><a href="./about.html">About</a><a href="./docs.html">Docs</a><a href="https://github.com/danish9661/esp32-emulator" target="_blank" rel="noopener">GitHub</a></nav>
   </div>
 </footer>

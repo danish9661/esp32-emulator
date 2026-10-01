@@ -1,7 +1,7 @@
-# ESP32 WASM Emulator
+# ESP32 Emulator
 
-[![npm version](https://img.shields.io/npm/v/esp32emu)](https://www.npmjs.com/package/esp32emu)
-[![license](https://img.shields.io/npm/l/esp32emu)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/esp32-emu)](https://www.npmjs.com/package/esp32-emu)
+[![license](https://img.shields.io/npm/l/esp32-emu)](LICENSE)
 [![CI](https://github.com/danish9661/esp32-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/danish9661/esp32-emulator/actions)
 
 A fast ESP32 (Xtensa LX6, dual-core) emulator. The CPU is executed by a
@@ -16,6 +16,9 @@ boots the real boot ROM plus 53 prebuilt Arduino firmware images (GPIO, UART
 echo, SPI, I2C, timers, PWM, RMT, I2S, TWAI, ADC, touch, MCPWM, flash/OTA,
 SD, WiFi scan, Soft-AP, camera, deep sleep…) on the same WASM engine, with a
 live UART terminal and per-run MIPS readout. Sources live in `webdemo/`.
+
+![esp32-emu running the GPIO demo in the browser — UART terminal showing ALL TESTS PASSED with live MIPS readout](https://danish9661.github.io/esp32-emulator/shot-console.png)
+![esp32-emu peripheral support matrix — native ESP32 and ESP32-CAM coverage](https://danish9661.github.io/esp32-emulator/shot-docs.png)
 
 ## Architecture
 
@@ -101,7 +104,7 @@ All major ESP32 peripherals are native Rust (no JS fallback traffic):
 ### Install
 
 ```bash
-npm install esp32emu
+npm install esp32-emu
 ```
 
 Node 18+ required. No native dependencies — the WASM engine is bundled.
@@ -109,7 +112,7 @@ Node 18+ required. No native dependencies — the WASM engine is bundled.
 ### Run your first firmware
 
 ```js
-import { SimulatorWorker } from 'esp32emu';
+import { SimulatorWorker } from 'esp32-emu';
 
 // 4 MB flash, erase-filled. Write your compiled .bin here:
 const flash = new Uint8Array(4 * 1024 * 1024).fill(0xff);
@@ -158,7 +161,7 @@ curl -X POST http://localhost:5525/api/compile/start \
 For lower-level control without a worker thread:
 
 ```js
-import { ESP32 } from 'esp32emu';
+import { ESP32 } from 'esp32-emu';
 
 const chip = new ESP32({ flashSizeMB: 4, strapValue: 0x13 });
 chip.loadROM(romBytes);
@@ -181,7 +184,7 @@ curl -L -o /tmp/micropython-esp32.bin \
 ```
 
 ```js
-import { SimulatorWorker } from 'esp32emu';
+import { SimulatorWorker } from 'esp32-emu';
 import { readFileSync } from 'fs';
 
 const mpyBin = readFileSync('/tmp/micropython-esp32.bin');
@@ -267,7 +270,7 @@ always win) and enables firmware PSRAM detection (`psramFound()`, SPIRAM
 heap) plus the virtual OV2640 over the module pinout (`ESP32_CAM_PINS`):
 
 ```js
-import { SimulatorWorker, ESP32_CAM_PINS } from 'esp32emu';
+import { SimulatorWorker, ESP32_CAM_PINS } from 'esp32-emu';
 
 const sim = new SimulatorWorker();
 await sim.init('ESP32', {

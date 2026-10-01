@@ -1,6 +1,6 @@
 # API reference
 
-`esp32emu` exposes 15 named exports (from `src/index.js`):
+`esp32-emu` exposes 15 named exports (from `src/index.js`):
 
 | Export | Kind | Purpose |
 |---|---|---|
@@ -23,7 +23,7 @@
 ## `SimulatorWorker`
 
 ```js
-import { SimulatorWorker } from 'esp32emu';
+import { SimulatorWorker } from 'esp32-emu';
 
 const flash = new Uint8Array(4 * 1024 * 1024).fill(0xff);
 const sim = new SimulatorWorker();
@@ -56,7 +56,7 @@ sim.terminate();                        // release worker + its memory
 ## `ESP32` (single-threaded, no worker)
 
 ```js
-import { ESP32 } from 'esp32emu';
+import { ESP32 } from 'esp32-emu';
 const chip = new ESP32({ flash });
 chip.loadROM(rom);
 await chip.loadWasm(wasm, 'wasm');

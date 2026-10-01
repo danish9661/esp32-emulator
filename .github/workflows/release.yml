@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes the `esp32emu` npm package and creates a matching GitHub release.
+# Publishes the `esp32-emu` npm package and creates a matching GitHub release.
 # Trigger by pushing a tag like `v0.1.0`, or run manually from the Actions tab.
 on:
   push:
@@ -145,7 +145,7 @@ jobs:
   publish-github:
     name: Publish to GitHub Packages
     # GitHub Packages rejects unscoped names on the npm registry — the
-    # package is published as @danish9661/esp32emu. setup-node's `scope`
+    # package is published as @danish9661/esp32-emu. setup-node's `scope`
     # only writes .npmrc auth config; the rename below is what actually
     # changes the published name.
     needs: build-and-test
@@ -174,7 +174,7 @@ jobs:
 
       - name: Rename for GitHub Packages scope
         working-directory: package
-        run: npm pkg set name="@danish9661/esp32emu"
+        run: npm pkg set name="@danish9661/esp32-emu"
 
       - name: Publish
         working-directory: package

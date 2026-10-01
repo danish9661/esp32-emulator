@@ -1,7 +1,18 @@
 # Changelog
 
-All notable changes to the `esp32emu` package are documented here.
+All notable changes to the `esp32-emu` package are documented here.
 This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
+
+## [1.1.0] - 2026-10-01
+
+### Changed
+- Package renamed `esp32emu` → `esp32-emu` (install: `npm install esp32-emu`,
+  import from `'esp32-emu'`, CLI binary `esp32-emu`).
+- README title is now “ESP32 Emulator” (no “WASM”, avoids search-index
+  conflicts with the package name).
+- Webdemo SEO: Google site-verification tag on all pages, `sitemap.xml` +
+  `robots.txt`, PNG icons + OG image, canonical URLs, indexable screenshots
+  (also embedded in the README).
 
 ## [1.0.1] - 2026-10-01
 
@@ -17,7 +28,7 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
 
 ### Packaging
 - Release-ready npm package layout: `dist/` bundle (esbuild), bundled boot
-  ROM + WASM engine, `bin/esp32emu` CLI, `test-package-smoke` coverage.
+  ROM + WASM engine, `bin/esp32-emu` CLI, `test-package-smoke` coverage.
 - Release workflow hardened for CI: `npm ci` (lockfile-pinned deps),
   `chmod +x` on the esbuild binary after install (fixes the
   `spawnSync .../esbuild EACCES` postinstall failure), pinned action SHAs
@@ -448,7 +459,7 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
 ## [0.1.1] - 2026-08-27
 
 ### Fixed
-- CLI `esp32emu run <firmware.bin>`: load the firmware image at flash offset
+- CLI `esp32-emu run <firmware.bin>`: load the firmware image at flash offset
   `0` instead of `0x1000`. The bundled firmware images are *combined*
   (bootloader @ `0x1000`, partition table @ `0x8000`, app @ `0x10000`), so
   placing them at `0x1000` shifted every segment one sector too high and the
@@ -474,7 +485,7 @@ Initial public package of the ESP32 (Xtensa LX6, dual-core) WASM emulator.
 - `ESP32` (single-threaded, direct core stepping) and `SimulatorWorker`
   (worker-thread, auto-loads the bundled ROM/WASM; stream UART via
   `_onUART`).
-- `bin/esp32emu` CLI: `esp32emu run <firmware.bin>` boots firmware and streams
+- `bin/esp32-emu` CLI: `esp32-emu run <firmware.bin>` boots firmware and streams
   UART; `--help` for usage.
 
 ### Tests / packaging

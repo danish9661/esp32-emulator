@@ -1,4 +1,4 @@
-// Type definitions for esp32emu
+// Type definitions for esp32-emu
 // (hand-authored; mirrors the public exports from src/index.js)
 
 /** AI-Thinker ESP32-CAM board id ('esp32-cam'). */

@@ -1,4 +1,4 @@
-/* Shared look for the esp32emu webdemo. Plain CSS, no build step, no
+/* Shared look for the esp32-emu webdemo. Plain CSS, no build step, no
    frameworks. Palette and type follow the design plan: signal-room
    phosphor-on-ink with oxide-red accents. */
 
@@ -156,6 +156,11 @@ a:focus-visible, button:focus-visible, select:focus-visible {
 .section { padding: 40px 0; }
 .section h2 { font-size: 24px; letter-spacing: -0.01em; margin: 0 0 8px; }
 .section .sub { color: var(--muted); margin: 0 0 20px; max-width: 70ch; }
+
+/* ---- screenshots (indexable <img> with keyword-rich alt text) ---- */
+.shot { margin: 28px 0 0; }
+.shot img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 14px; }
+.shot figcaption { color: var(--dim); font-size: 13px; margin-top: 8px; }
 
 /* ---- console layout ---- */
 .console-grid { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }

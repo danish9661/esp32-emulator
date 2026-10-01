@@ -19,7 +19,7 @@ void setup() {
     File f = SD_MMC.open("/hello.txt", FILE_WRITE);
     if (!f) { Serial.println("OPEN_W=FAIL"); pass = false; }
     else {
-      f.println("esp32emu-sd-test-12345");
+      f.println("esp32-emu-sd-test-12345");
       f.close();
       Serial.println("OPEN_W=PASS");
     }
@@ -29,7 +29,7 @@ void setup() {
     else {
       String s = r.readString();
       r.close();
-      bool hit = s.indexOf("esp32emu-sd-test-12345") >= 0;
+      bool hit = s.indexOf("esp32-emu-sd-test-12345") >= 0;
       Serial.print("READBACK="); Serial.println(hit ? "PASS" : "FAIL");
       if (!hit) pass = false;
     }

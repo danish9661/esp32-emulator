@@ -1,6 +1,6 @@
 {
-  "name": "esp32emu — ESP32 in your browser",
-  "short_name": "esp32emu",
+  "name": "esp32-emu — ESP32 in your browser",
+  "short_name": "esp32-emu",
   "description": "Run real ESP32 firmware in your browser: 53 prebuilt peripheral demos on a WASM dual-core Xtensa core with live UART + MIPS.",
   "start_url": "./index.html",
   "scope": "./",
@@ -8,6 +8,8 @@
   "background_color": "#101418",
   "theme_color": "#101418",
   "icons": [
-    { "src": "./favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+    { "src": "./favicon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png" }
   ]
 }

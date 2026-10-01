@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// esp32emu CLI — boot ESP32 firmware and stream UART.
+// esp32-emu CLI — boot ESP32 firmware and stream UART.
 import { SimulatorWorker } from '../dist/index.js';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -8,12 +8,12 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const HELP = `
-esp32emu — ESP32 (Xtensa LX6, dual-core) WASM emulator CLI
+esp32-emu — ESP32 (Xtensa LX6, dual-core) WASM emulator CLI
 
 Usage:
-  esp32emu run <firmware.bin> [options]   Boot firmware and stream UART to stdout
-  esp32emu help                           Show this help
-  esp32emu version                        Print the package version
+  esp32-emu run <firmware.bin> [options]   Boot firmware and stream UART to stdout
+  esp32-emu help                           Show this help
+  esp32-emu version                        Print the package version
 
 run options:
   --flash-size <MB>   Flash size in MB (default 4)
@@ -23,8 +23,8 @@ run options:
   -h, --help          Show this help
 
 Examples:
-  esp32emu run build/firmware.bin
-  esp32emu run firmware.bin --flash-size 8 --once
+  esp32-emu run build/firmware.bin
+  esp32-emu run firmware.bin --flash-size 8 --once
 
 Notes:
   The ESP32 boot ROM and the WASM engine are bundled with the package, so no
@@ -77,7 +77,7 @@ async function runFirmware(opts) {
   const sim = new SimulatorWorker();
   sim._onUART = (b) => { process.stdout.write(String.fromCharCode(b)); };
   sim._onError = (e) => {
-    console.error('\n[esp32emu] runtime error:', e && e.message ? e.message : e);
+    console.error('\n[esp32-emu] runtime error:', e && e.message ? e.message : e);
     process.exit(1);
   };
 
@@ -90,11 +90,11 @@ async function runFirmware(opts) {
     }, flash);
   } catch (e) {
     console.error(`error: failed to initialize the simulator: ${e && e.message ? e.message : e}`);
-    console.error('Ensure the esp32emu package files are intact (bundled boot ROM + WASM engine).');
+    console.error('Ensure the esp32-emu package files are intact (bundled boot ROM + WASM engine).');
     process.exit(1);
   }
 
-  console.error(`[esp32emu] booting ${file} (${bin.length} bytes) — Ctrl-C to stop`);
+  console.error(`[esp32-emu] booting ${file} (${bin.length} bytes) — Ctrl-C to stop`);
   sim.run();
   const poll = setInterval(() => sim.pollUart(), 50);
 

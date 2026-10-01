@@ -35,7 +35,7 @@ export default {
 };
 ```
 
-Then `import { SimulatorWorker } from 'esp32emu'` and use it as in the
+Then `import { SimulatorWorker } from 'esp32-emu'` and use it as in the
 [API examples](./api.md). The loader fetches the wasm/ROM over `http(s)`; in a
 bundled browser app those URLs resolve relative to the worker entry, so ensure
 `dist/engine` and `dist/rom` assets are served.
