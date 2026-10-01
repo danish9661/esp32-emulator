@@ -11,9 +11,14 @@ on:
       version:
         description: "Version to release (e.g. 0.1.0). A git tag 'v<version>' is created."
         required: true
+      release_notes:
+        description: "Release description/notes (optional). Used as the GitHub release body; leave empty to auto-generate from commits."
+        required: false
+        default: ""
 
 permissions:
   contents: write # needed to create the GitHub release and (on dispatch) the tag
+  packages: write # needed to publish to GitHub Packages
 
 jobs:
   build-and-test:
@@ -21,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release_notes: ${{ steps.version.outputs.release_notes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,7 +37,13 @@ jobs:
           node-version: 22
 
       - name: Install dependencies (esbuild for dist build)
-        run: npm install
+        # npm ci keeps the lockfile-pinned tree (npm install can drift it);
+        # the chmod repairs an esbuild postinstall that lost +x on the
+        # binary (spawnSync .../esbuild EACCES on ubuntu-latest runners).
+        run: |
+          npm ci
+          chmod +x node_modules/esbuild/bin/esbuild || true
+          node_modules/.bin/esbuild --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,7 +60,12 @@ jobs:
         run: npm run build
 
       - name: Prepare boot ROM symlink
-        run: ln -s tests/rom rom
+        # Fresh runners check out WITHOUT the root `rom -> tests/rom`
+        # symlink (git tracks it, but Actions' checkout/tar handling drops
+        # symlinks on some runners). Recreate it idempotently: -sf works
+        # whether or not the link already exists (plain `ln -s` fails if
+        # a stale link/file is present and aborts the job under set -e).
+        run: ln -sfn tests/rom rom && ls -la rom
 
       - name: Run no-server tests
         run: |
@@ -74,6 +91,11 @@ jobs:
             VERSION="${GITHUB_REF_NAME#v}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Persist the dispatch-provided release notes (may be empty) via
+          # a file: multiline input can't round-trip through outputs cleanly
+          # if passed raw, so base64 it. Tag pushes have no input -> empty.
+          NOTES_B64="$(printf '%s' "${{ github.event.inputs.release_notes }}" | base64 -w0)"
+          echo "release_notes=$NOTES_B64" >> "$GITHUB_OUTPUT"
 
       - name: Tag repo (dispatch only)
         if: github.event_name == 'workflow_dispatch'
@@ -109,13 +131,56 @@ jobs:
 
       - name: Install dependencies & build dist
         working-directory: package
-        run: npm install && npm run build
+        run: |
+          npm ci
+          chmod +x node_modules/esbuild/bin/esbuild || true
+          npm run build
 
       - name: Publish
         working-directory: package
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-github:
+    name: Publish to GitHub Packages
+    # GitHub Packages rejects unscoped names on the npm registry — the
+    # package is published as @danish9661/esp32emu. setup-node's `scope`
+    # only writes .npmrc auth config; the rename below is what actually
+    # changes the published name.
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: package
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@danish9661'
+
+      - name: Install dependencies & build dist
+        working-directory: package
+        run: |
+          npm ci
+          chmod +x node_modules/esbuild/bin/esbuild || true
+          npm run build
+
+      - name: Rename for GitHub Packages scope
+        working-directory: package
+        run: npm pkg set name="@danish9661/esp32emu"
+
+      - name: Publish
+        working-directory: package
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   github-release:
     name: Create GitHub release
@@ -128,7 +193,37 @@ jobs:
           name: npm-package
           path: package
 
-      - name: Create release
+      - name: Resolve release body
+        id: body
+        run: |
+          # Empty input -> fall back to auto-generated notes. Non-empty
+          # input (base64 from build-and-test) becomes the release body.
+          B64="${{ needs.build-and-test.outputs.release_notes }}"
+          if [ -z "$B64" ]; then
+            echo "use_generated=true" >> "$GITHUB_OUTPUT"
+            echo "text=" >> "$GITHUB_OUTPUT"
+          else
+            echo "use_generated=false" >> "$GITHUB_OUTPUT"
+            echo "$B64" | base64 -d > /tmp/release-body.md
+            # multiline output via heredoc delimiter
+            echo "text<<EOF" >> "$GITHUB_OUTPUT"
+            cat /tmp/release-body.md >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release (custom notes)
+        if: steps.body.outputs.use_generated == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build-and-test.outputs.version }}
+          name: v${{ needs.build-and-test.outputs.version }}
+          body: ${{ steps.body.outputs.text }}
+          files: package/src/engine/esp-xtensa/esp_engine_wasm.wasm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release (generated notes)
+        if: steps.body.outputs.use_generated == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.build-and-test.outputs.version }}

@@ -1,6 +1,6 @@
 {
   "name": "esp32emu",
-  "version": "0.1.6",
+  "version": "1.0.1",
   "description": "Fast ESP32 (Xtensa LX6, dual-core) emulator — a WASM-compiled Xtensa core with native peripherals, runnable from Node.js and web workers.",
   "type": "module",
   "main": "dist/index.js",

@@ -575,7 +575,7 @@ class SimulatorWorker {
    * Call from the test loop (e.g. every pollUart tick when btHciProxy is
    * configured). No-op without a connected socket.
    *
-   * @returns {Promise<{sent: number, pushed: number}>} byte counts.
+   * @returns {Promise<{sent: number, pushed: number, timeout?: boolean}>} byte counts.
    */
   async pollBtHciProxy() {
     this._checkReady();
@@ -591,7 +591,7 @@ class SimulatorWorker {
     Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
     const t0 = Date.now();
     while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {
-      if (Date.now() - t0 > 2000) return { sent: 0, pushed: 0, timeout: true }; // eslint-disable-line no-empty
+      if (Date.now() - t0 > 2000) return { sent: 0, pushed: 0, timeout: true };
     }
     const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0;
     if (!n) return { sent: 0, pushed: 0 };
@@ -608,7 +608,7 @@ class SimulatorWorker {
     Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
     const t1 = Date.now();
     while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {
-      if (Date.now() - t1 > 2000) return { sent: n, pushed: 0, timeout: true }; // eslint-disable-line no-empty
+      if (Date.now() - t1 > 2000) return { sent: n, pushed: 0, timeout: true };
     }
     const ok = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0;
     return { sent: n, pushed: ok ? bytes.length : 0 };
@@ -625,7 +625,8 @@ class SimulatorWorker {
     const net = await import('node:net');
     const host = opts.host || '127.0.0.1';
     const port = (opts.port || 14821) >>> 0;
-    await new Promise((resolve, reject) => {
+    await /** @type {Promise<void>} */ (new Promise(
+      (/** @type {(v?: any) => void} */ resolve, /** @type {(e?: any) => void} */ reject) => {
       const sock = net.createConnection({ host, port }, () => {
         this._btHciSock = sock;
         this._btHciConnected = true;
@@ -637,7 +638,8 @@ class SimulatorWorker {
       });
       sock.on('error', reject);
       setTimeout(() => reject(new Error('btHciProxy connect timeout')), 5000);
-    });
+      }
+    ));
     // Forward closure: write one H2C packet, read one C2H reply (framed
     // by Bumble's type+length header; 200ms grace for the reply).
     this._btHciForward = async (h2c) => {
@@ -673,7 +675,7 @@ class SimulatorWorker {
    * listens to, so host-side control must ride it (a second TCP socket
    * would talk to a different radio). Resolves to the reply object.
    *
-   * @param {object} msg - JSON-serializable control message.
+   * @param {any} msg - JSON-serializable control message.
    * @param {number} [timeoutMs=25000] - grace for the reply.
    */
   async btHciControl(msg, timeoutMs = 25000) {
@@ -709,6 +711,7 @@ class SimulatorWorker {
     // Match on the `op` echo: Bumble's bridge echoes the request op in every
     // reply (connect->connected/connect-failed, read->read/read-failed).
     // Keep polling until the reply's op matches msg.op (or timeout).
+    // eslint-disable-next-line no-unused-vars
     const wantOp = msg.op;
     for (;;) {
       Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
@@ -721,7 +724,7 @@ class SimulatorWorker {
       }
       const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0;
       if (n > 0) {
-        const obj = JSON.parse(Buffer.from(this.readResp.slice(0, n)).toString('utf8'));
+        const /** @type {any} */ obj = JSON.parse(Buffer.from(this.readResp.slice(0, n)).toString('utf8'));
         // Accept replies whose op echoes the request, or event-style replies
         // (connected/read/read-failed) that carry no op. A bare echo of the
         // request means the bridge hasn't answered yet — keep waiting.

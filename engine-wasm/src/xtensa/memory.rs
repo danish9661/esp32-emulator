@@ -320,7 +320,28 @@ pub fn write_page_table(core: &mut CoreState, addr: u32, val: u32, size: u32) {
     // path (fast-path store? MMIO page? different slot?) — that reading
     // decides the next step, not another blind rebuild.
     if size == 8 {
-        crate::native_mmio::bt_hci_proxy_flag_tap(addr);
+        // run315: pass the posting PC so the tap latches the per-boot
+        // dialog table (Arduino 5-post ADV vs mpy NimBLE startup sequence).
+        crate::native_mmio::bt_hci_proxy_flag_tap_pc(core.pc, addr);
+        // run313 (2026-10-01): ADV1-payload write watch (build-agnostic H2C
+        // post proof). The mpy NimBLE build posts ADV_DATA carrying our
+        // 'ADV1' bytes (41 44 56 31), but its counter/env/pc all differ from
+        // Arduino's — every addressed tap is blind. The PAYLOAD cannot hide:
+        // whoever posts it must STORE byte 0x41 ('A') to DRAM. Log size-8
+        // stores of 0x41 to DRAM (budget 8/boot, proxy-EN gated): during a
+        // gap_advertise window the post's 'A' store pc IS the post path
+        // (counter-bump site or memcpy loop). Proves posting happened and
+        // WHERE, with zero dependence on env/slots/pcs.
+        crate::native_mmio::bt_hci_proxy_adv1_watch(core.pc, addr, val);
+    }
+    // run313b (2026-10-01): WORD-size ADV_DATA watch. The byte watch above
+    // misses word-memcpy of the payload (0x31564441 in one u32 store, which
+    // is how optimized memcpy moves 'ADV1'). Watch size-32 stores of the
+    // exact LE words 0x31564441 ('ADV1') and 0x1F200801 (framed HCI header
+    // 01 08 20 1F) to DRAM (budget shared 8/boot with the byte watch via
+    // the same callee, proxy-EN gated). Either hit = the post path pc.
+    if size == 32 && (val == 0x31564441 || val == 0x1F200801) {
+        crate::native_mmio::bt_hci_proxy_adv1_watch(core.pc, addr, val);
     }
     if unsafe { crate::native_mmio::BT_VHCI_TRACE_LEFT } > 0
         && addr >= 0x3ffa0000 && addr <= 0x3ffdffff

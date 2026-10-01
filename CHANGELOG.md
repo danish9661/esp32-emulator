@@ -3,6 +3,26 @@
 All notable changes to the `esp32emu` package are documented here.
 This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
 
+## [1.0.1] - 2026-10-01
+
+### Packaging
+- Version bump only (publishes the 0.2.x release content as 1.0.1).
+
+## [0.2.1] - 2026-10-01
+
+### Packaging
+- Version bump only (publishes the 0.2.0 release content as 0.2.1).
+
+## [0.2.0] - 2026-10-01
+
+### Packaging
+- Release-ready npm package layout: `dist/` bundle (esbuild), bundled boot
+  ROM + WASM engine, `bin/esp32emu` CLI, `test-package-smoke` coverage.
+- Release workflow hardened for CI: `npm ci` (lockfile-pinned deps),
+  `chmod +x` on the esbuild binary after install (fixes the
+  `spawnSync .../esbuild EACCES` postinstall failure), pinned action SHAs
+  unchanged, and publish targets both the npm registry and GitHub Packages.
+
 ## [Unreleased]
 
 ### Added

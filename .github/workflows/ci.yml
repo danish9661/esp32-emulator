@@ -73,7 +73,7 @@ jobs:
           name: esp_engine_wasm
           path: src/engine/esp-xtensa/
       - name: Prepare boot ROM symlink (rom -> tests/rom)
-        run: ln -s tests/rom rom
+        run: ln -sfn tests/rom rom && ls -la rom
       - name: Download MicroPython bin (for test-micropython)
         run: curl -L -o /tmp/micropython-esp32.bin https://micropython.org/resources/firmware/ESP32_GENERIC-20260824-v1.29.0.bin && ls -lh /tmp/micropython-esp32.bin
       - name: Run no-server tests
@@ -107,7 +107,7 @@ jobs:
           name: esp_engine_wasm
           path: src/engine/esp-xtensa/
       - name: Prepare boot ROM symlink (rom -> tests/rom)
-        run: ln -s tests/rom rom
+        run: ln -sfn tests/rom rom && ls -la rom
       - name: Start compile server
         run: node tests/compile-server.mjs &
       - name: Wait for compile server

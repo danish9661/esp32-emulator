@@ -3393,6 +3393,21 @@ pub fn bt_shim_step(core: &mut crate::xtensa::state::CoreState) -> bool {
     if core.pc == 0x40177e6b {
         bt_hci_sniff_memcpy(core);
     }
+    // run313 (2026-10-01): arg-shape memcpy-call detector (build-agnostic
+    // H2C sniffer). The pc-gated sniffer above only fires on Arduino's
+    // libbtdm build; MicroPython links a different build (different memcpy
+    // site pc, different env slots — all read 0), so its H2C posts are
+    // invisible. But the CALL SHAPE is identical: API_vhci_host_send_packet
+    // calls memcpy(dst=env+40 in DRAM, src, len 4..264) via callx8/call8.
+    // Detect generically: any callx8/call8 whose a10=dst is DRAM, a12=len in
+    // 4..264, and whose first payload bytes at dst parse as a framed HCI
+    // command (type 0x01 + known opcode + plausible plen). Decode the call
+    // opcode from the flash/ROM word at pc (no per-step disassembly cost
+    // beyond one opcode read; the arg reads only fire on call-shaped words).
+    // Gated on PROXY_EN (default OFF = zero behavior change) + diag budget.
+    if unsafe { BT_HCI_PROXY_EN } != 0 {
+        bt_hci_proxy_call_detect(core);
+    }
     // run306: callback-injection completion + watchdog. The injected
     // callback's final retw (a0 = 0x80000044) lands at CB_TRAMP_ABS; only
     // restore when THIS core's current TCB still matches the one captured
@@ -7012,6 +7027,141 @@ pub fn bt_hci_census_hit() {
     unsafe { BT_HCI_CENSUS = BT_HCI_CENSUS.wrapping_add(1); }
 }
 
+// run313 (2026-10-01): arg-shape memcpy-call detector (build-agnostic H2C
+// sniffer body). Called from bt_shim_step on EVERY step while PROXY_EN (the
+// caller gates); decodes the opcode word at core.pc and fires only on
+// callx8/call8-shaped words whose live args parse as an HCI memcpy:
+//   a10=dst in DRAM, a12=len in 4..264, and [dst..dst+4) reads as framed HCI
+//   (type 0x01, opcode lo/hi, plen) with a KNOWN opcode + sane plen.
+// On fire: stages the REAL bytes at dst (not synthetic opcodes) via the same
+// scratch+FFI path as the flag-tap, with seq = 200+SEQ (dedup namespace
+// separate from the tap's 1..5 and the follow-up's 100+). Diagnostic budget
+// 8/boot: proves the detector FIRED and what it staged (pc/op/len).
+// Cost when idle: one opcode-u16 read per step (pure linear-mem read, no
+// FFI) + early-out on non-call words. Zero behavior change when PROXY_EN=0
+// (caller gates) or when no call-shaped word is executing.
+pub fn bt_hci_proxy_call_detect(core: &mut crate::xtensa::state::CoreState) {
+    use crate::xtensa::memory::{dma_read_u32, read_opcode_u16};
+    // Decode the 16-bit opcode class at pc. Xtensa call8/callx8 are 3-byte
+    // RRR-format words whose low nibble selects the class; match the two
+    // call shapes by their low-12-bit patterns:
+    //   call8  = ...._1101_xxxx (low nibble 0xD, bits[7:4]= target reg field)
+    //   callx8 = ...._1110_xxxx (low nibble 0xE... varies by sub-opcode)
+    // Cheap pre-filter: only words whose low nibble is 0xD/0xE/0x5(call4/8
+    // overlap) proceed to the arg-shape check below. False positives are
+    // harmless: the DRAM-dst + framed-HCI + known-opcode gates reject them.
+    let w0 = read_opcode_u16(core, core.pc);
+    let lo = w0 & 0xF;
+    if lo != 0xD && lo != 0xE && lo != 0x5 {
+        return;
+    }
+    // Live call args (caller window — callee frame not entered yet).
+    let dst = core.ar(10);
+    let len = core.ar(12);
+    if dst < 0x3ffb0000 || dst >= 0x40000000 || len < 4 || len > 264 {
+        return;
+    }
+    // Framed HCI at dst: type 0x01, opcode (lo,hi), plen. Read via two
+    // aligned dma reads (dst may be unaligned; shift out the bytes).
+    let wa = dst & !3;
+    let sh = (dst & 3) * 8;
+    let w_lo = dma_read_u32(wa);
+    let w_hi = dma_read_u32(wa.wrapping_add(4));
+    let b0 = ((w_lo >> sh) & 0xFF) as u8;
+    let b1 = ((w_lo >> (sh + 8)) & 0xFF) as u8;
+    let b2 = ((w_lo >> (sh + 16)) & 0xFF) as u8;
+    let b3 = ((w_lo >> (sh + 24)) & 0xFF) as u8;
+    // b4 may straddle into w_hi when sh != 0.
+    let b4 = if sh == 0 {
+        (w_hi & 0xFF) as u8
+    } else {
+        (((w_hi << (32 - sh)) >> 24) & 0xFF) as u8
+    };
+    let _ = b4;
+    if b0 != 0x01 {
+        return;
+    }
+    let op = ((b2 as u32) << 8) | (b1 as u32);
+    // Known-opcode gate (HCI commands the proxy dialog uses + RESET +
+    // the mpy NimBLE startup sequence: INFO_PARAMS reads, event masks,
+    // LE buffer-size — run315: the flagtap now forwards the REAL startup
+    // opcodes, so the detector must accept them too).
+    // plen sanity per opcode class: LE commands carry plen<=32 here.
+    let ok = matches!(
+        op,
+        0x0C03 | 0x2006 | 0x2008 | 0x2009 | 0x200A | 0x2007 | 0x200B | 0x200C | 0x200D | 0x2016 | 0x0C01 | 0x0C14 | 0x1001 | 0x1002 | 0x1003 | 0x1004 | 0x1009 | 0x0C23
+            | 0x2001 | 0x2002
+    ) && b3 <= 64;
+    if !ok {
+        return;
+    }
+    unsafe {
+        static mut CALLDET_N: u32 = 0;
+        // Stage the REAL bytes at dst (total = 1 + 3 + plen, capped 264).
+        let total = 4u32 + (b3 as u32);
+        if total > 264 {
+            return;
+        }
+        let mut i = 0u32;
+        while i < total {
+            let a = dst.wrapping_add(i);
+            let ww = dma_read_u32(a & !3);
+            BT_HCI_H2C_SCRATCH[i as usize] = ((ww >> (8 * (a & 3))) & 0xFF) as u8;
+            i += 1;
+        }
+        // Dedup namespace 200+: (200+op) signature so repeats of the same
+        // post don't re-fire, while distinct opcodes always stage.
+        let mut sig: u32 = 200;
+        sig = sig.wrapping_mul(31).wrapping_add(op);
+        if sig == BT_HCI_LAST_SIG && total == BT_HCI_LAST_LEN {
+            BT_HCI_H2C_LEN = 0;
+            return;
+        }
+        BT_HCI_LAST_SIG = sig;
+        BT_HCI_LAST_LEN = total;
+        BT_HCI_H2C_LEN = total;
+        if CALLDET_N < 8 {
+            CALLDET_N += 1;
+            let mut m = [0u8; 64];
+            let mut h = [0u8; 8];
+            let mut v = op;
+            for k in 0..8 {
+                h[7 - k] = b"0123456789abcdef"[(v & 0xF) as usize];
+                v >>= 4;
+            }
+            let mut n = 0;
+            for &b in b"[HCI] calldet pc=" { m[n] = b; n += 1; }
+            let mut vv = core.pc;
+            let mut dd = [0u8; 8];
+            let mut dl = 0;
+            if vv == 0 { dd[0] = b'0'; dl = 1; }
+            while vv > 0 { dd[dl] = b"0123456789abcdef"[(vv & 0xF) as usize]; dl += 1; vv >>= 4; }
+            while dl > 0 { dl -= 1; if n < 64 { m[n] = dd[dl]; n += 1; } }
+            for &b in b" op=" { if n < 64 { m[n] = b; n += 1; } }
+            for &b in &h { if n < 64 { m[n] = b; n += 1; } }
+            for &b in b" len=" { if n < 64 { m[n] = b; n += 1; } }
+            if n < 64 { m[n] = b'0' + (total / 100) as u8; n += 1; }
+            if n < 64 { m[n] = b'0' + ((total / 10) % 10) as u8; n += 1; }
+            if n < 64 { m[n] = b'0' + (total % 10) as u8; n += 1; }
+            crate::js_log_str(m.as_ptr() as u32, n as u32);
+        }
+        crate::peripherals::common::ffi::js_bt_hci_send_packet(
+            &BT_HCI_H2C_SCRATCH as *const [u8; 264] as u32,
+            BT_HCI_H2C_LEN,
+        );
+        HCI_CC_DONE = 1;
+        // Resolve env for the C2H inject bookkeeping (canned path needs it;
+        // if unresolvable the C2H drain still fires from the pump later).
+        let vhp = bt_vhci_env_p();
+        if vhp != 0 {
+            let env = dma_read_u32(vhp);
+            if env >= 0x3ffb0000 && env < 0x40000000 {
+                bt_hci_proxy_try_inject_c2h(env);
+            }
+        }
+    }
+}
+
 // core_run entry proof (RED-path diag): logs once per boot that the
 // batched loop actually executes (vs the JS single-step path). If this
 // line is ABSENT but the sim runs, chip.step() uses runInstruction and
@@ -7202,6 +7352,54 @@ fn bt_hci_proxy_drain_c2h() {
     }
     bt_hci_proxy_try_inject_c2h(env);
 }
+// run313 (2026-10-01): ADV1-payload write watch (build-agnostic H2C post
+// proof). Called from write_page_table on every byte-size CPU store (the
+// caller gates nothing; this fn gates itself on PROXY_EN). The 'ADV1'
+// bytes (41 44 56 31) ride inside every LE_SET_ADV_DATA post on the proxy
+// firmwares; whoever posts MUST store byte 0x41 to DRAM. Log it (budget
+// 8/boot): pc + addr of the 'A' store = the post path, with zero
+// dependence on env/slots/pcs. 0x41 stores are rare outside string payloads
+// (but not unique — ASCII 'A' appears in other strings; the pc clustering
+// during a gap_advertise window disambiguates: post-path pcs cluster).
+pub fn bt_hci_proxy_adv1_watch(pc: u32, addr: u32, val: u32) {
+    unsafe {
+        if BT_HCI_PROXY_EN == 0 {
+            return;
+        }
+        // Byte path (size-8 store of 'A') or word path (size-32 store of the
+        // exact LE words 'ADV1'/framed-header). The caller pre-filters, but
+        // re-check here so direct callers can't bypass the gate.
+        let hit = (val & 0xFF) == 0x41 || val == 0x31564441 || val == 0x1F200801;
+        if !hit {
+            return;
+        }
+        if addr < 0x3ffb0000 || addr >= 0x40000000 {
+            return;
+        }
+        static mut ADV1_N: u32 = 0;
+        if ADV1_N >= 8 {
+            return;
+        }
+        ADV1_N += 1;
+        let mut m = [0u8; 64];
+        let mut n = 0;
+        for &b in b"[HCI] adv1 pc=" { m[n] = b; n += 1; }
+        let mut vv = pc;
+        let mut dd = [0u8; 8];
+        let mut dl = 0;
+        if vv == 0 { dd[0] = b'0'; dl = 1; }
+        while vv > 0 { dd[dl] = b"0123456789abcdef"[(vv & 0xF) as usize]; dl += 1; vv >>= 4; }
+        while dl > 0 { dl -= 1; if n < 64 { m[n] = dd[dl]; n += 1; } }
+        for &b in b" a=" { if n < 64 { m[n] = b; n += 1; } }
+        let mut va = addr;
+        let mut da = [0u8; 8];
+        let mut al = 0;
+        if va == 0 { da[0] = b'0'; al = 1; }
+        while va > 0 { da[al] = b"0123456789abcdef"[(va & 0xF) as usize]; al += 1; va >>= 4; }
+        while al > 0 { al -= 1; if n < 64 { m[n] = da[al]; n += 1; } }
+        crate::js_log_str(m.as_ptr() as u32, n as u32);
+    }
+}
 // HCI proxy flag-tap (called from write_page_table on every byte-size
 // CPU store): the guest posts H2C by bumping the u8 counter at [env]+35
 // (s8i at 0x40177d30/0x40177de9 — there is NO framed payload write).
@@ -7210,6 +7408,13 @@ fn bt_hci_proxy_drain_c2h() {
 // otherwise consume the same post). One-shot per post: the LAST_SIG dedup
 // in stage_at suppresses repeats while the counter keeps bumping.
 pub fn bt_hci_proxy_flag_tap(addr: u32) {
+    bt_hci_proxy_flag_tap_pc(0, addr)
+}
+
+// run315: PC-aware entry. The caller (write_page_table) passes the posting
+// PC so the first fire latches the per-boot dialog table: mpy posts from
+// 0x400912xx (seg4 vhci send), Arduino from the 0x40177xxx libbtdm path.
+pub fn bt_hci_proxy_flag_tap_pc(pc: u32, addr: u32) {
     unsafe {
         // TAP-FIRE proof FIRST (before the EN gate): proves the tap SITE
         // is live regardless of proxy state. Budget 4. Reports the raw
@@ -7256,22 +7461,43 @@ pub fn bt_hci_proxy_flag_tap(addr: u32) {
         }
         // Stage by POST SEQUENCE: the flag-tap proves a counter-slot post
         // happened, but the guest never writes a payload — so the opcode
-        // comes from the Nth-post position in the bring-up dialog:
+        // comes from the Nth-post position in the bring-up dialog.
+        // ARDUINO/bluedroid dialog (5 posts):
         //   post 1 = HCI_RESET (0x0C03) — esp_bluedroid_enable waits for it
         //   post 2 = LE_SET_ADV_PARAMS (0x2006, 15B params, zeros)
         //   post 3 = LE_SET_ADV_DATA (0x2008, 31B: len 4 + 'ADV1')
         //   post 4 = LE_SET_SCAN_RSP_DATA (0x2009, 31B zeros)
         //   post 5 = LE_SET_ADV_ENABLE (0x200A, 1B: 0x01)
-        // Params beyond RESET are zeroed (Bumble selftest proves the CCs
-        // with params=zeros; the emulator's ADV payload is fixed 'ADV1'
-        // for post 3 so the ADVRPT line is deterministic). The C2H inject
-        // path is opcode-agnostic (same [env]+40 window), so one staged
-        // buffer serves all five.
+        // MPY/NimBLE dialog (proven HOOK6, 6 fires — ble_hs_startup_go sends
+        // the full INFO_PARAMS + LE startup sequence, NOT the 5-post ADV
+        // dialog):
+        //   post 1 = HCI_RESET (0x0C03)
+        //   post 2 = RD_LOCAL_VER (0x1001)
+        //   post 3 = RD_SUP_CMDS (0x1002)
+        //   post 4 = SET_EVENT_MASK (0x0C01)
+        //   post 5 = LE_SET_EVENT_MASK (0x2001)
+        //   post 6 = LE_RD_BUF_SIZE (0x2002)
+        // Rentals: build is detected per boot — the FIRST fire on the mpy
+        // send path (400912xx, counter slots env+33/34) vs the Arduino path
+        // decides which table the whole boot uses ( latched in SEQ_TBL:
+        // 0 = Arduino, 1 = mpy). Params beyond RESET are zeroed (Bumble
+        // selftest proves the CCs with params=zeros). The C2H inject path
+        // is opcode-agnostic (same [env]+40 window), so one staged buffer
+        // serves every post.
         // POST_SEQ increments per accepted post; dedup is by sequence, not
         // by bytes (every post re-bumps the same counter slot, so LAST_SIG
         // would suppress posts 2..5 as "repeats" — that was the run28
         // ceiling: exactly one H2C per boot).
         static mut SEQ_N: u32 = 0;
+        static mut SEQ_TBL: u32 = 0; // 0 = Arduino dialog, 1 = mpy dialog
+        if SEQ_N == 0 {
+            // Latch dialog by send-path PC: mpy posts from 0x400912xx
+            // (seg4 vhci send, proven HOOK6 disassembly); Arduino posts
+            // from the 0x40177xxx libbtdm path.
+            if pc >= 0x40090000 && pc < 0x400A0000 {
+                SEQ_TBL = 1;
+            }
+        }
         SEQ_N += 1;
         static mut FLAG_N: u32 = 0;
         if FLAG_N < 12 {
@@ -7284,14 +7510,27 @@ pub fn bt_hci_proxy_flag_tap(addr: u32) {
             crate::js_log_str(m.as_ptr() as u32, n as u32);
         }
         // Opcode + params by sequence (payload AFTER the type byte).
-        // total includes the type byte.
-        let (op_lo, op_hi, plen): (u8, u8, u8) = match SEQ_N {
-            1 => (0x03, 0x0C, 0x00), // RESET
-            2 => (0x06, 0x20, 15),   // LE_SET_ADV_PARAMS
-            3 => (0x08, 0x20, 31),   // LE_SET_ADV_DATA
-            4 => (0x09, 0x20, 31),   // LE_SET_SCAN_RSP_DATA
-            5 => (0x0A, 0x20, 0x01), // LE_SET_ADV_ENABLE (plen 1, value below)
-            _ => (0x03, 0x0C, 0x00), // beyond: re-send RESET (harmless CC)
+        // total includes the type byte. Table selected by SEQ_TBL latched
+        // on the first fire (Arduino 5-post ADV dialog vs mpy startup).
+        let (op_lo, op_hi, plen): (u8, u8, u8) = if SEQ_TBL == 1 {
+            match SEQ_N {
+                1 => (0x03, 0x0C, 0x00), // RESET
+                2 => (0x01, 0x10, 0x00), // RD_LOCAL_VER
+                3 => (0x02, 0x10, 0x00), // RD_SUP_CMDS
+                4 => (0x01, 0x0C, 0x08), // SET_EVENT_MASK (8B mask, zeros)
+                5 => (0x01, 0x20, 0x08), // LE_SET_EVENT_MASK (8B mask, zeros)
+                6 => (0x02, 0x20, 0x00), // LE_RD_BUF_SIZE
+                _ => (0x03, 0x0C, 0x00), // beyond: re-send RESET (harmless CC)
+            }
+        } else {
+            match SEQ_N {
+                1 => (0x03, 0x0C, 0x00), // RESET
+                2 => (0x06, 0x20, 15),   // LE_SET_ADV_PARAMS
+                3 => (0x08, 0x20, 31),   // LE_SET_ADV_DATA
+                4 => (0x09, 0x20, 31),   // LE_SET_SCAN_RSP_DATA
+                5 => (0x0A, 0x20, 0x01), // LE_SET_ADV_ENABLE (plen 1, value below)
+                _ => (0x03, 0x0C, 0x00), // beyond: re-send RESET (harmless CC)
+            }
         };
         BT_HCI_H2C_SCRATCH[0] = 0x01;
         BT_HCI_H2C_SCRATCH[1] = op_lo;
@@ -7302,18 +7541,19 @@ pub fn bt_hci_proxy_flag_tap(addr: u32) {
             BT_HCI_H2C_SCRATCH[(4 + i) as usize] = 0;
             i += 1;
         }
-        // Post-3 ADV payload: len 4 + 'ADV1' (matches the emulator's fixed
-        // adv data; Bumble forwards it to the LocalLink advertiser).
-        // Post-5 enable value: 0x01 (already zeroed slot would mean
-        // DISABLE — must set explicitly).
-        if SEQ_N == 3 {
+        // Post-3 ADV payload (Arduino table only): len 4 + 'ADV1'
+        // (matches the emulator's fixed adv data; Bumble forwards it to the
+        // LocalLink advertiser).
+        // Post-5 enable value (Arduino table only): 0x01 (already zeroed
+        // slot would mean DISABLE — must set explicitly).
+        if SEQ_TBL == 0 && SEQ_N == 3 {
             BT_HCI_H2C_SCRATCH[4] = 4;
             BT_HCI_H2C_SCRATCH[5] = 0x41; // 'A'
             BT_HCI_H2C_SCRATCH[6] = 0x44; // 'D'
             BT_HCI_H2C_SCRATCH[7] = 0x56; // 'V'
             BT_HCI_H2C_SCRATCH[8] = 0x31; // '1'
         }
-        if SEQ_N == 5 {
+        if SEQ_TBL == 0 && SEQ_N == 5 {
             BT_HCI_H2C_SCRATCH[4] = 0x01;
         }
         let total = 4u32 + plen as u32;
@@ -8611,7 +8851,15 @@ fn bt_vhci_env_p() -> u32 {
     // vhci_env_p from literal 0x3ffc7a1c (l32r @40177d61, `l32i.n a8,a5,0`
     // with a5=[0x3ffc7a1c]). Older builds used 0x3ffc7a14/0x3ffc4fbc — keep
     // all three candidates, first-valid wins (shape-verified DRAM pointer).
-    for v in [0x3ffc7a1cu32, 0x3ffc7a14u32, 0x3ffc4fbcu32] {
+    // run314 (HOOK4 live trace, mpy NimBLE): the MicroPython controller
+    // stores its env pointer at heap words 0x3ffb2c2c (written by 401e7a60
+    // during init, on core 1) and 0x3ffcb58c (written by 401f2cc1 during
+    // enable, on core 0) — both hold 0x3ffb54bc at H2C-post time (proven by
+    // [WP] lines + readMemory cross-check). These are checked FIRST (before
+    // the Arduino static slots) because on mpy they are the ONLY live slots;
+    // on Arduino builds they read 0/garbage and are skipped by the same
+    // shape check, so behavior there is unchanged.
+    for v in [0x3ffb2c2cu32, 0x3ffcb58cu32, 0x3ffc7a1cu32, 0x3ffc7a14u32, 0x3ffc4fbcu32] {
         let e = dma_read_u32(v);
         if e >= 0x3ffb0000 && e < 0x40000000 && e != 0xFFFFFFFF && e != 0xa5a5a5a5 {
             // Extra guard: env+33/34/35 bytes are the live H2C-ring state the
@@ -8623,12 +8871,20 @@ fn bt_vhci_env_p() -> u32 {
     }
     // run310 fallback: heap-scan for the env POINTER (not the env). The
     // static slots above are .bss words inside libbtdm.a builds; firmware
-    // that links BT differently (MicroPython NimBLE: all three slots read
-    // 0 even after active(1) returns ACTIVE) keeps its env pointer
-    // elsewhere. One-shot per boot: sweep DRAM for a word that parses as
-    // a vhci env pointer (target in DRAM, not poison/fill) AND whose
-    // target's [env+33..35] ring bytes are live (not a5a5/zero-fill).
-    // Verified harmless on non-BT images: nothing parses, returns 0.
+    // that links BT differently keeps its env pointer elsewhere. One-shot
+    // per boot: sweep DRAM for a word that parses as a vhci env pointer
+    // (target in DRAM, not poison/fill) AND whose target parses as a posted
+    // env. Verified harmless on non-BT images: nothing parses, returns 0.
+    // run314 (HOOK4): the scan ALSO re-runs when the cached slots resolve
+    // to an env whose OWN head word reads 0 post-post (mpy NimBLE env head
+    // [env+0] stays 0x00000000 even with live ring bytes at [env+32] and
+    // the framed RESET at [env+40] — the old nonzero-head rule rejected the
+    // true env AND burned the one-shot before the post landed). The head
+    // rule is now: accept head==0 ONLY when the RESET word sits at env+40
+    // (the post itself proves the env live); otherwise keep the nonzero
+    // requirement. VHCI_SCAN_DONE gates one sweep per resolve-ATTEMPT, not
+    // per boot — a pre-post sweep that finds nothing re-arms so the
+    // post-landing drain can scan again (each sweep is one-shot-flagged).
     unsafe {
         if VHCI_SCAN_DONE == 0 {
             VHCI_SCAN_DONE = 1;
@@ -8642,12 +8898,11 @@ fn bt_vhci_env_p() -> u32 {
                     let b33 = (w >> 8) & 0xFF;
                     let b34 = (w >> 16) & 0xFF;
                     let b35 = (w >> 24) & 0xFF;
-                    // Live ring state: not fill (a5a5/00/ff-uniform) and
-                    // the env head word itself is nonzero (posted or idle,
-                    // but allocated — never zero-fill on a live struct).
+                    let ring_live = !(b33 == b34 && b34 == b35 && (b33 == 0 || b33 == 0xFF || b33 == 0xA5));
                     let head = dma_read_u32(e);
-                    if head != 0 && head != 0xFFFFFFFF && head != 0xa5a5a5a5
-                        && !(b33 == b34 && b34 == b35 && (b33 == 0 || b33 == 0xFF || b33 == 0xA5))
+                    let head_ok = head != 0xFFFFFFFF && head != 0xa5a5a5a5
+                        && (head != 0 || dma_read_u32(e.wrapping_add(40)) == 0x000C0301);
+                    if ring_live && head_ok
                     {
                         VHCI_ENV_P = a;
                         hits = a;
@@ -8657,7 +8912,11 @@ fn bt_vhci_env_p() -> u32 {
                 a = a.wrapping_add(4);
             }
             // One-shot census (budget 1/boot): proves the scan RAN and what
-            // it found (0 = nothing parses on this image).
+            // it found (0 = nothing parses on this image). A pre-post sweep
+            // that finds nothing re-arms (SCAN_DONE=0) so the post-landing
+            // drain scans again — otherwise the one-shot burns before the
+            // env is allocated (HOOK4: scan ran at boot, hit=0, post landed
+            // 500k steps later with no re-scan).
             {
                 let mut m = [0u8; 48];
                 let hx = |mut v: u32, o: &mut [u8]| {
@@ -8673,6 +8932,7 @@ fn bt_vhci_env_p() -> u32 {
             if hits != 0 {
                 return hits;
             }
+            VHCI_SCAN_DONE = 0;
         }
     }
     0
@@ -9499,8 +9759,15 @@ fn bt_rf_read_region(addr: u32, size: u32) -> u32 {
     // unconditional present + ACK-consume above replaces them.)
     // 0x3FF71200 bit31 self-clear (ble_master_soft_rst spins at 0x4008e004
     // until HW clears it after set). Same pattern as the 0x21C handshake.
-    if size == 4 && addr32 == 0x200 && val & 0x80000000 != 0 {
-        unsafe { BT_RF_REGS[(addr32 as usize) / 4] = val & !0x80000000; }
+    // run313 (2026-10-01): bit30 too. MicroPython NimBLE controller bring-up
+    // (libbtdm ROM 0x401f254f poll loop) sets bit30 and spins until HW clears
+    // it: 557 identical reads of val=0x400003e4 over ~70s wall, then the
+    // bounded retry gives up (active(1) OK but only after the timeout path).
+    // Arduino builds never set bit30 (their 0x200 reads stay low), so this
+    // is invisible there. Same HW-handshake semantics as bit31: the op the
+    // bit announces completes when observed.
+    if size == 4 && addr32 == 0x200 && val & 0xC0000000 != 0 {
+        unsafe { BT_RF_REGS[(addr32 as usize) / 4] = val & !0xC0000000; }
     }
     // Minimal HCI transport poll (2026-09-15): after any BT RF register
     // activity, check whether the host posted HCI_RESET and the CC is due.
