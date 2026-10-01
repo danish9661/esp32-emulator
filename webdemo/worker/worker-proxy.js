@@ -43,6 +43,10 @@ var CMD_WATCHPOINT = 20;
 var CMD_PCTRACE = 21;
 var CMD_PRESS_RESET = 22;
 var CMD_PRESS_BOOT = 23;
+var CMD_BT_HCI_POLL = 24;
+var CMD_BT_HCI_PUSH = 25;
+var CMD_BT_HCI_RESP = 26;
+var CMD_BT_HCI_SEND = 27;
 var RESP_IDLE = 0;
 var SAB_NUM_SLOTS = 22;
 var UART_RING_SIZE = 16384;
@@ -523,6 +527,178 @@ var SimulatorWorker = class {
       this._onUART(this.uartRing[(r + i) % UART_RING_SIZE]);
     }
     Atomics.store(this.uartCtrl, 1, r + maxRead);
+    try {
+      this._pollBtHciProxy();
+    } catch {
+    }
+  }
+  /**
+   * BT HCI proxy pump: forward staged H2C bytes to Bumble, feed back C2H.
+   * Runs on the host (test-script) thread — never in the worker — so TCP
+   * I/O + dynamic import cannot stall the sim. Requires an open socket
+   * (this._btHciSock, connected by btHciProxyConnect); without it this is
+   * a single null check per pollUart (zero cost otherwise).
+   *
+   * NOTE: pollUart is synchronous, so this only services the socket when
+   * the test calls the async pollBtHciProxy() below (CMD round-trips need
+   * no await, but the Bumble exchange does). Kept as a no-op hook.
+   */
+  _pollBtHciProxy() {
+    return;
+  }
+  /**
+   * BT HCI proxy pump (async): pull staged H2C via CMD_BT_HCI_POLL, run
+   * the Bumble exchange over TCP, push C2H back via CMD_BT_HCI_PUSH.
+   * Call from the test loop (e.g. every pollUart tick when btHciProxy is
+   * configured). No-op without a connected socket.
+   *
+   * @returns {Promise<{sent: number, pushed: number, timeout?: boolean}>} byte counts.
+   */
+  async pollBtHciProxy() {
+    this._checkReady();
+    const sock = this._btHciSock;
+    if (!sock || !this._btHciConnected || !this._btHciForward) return { sent: 0, pushed: 0 };
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_BT_HCI_POLL);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    const t0 = Date.now();
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {
+      if (Date.now() - t0 > 2e3) return { sent: 0, pushed: 0, timeout: true };
+    }
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0;
+    if (!n) return { sent: 0, pushed: 0 };
+    const h2c = this.readResp.slice(0, n);
+    const c2h = await this._btHciForward(h2c);
+    if (!c2h || !c2h.length) return { sent: n, pushed: 0 };
+    const bytes = Uint8Array.from(c2h).slice(0, 264);
+    this.readResp.set(bytes, 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, bytes.length);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_BT_HCI_PUSH);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    const t1 = Date.now();
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {
+      if (Date.now() - t1 > 2e3) return { sent: n, pushed: 0, timeout: true };
+    }
+    const ok = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0;
+    return { sent: n, pushed: ok ? bytes.length : 0 };
+  }
+  /**
+   * Open the TCP socket to the Bumble HCI bridge and wire it into the
+   * proxy pump. Call once per test (opt-in via config.btHciProxy or
+   * explicitly); without it pollBtHciProxy is a null check per tick.
+   *
+   * @param {{host?: string, port?: number}} [opts] - bridge address.
+   */
+  async btHciProxyConnect(opts = {}) {
+    const net = await import("node:net");
+    const host = opts.host || "127.0.0.1";
+    const port = (opts.port || 14821) >>> 0;
+    await /** @type {Promise<void>} */
+    new Promise(
+      (resolve, reject) => {
+        const sock = net.createConnection({ host, port }, () => {
+          this._btHciSock = sock;
+          this._btHciConnected = true;
+          this._btHciBuf = Buffer.alloc(0);
+          sock.on("data", (chunk) => {
+            this._btHciBuf = Buffer.concat([this._btHciBuf, chunk]);
+          });
+          sock.on("close", () => {
+            this._btHciConnected = false;
+            this._btHciSock = null;
+          });
+          sock.on("error", () => {
+            this._btHciConnected = false;
+          });
+          resolve();
+        });
+        sock.on("error", reject);
+        setTimeout(() => reject(new Error("btHciProxy connect timeout")), 5e3);
+      }
+    );
+    this._btHciForward = async (h2c) => {
+      const sock = this._btHciSock;
+      if (!sock || !this._btHciConnected) return null;
+      this._btHciBuf = Buffer.alloc(0);
+      sock.write(Buffer.from(h2c));
+      const t0 = Date.now();
+      for (; ; ) {
+        const buf = this._btHciBuf;
+        if (buf.length >= 2) {
+          const t = buf[0];
+          let need = -1;
+          if (t === 4) need = 2 + (buf.length >= 3 ? buf[2] + 1 : 0);
+          else if (t === 2) need = buf.length >= 5 ? 5 + (buf[3] | buf[4] << 8) : -1;
+          else if (buf[0] === 123) {
+            const nl = buf.indexOf(10);
+            need = nl >= 0 ? nl + 1 : -1;
+          }
+          if (need > 0 && buf.length >= need) {
+            const pkt = buf.subarray(0, need);
+            this._btHciBuf = buf.subarray(need);
+            return new Uint8Array(pkt);
+          }
+        }
+        if (Date.now() - t0 > 200) return null;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+  }
+  /**
+   * BT HCI proxy control message: send a JSON line (connect/read/...) over
+   * the worker-owned proxy socket and read one JSON reply line. The worker
+   * socket is the ONLY connection Bumble's per-connection Controller
+   * listens to, so host-side control must ride it (a second TCP socket
+   * would talk to a different radio). Resolves to the reply object.
+   *
+   * @param {any} msg - JSON-serializable control message.
+   * @param {number} [timeoutMs=25000] - grace for the reply.
+   */
+  async btHciControl(msg, timeoutMs = 25e3) {
+    this._checkReady();
+    const line = JSON.stringify(msg) + "\n";
+    const bytes = Buffer.from(line, "utf8");
+    this.readResp.set(bytes.subarray(0, Math.min(bytes.length, this.readResp.length)), 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bytes.length);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_BT_HCI_SEND);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    const t0 = Date.now();
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {
+      if (Date.now() - t0 > 5e3) throw new Error("btHciControl send timeout");
+      try {
+        this.pollUart();
+      } catch {
+      }
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const t1 = Date.now();
+    const wantOp = msg.op;
+    for (; ; ) {
+      Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+      Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_BT_HCI_RESP);
+      Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+      while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {
+        if (Date.now() - t1 > timeoutMs) throw new Error("btHciControl reply timeout");
+        try {
+          this.pollUart();
+        } catch {
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0;
+      if (n > 0) {
+        const obj = JSON.parse(Buffer.from(this.readResp.slice(0, n)).toString("utf8"));
+        const isEcho = obj.op && !obj.event && !obj.ok && Object.keys(obj).length <= 2;
+        if (!isEcho) return obj;
+      }
+      try {
+        this.pollUart();
+      } catch {
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
   /** Send bytes to the emulated UART RX (guest input) */
   sendUart(data) {

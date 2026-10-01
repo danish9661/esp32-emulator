@@ -4107,6 +4107,19 @@ var WasmLoader = class {
     this._wifiApRxFrame = null;
     this._wifiApSendEth = null;
     this._wifiApConnected = null;
+    this._btHciTx = null;
+  }
+  // Live linear-memory views (NOT this.memory.buffer: the buffer object
+  // captured at load() detaches on wasm memory.grow — observed 2026-09-28:
+  // FFI readers using the stale buffer saw zero-length views, slice threw,
+  // and the throw aborted the Rust poll mid-stage. this.memory IS the
+  // WebAssembly.Memory (stable identity); only .buffer goes stale, so every
+  // reader must go through these helpers, never this.memory.buffer inline.
+  memBytes() {
+    return new Uint8Array(this.memory.buffer);
+  }
+  memU32(byteOff = 0, len) {
+    return len === void 0 ? new Uint32Array(this.memory.buffer, byteOff) : new Uint32Array(this.memory.buffer, byteOff, len);
   }
   async load(wasmBytes, esp32, memoryObj) {
     this.esp32 = esp32;
@@ -4262,8 +4275,7 @@ var WasmLoader = class {
       },
       js_log_str: (ptr, len) => {
         this._mmioCount[43]++;
-        const buf = new Uint8Array(this.memory.buffer);
-        const bytes = buf.slice(ptr, ptr + len);
+        const bytes = this.memBytes().slice(ptr, ptr + len);
         console.log(`[WASM] ${new TextDecoder().decode(bytes)}`);
       },
       js_spi_flash_get_byte: (off) => {
@@ -4284,7 +4296,7 @@ var WasmLoader = class {
       },
       js_sd_read_block: (block, ptr) => {
         const sd = this.esp32?.sdData;
-        const mem = new Uint8Array(this.memory.buffer);
+        const mem = this.memBytes();
         if (!sd || block * 512 + 512 > sd.length) {
           mem.fill(0, ptr, ptr + 512);
           return;
@@ -4294,15 +4306,14 @@ var WasmLoader = class {
       js_sd_write_block: (block, ptr) => {
         const sd = this.esp32?.sdData;
         if (!sd || block * 512 + 512 > sd.length) return;
-        const mem = new Uint8Array(this.memory.buffer);
+        const mem = this.memBytes();
         sd.set(mem.subarray(ptr, ptr + 512), block * 512);
       },
       // Native I2S TX data hook — forwards consumed DMA TX words to the JS
       // host (JS parity with I2sPeripheral.onTxData).
       js_i2s_tx_data: (idx, ptr, len) => {
         if (!this._i2sTxDataHook) return;
-        const buf = new Uint8Array(this.memory.buffer);
-        const words = new Uint32Array(buf.slice(ptr, ptr + len * 4).buffer);
+        const words = new Uint32Array(this.memBytes().slice(ptr, ptr + len * 4).buffer);
         this._i2sTxDataHook(idx, words);
       },
       // Native RTC bridge: sleep wakeup on the rcSlow clock event queue.
@@ -4371,15 +4382,13 @@ var WasmLoader = class {
       // Native WiFi MAC TX frame bridge — JS parity with the JS peripheral's
       // writeUint32 DMA_TXBUF arm calling this.onTX(hVal) synchronously.
       js_wifi_send_frame: (ptr, len) => {
-        const buf = new Uint8Array(this.memory.buffer);
-        const frame = buf.slice(ptr, ptr + len);
+        const frame = this.memBytes().slice(ptr, ptr + len);
         this._wifiMacTx?.(frame);
       },
       // ESP-NOW action-frame TX bridge — raw 802.11 MPDU bytes for the host
       // medium hook (installed by worker-entry; two-node delivery).
       js_espnow_tx_frame: (ptr, len) => {
-        const buf = new Uint8Array(this.memory.buffer);
-        const frame = buf.slice(ptr, ptr + len);
+        const frame = this.memBytes().slice(ptr, ptr + len);
         this._espnowTx?.(frame);
       },
       // Native WiFi AP (NativeInternetAP) host bridges — the Rust AP builds
@@ -4395,6 +4404,21 @@ var WasmLoader = class {
       },
       js_wifi_ap_connected: () => {
         this._wifiApConnected?.();
+      },
+      // BT HCI proxy bridge — the Rust VHCI poll stages a raw H2C HCI
+      // packet (type byte + payload) in linear-memory scratch and hands
+      // the pointer here; the worker owns the TCP socket to the Bumble
+      // virtual controller (tests/test-bumble-hci.py) and feeds C2H reply
+      // bytes back via native_bt_hci_push_c2h. Opt-in per test (proxy
+      // disabled by default; see setupBtHciProxy in worker-entry.js).
+      js_bt_hci_send_packet: (ptr, len) => {
+        try {
+          const pkt = this.memBytes().slice(ptr, ptr + len);
+          console.log(`[BT-HCI] FFI h2c len=${len} tx=${typeof this._btHciTx} head=${[...pkt.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("")}`);
+          this._btHciTx?.(pkt);
+        } catch (e) {
+          console.error("[BT-HCI] FFI FAILED:", e?.message || e);
+        }
       },
       // Native DPORT shell bridges — behavioral side-effects of the native
       // DPORT handler (clock tree, core1 reset/stall, peripheral clock-gate
@@ -4509,7 +4533,7 @@ var WasmLoader = class {
       } catch {
       }
     }
-    const ptU32 = new Uint32Array(this.memory.buffer, PAGE_TABLE_OFFSET);
+    const ptU32 = this.memU32(PAGE_TABLE_OFFSET);
     const setPTE = (addr, hid) => {
       const page = addr >>> 12;
       ptU32[page * 2] = 2;
@@ -4714,7 +4738,7 @@ var WasmLoader = class {
     return this._wasmCores;
   }
   setDebugLog(enabled) {
-    const u32 = new Uint32Array(this.memory.buffer);
+    const u32 = this.memU32();
     for (let i = 0; i < this._wasmCores.length; i++) {
       const baseOff = i * CORE_STATE_SIZE;
       const DEBUG_LOG_OFF = 2584 + 7 * 4;
@@ -4730,7 +4754,7 @@ var WasmLoader = class {
     const gpio = this.esp32?.gpio;
     if (!gpio?.pins) return;
     const ptr = this.exports.native_gpio_seed_scratch();
-    const u32 = new Uint32Array(this.memory.buffer, ptr, 41);
+    const u32 = this.memU32(ptr, 41);
     for (let i = 0; i < gpio.pins.length; i++) {
       const pin = gpio.pins[i];
       u32[i] = pin.inputValue ? 1 : 0;
@@ -5732,6 +5756,10 @@ var CMD_WATCHPOINT = 20;
 var CMD_PCTRACE = 21;
 var CMD_PRESS_RESET = 22;
 var CMD_PRESS_BOOT = 23;
+var CMD_BT_HCI_POLL = 24;
+var CMD_BT_HCI_PUSH = 25;
+var CMD_BT_HCI_RESP = 26;
+var CMD_BT_HCI_SEND = 27;
 var RESP_DONE = 1;
 var RESP_ERROR = 2;
 var UART_RING_SIZE = 16384;
@@ -5939,7 +5967,7 @@ function syncClockState(exp) {
   if (!e?.native_set_clock_state) return;
   e.native_set_clock_state(Number(chip.cycles ?? 0) >>> 0);
 }
-function runSimChunk() {
+async function runSimChunk() {
   if (!chip || !ctrl || !Atomics.load(ctrl, SAB_RUN)) {
     finishSim();
     setTimeout(() => commandLoop(), 0);
@@ -6095,6 +6123,76 @@ function runSimChunk() {
         Atomics.store(ctrl, SAB_RESP, RESP_DONE);
         Atomics.store(ctrl, SAB_CMD, CMD_NONE);
       }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_POLL) {
+        let n = 0;
+        try {
+          const ex = chip?._wasmLoader?.exports;
+          const len = ex?.native_bt_hci_proxy_poll?.() >>> 0;
+          if (len > 0 && len <= 264 && readResp) {
+            const ptr = ex.native_bt_hci_h2c_ptr() >>> 0;
+            const mem = chip?._wasmMemory;
+            if (ptr && mem) {
+              readResp.set(new Uint8Array(mem, ptr, len).slice(0, Math.min(len, readResp.length)));
+              n = Math.min(len, readResp.length);
+            }
+          }
+        } catch {
+        }
+        Atomics.store(ctrl, SAB_CMD_ARG1, n);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_PUSH) {
+        let ok = 0;
+        try {
+          const ex = chip?._wasmLoader?.exports;
+          const len = Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0;
+          const mem = chip?._wasmMemory;
+          const apScratch = ex?.native_wifi_ap_scratch?.() >>> 0;
+          if (len > 0 && len <= 264 && readResp && apScratch && mem) {
+            new Uint8Array(mem, apScratch, len).set(readResp.subarray(0, len));
+            ok = ex?.native_bt_hci_push_c2h?.(apScratch, len) >>> 0;
+          }
+        } catch {
+        }
+        Atomics.store(ctrl, SAB_CMD_ARG1, ok ? 1 : 0);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_RESP) {
+        let n = 0;
+        try {
+          const loader = chip?._wasmLoader;
+          const line = loader?._btHciJsonLine || null;
+          if (line && readResp) {
+            const bytes = Buffer.from(line, "utf8");
+            readResp.set(bytes.subarray(0, Math.min(bytes.length, readResp.length)));
+            n = Math.min(bytes.length, readResp.length);
+            loader._btHciJsonLine = null;
+          }
+        } catch {
+        }
+        Atomics.store(ctrl, SAB_CMD_ARG1, n);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_BT_HCI_SEND) {
+        let n = 0;
+        try {
+          const loader = chip?._wasmLoader;
+          const len = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+          const sock = loader?._btHciSock || null;
+          if (sock?.writable && len > 0 && readResp) {
+            const bytes = Buffer.from(readResp.subarray(0, Math.min(len, readResp.length)));
+            sock.write(bytes);
+            n = bytes.length;
+          }
+        } catch {
+        }
+        Atomics.store(ctrl, SAB_CMD_ARG0, n);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
       chip.step();
       steps++;
       cycles = chip.cycles;
@@ -6124,6 +6222,7 @@ function runSimChunk() {
       }
       if ((cycles & 524287) === 0) writeSABState();
       if (!Atomics.load(ctrl, SAB_RUN)) break;
+      if ((steps & 511) === 0) await new Promise((r) => setTimeout(r, 0));
     }
   } catch (err) {
     console.error("[SIM-ERROR]", err.message, err.stack);
@@ -6419,6 +6518,89 @@ function processCommand(cmd) {
       Atomics.store(ctrl, SAB_CMD_ARG1, written);
       break;
     }
+    // BT HCI proxy (Bumble virtual controller, opt-in): host-side pump.
+    // CMD_BT_HCI_POLL: copy the staged H2C packet (if any) into readResp
+    // and report its length in ARG1 (0 = nothing staged). Runs in
+    // commandLoop AND inline in runSimChunk (see below), so H2C pickup
+    // never waits for a chunk boundary.
+    case CMD_BT_HCI_POLL: {
+      let n = 0;
+      try {
+        const ex = chip?._wasmLoader?.exports;
+        const len = ex?.native_bt_hci_proxy_poll?.() >>> 0;
+        if (len > 0 && len <= 264 && readResp) {
+          const ptr = ex.native_bt_hci_h2c_ptr() >>> 0;
+          const mem = chip?._wasmMemory;
+          if (ptr && mem) {
+            readResp.set(new Uint8Array(mem, ptr, len).slice(0, Math.min(len, readResp.length)));
+            n = Math.min(len, readResp.length);
+          }
+        }
+      } catch {
+      }
+      Atomics.store(ctrl, SAB_CMD_ARG1, n);
+      break;
+    }
+    // CMD_BT_HCI_PUSH: copy ARG1 bytes from readResp into wasm memory
+    // (via the wifi AP scratch, always reserved) and push as C2H reply.
+    // Reports 1 in ARG1 on staged, 0 otherwise.
+    case CMD_BT_HCI_PUSH: {
+      let ok = 0;
+      try {
+        const ex = chip?._wasmLoader?.exports;
+        const len = Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0;
+        const mem = chip?._wasmMemory;
+        const apScratch = ex?.native_wifi_ap_scratch?.() >>> 0;
+        if (len > 0 && len <= 264 && readResp && apScratch && mem) {
+          new Uint8Array(mem, apScratch, len).set(readResp.subarray(0, len));
+          ok = ex?.native_bt_hci_push_c2h?.(apScratch, len) >>> 0;
+        }
+      } catch {
+      }
+      Atomics.store(ctrl, SAB_CMD_ARG1, ok ? 1 : 0);
+      break;
+    }
+    // CMD_BT_HCI_SEND: write ARG0 bytes from readResp[0..ARG0] to the
+    // worker-owned proxy socket (host control messages ride the same
+    // connection Bumble's Controller listens to). Reports bytes accepted
+    // in ARG0 (0 = no socket). Runs inline in runSimChunk too (below).
+    case CMD_BT_HCI_SEND: {
+      let n = 0;
+      try {
+        const loader = chip?._wasmLoader;
+        const len = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+        const sock = loader?._btHciSock || null;
+        if (sock?.writable && len > 0 && readResp) {
+          const bytes = Buffer.from(readResp.subarray(0, Math.min(len, readResp.length)));
+          sock.write(bytes);
+          n = bytes.length;
+        }
+      } catch {
+      }
+      Atomics.store(ctrl, SAB_CMD_ARG0, n);
+      break;
+    }
+    // CMD_BT_HCI_RESP: copy the last stashed JSON control line (see the
+    // socket 'data' handler) into readResp, report length in ARG1
+    // (0 = none pending). Lets the host test consume connect/read results
+    // without a second TCP connection (Bumble binds one Controller per
+    // connection, so a second socket would talk to a different radio).
+    case CMD_BT_HCI_RESP: {
+      let n = 0;
+      try {
+        const loader = chip?._wasmLoader;
+        const line = loader?._btHciJsonLine || null;
+        if (line && readResp) {
+          const bytes = Buffer.from(line, "utf8");
+          readResp.set(bytes.subarray(0, Math.min(bytes.length, readResp.length)));
+          n = Math.min(bytes.length, readResp.length);
+          loader._btHciJsonLine = null;
+        }
+      } catch {
+      }
+      Atomics.store(ctrl, SAB_CMD_ARG1, n);
+      break;
+    }
   }
   return false;
 }
@@ -6433,7 +6615,9 @@ function commandLoop() {
         setError(err.message);
       }
       Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+      Atomics.notify(ctrl, SAB_RESP, 1);
     }
+    Atomics.wait(ctrl, SAB_CMD, CMD_NONE, 5);
     setTimeout(() => commandLoop(), 0);
     return;
   }
@@ -6445,7 +6629,7 @@ function blockingCommandLoop() {
     if (cmd !== CMD_NONE) {
       let ok = true;
       try {
-        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT) {
+        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT || cmd === CMD_BT_HCI_POLL || cmd === CMD_BT_HCI_PUSH || cmd === CMD_BT_HCI_RESP || cmd === CMD_BT_HCI_SEND) {
           processCommand(cmd);
         } else if (cmd === CMD_RUN) {
           ctrl[SAB_STATUS] = 0;
@@ -6533,6 +6717,113 @@ function applyBasicSetup(chip2, config, flash, rom) {
       chip2.cores[0].writeUint32(1073061896, (crc << 16 | mac[0] << 8 | mac[1]) >>> 0);
     } catch (_) {
     }
+  }
+}
+function setupBtHciProxy(chip2, config) {
+  const loader = chip2._wasmLoader;
+  const opt = config.btHciProxy;
+  if (!opt || !loader?.exports?.native_bt_hci_proxy_enable) return;
+  const proxyHost = opt.host || "127.0.0.1";
+  const proxyPort = (opt.port || 14821) >>> 0;
+  loader._btHciHost = proxyHost;
+  loader._btHciPort = proxyPort;
+  loader._btHciSock = null;
+  loader._btHciTx = null;
+  import("node:net").then((mod) => {
+    loader._btHciNet = mod;
+    btHciProxyConnectNow(chip2);
+  }).catch((e) => console.error("[BT-HCI] net import FAILED:", e?.message || e));
+}
+function btHciProxyConnectNow(chip2, attempt) {
+  const loader = chip2?._wasmLoader;
+  if (!loader || loader._btHciSock) return;
+  const net = loader._btHciNet;
+  if (!net) return;
+  const host = loader._btHciHost || "127.0.0.1";
+  const port = (loader._btHciPort || 14821) >>> 0;
+  const n = attempt >>> 0;
+  try {
+    const sock = net.createConnection({ host, port });
+    loader._btHciSock = sock;
+    sock.on("connect", () => {
+      console.log(`[BT-HCI] proxy connected ${host}:${port}`);
+      try {
+        loader.exports.native_bt_hci_proxy_enable(2);
+      } catch (e) {
+        console.error("[BT-HCI] enable FAILED:", e?.message || e);
+      }
+      try {
+        console.log(`[BT-HCI] enable called, has push_c2h=${typeof loader.exports.native_bt_hci_push_c2h}, has h2c_ptr=${typeof loader.exports.native_bt_hci_h2c_ptr}`);
+      } catch (e) {
+        console.error("[BT-HCI] enable FAILED:", e?.message || e);
+      }
+    });
+    sock.on("data", (chunk) => {
+      try {
+        const mem = chip2._wasmLoader?.memory?.buffer || chip2._wasmMemory;
+        const apScratch = loader.exports.native_wifi_ap_scratch?.() >>> 0;
+        if (!apScratch || !mem) return;
+        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        if (!loader._btHciRxBuf) loader._btHciRxBuf = Buffer.alloc(0);
+        loader._btHciRxBuf = Buffer.concat([loader._btHciRxBuf, Buffer.from(bytes)]);
+        for (; ; ) {
+          const buf = loader._btHciRxBuf;
+          if (buf.length < 1) break;
+          const t = buf[0];
+          let need = -1;
+          if (t === 4) need = buf.length >= 3 ? 3 + buf[2] : -1;
+          else if (t === 2) need = buf.length >= 5 ? 5 + (buf[3] | buf[4] << 8) : -1;
+          else if (t === 123) {
+            const nl = buf.indexOf(10);
+            if (nl < 0) break;
+            try {
+              loader._btHciJsonLine = buf.subarray(0, nl + 1).toString("utf8");
+            } catch {
+            }
+            loader._btHciRxBuf = buf.subarray(nl + 1);
+            continue;
+          } else break;
+          if (need < 0 || buf.length < need) break;
+          const pkt = buf.subarray(0, need);
+          loader._btHciRxBuf = buf.subarray(need);
+          const v = new Uint8Array(mem, apScratch, pkt.length);
+          v.set(pkt);
+          loader.exports.native_bt_hci_push_c2h?.(apScratch, pkt.length);
+        }
+      } catch (e) {
+        console.error("[BT-HCI] C2H feed FAILED:", e?.message || e);
+      }
+    });
+    sock.on("error", (e) => console.error("[BT-HCI] socket error:", e?.message || e));
+    sock.on("close", () => {
+      loader._btHciSock = null;
+      try {
+        loader.exports.native_bt_hci_proxy_enable(0);
+      } catch {
+      }
+      if (n < 5) setTimeout(() => btHciProxyConnectNow(chip2, n + 1), 2e3);
+    });
+    loader._btHciTx = (pkt) => {
+      try {
+        console.log(`[BT-HCI] TX len=${pkt.length} writable=${sock?.writable}`);
+        if (sock?.writable) {
+          const before = sock.bytesWritten >>> 0;
+          sock.write(Buffer.from(pkt));
+          const delta = (sock.bytesWritten >>> 0) - before;
+          if (delta === 0) {
+            console.error("[BT-HCI] TX zero-ack, dropping dead socket");
+            try {
+              sock.destroy();
+            } catch {
+            }
+            loader._btHciSock = null;
+          }
+        }
+      } catch {
+      }
+    };
+  } catch (e) {
+    console.error("[BT-HCI] connect FAILED:", e?.message || e);
   }
 }
 function setupNativeWifiBridge(chip2, config) {
@@ -6900,6 +7191,11 @@ async function onMessage(type, data) {
             } catch (_) {
             }
             setupNativeWifiBridge(chip, config);
+            try {
+              setupBtHciProxy(chip, config);
+            } catch (e) {
+              console.error("[BT-HCI] setup FAILED:", e?.message || e);
+            }
             if (config.camFrameBytes !== void 0) {
               try {
                 chip._wasmLoader?.exports?.native_i2s_cam_frame_bytes?.(0, config.camFrameBytes >>> 0);

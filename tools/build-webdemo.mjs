@@ -25,7 +25,11 @@ await build({
   platform: 'browser',
   outfile: 'webdemo/worker/worker-entry.js',
   logLevel: 'info',
-  external: ['worker_threads', 'fs', 'path', 'url'],
+  // worker_threads/fs/path/url + node:net are Node-only (the BT HCI proxy
+  // TCP socket + worker bootstrap): all browser-dead code (the page never
+  // opens the HCI socket), kept external. Without 'node:net' here the
+  // browser bundle fails with "Could not resolve node:net".
+  external: ['worker_threads', 'fs', 'path', 'url', 'node:net'],
   alias: { 'node:crypto': './tools/md5-shim.mjs' },
 });
 
@@ -36,7 +40,12 @@ await build({
   platform: 'browser',
   outfile: 'webdemo/worker/worker-proxy.js',
   logLevel: 'info',
-  external: ['worker_threads'],
+  // Node-only surface used by the BT HCI proxy test harness
+  // (btHciProxyConnect/_btHciForward over TCP) + worker_threads bootstrap.
+  // All browser-dead code (the page never opens the HCI socket), kept
+  // external like worker_threads/fs/path/url above. Without 'node:net'
+  // here the browser bundle fails with "Could not resolve node:net".
+  external: ['worker_threads', 'node:net'],
 });
 
 // Silence the firmware-driven peripheral-reset log: on real hardware those
