@@ -201,6 +201,11 @@ func extractFrameIP(frame []byte) net.IP {
 			return nil
 		}
 		return net.IP(frame[28:32])
+	case 0x86DD: // IPv6: source address (for BOARD_IP display)
+		if len(frame) < 38 {
+			return nil
+		}
+		return net.IP(frame[22:38])
 	}
 	return nil
 }
