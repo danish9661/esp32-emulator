@@ -77,6 +77,20 @@ func isGatewayIP(ip net.IP) bool {
 	return ip.Equal(espGwLinkLocal) || ip.Equal(espGwULA)
 }
 
+// isUnspecifiedIP reports whether ip is the IPv6 unspecified address (::).
+func isUnspecifiedIP(ip net.IP) bool {
+	b := ip.To16()
+	if b == nil {
+		return false
+	}
+	for i := 0; i < 16; i++ {
+		if b[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // v6Checksum covers the IPv6 pseudo-header + message. msg must have its
 // checksum field zeroed.
 func v6Checksum(src, dst net.IP, nextHeader byte, msg []byte) uint16 {
@@ -227,6 +241,14 @@ func snoopIPv6(msg []byte, client *Client, room *Room) bool {
 		case 133: // Router Solicitation -> unicast RA back. (Unicast is
 			// required here: multicast-destined RAs never surface past
 			// the driver/LWIP multicast filter in this stack.)
+			// Realm split: Pico/CYW43 guests solicit from the
+			// unspecified address (::) — the ESP32 answer (fd00::/64
+			// to ::) is unusable to them (wrong prefix, :: dst) and
+			// would shadow the Pico path. Let :: RS fall through to
+			// handleICMPv6 (fe80::1 + fd00:4::/64, mcast-aware).
+			if isUnspecifiedIP(srcIP) {
+				return false
+			}
 			espSendRA(client, srcMAC, srcIP)
 			noteRATarget(srcMAC, srcIP, room, client)
 			return true
