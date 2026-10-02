@@ -11476,6 +11476,7 @@ const RTC_CNTL_CONFIG: RtcCntlConfig = RtcCntlConfig {
     },
     irq: 46, // InterruptEnum.RTC_CORE_INTR
     strap_read_offset: -1,
+    bod_reset_reason: 9, // ESP_RST_BROWNOUT (IDF enum; ROM prints RTCWDT_SYS_RESET)
 };
 
 const RTC_IO_CONFIG: RtcIoConfig = RtcIoConfig {

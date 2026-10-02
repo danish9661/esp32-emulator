@@ -363,7 +363,14 @@ js_log_u32: (val) => {
       },
       js_get_reset_reason: () => this.esp32?.resetReason ?? 0,
       js_reset_soc: () => {
-        try { this.esp32?.reset?.(); } catch (e) { console.error('[WASM-RTC-RESET-ERR]', e?.message || e); }
+        // SoC reset from inside WASM (WDT/BOD/sleep-wakeup): resetReason was
+        // already set by the caller via js_set_reset_reason — chip.reset()
+        // must NOT clobber it (it means POWERON on a fresh boot only).
+        try {
+          const keep = this.esp32?.resetReason;
+          this.esp32?.reset?.();
+          if (keep !== undefined) this.esp32.resetReason = keep >>> 0;
+        } catch (e) { console.error('[WASM-RTC-RESET-ERR]', e?.message || e); }
       },
       js_reset_core: (idx) => {
         try {

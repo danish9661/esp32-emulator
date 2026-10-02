@@ -1484,8 +1484,7 @@ async function onMessage(type, data) {
               const hi = (mac[4] | (mac[5] << 8)) >>> 0;
               // WifiMac MAC regs (base+64/68) — now owned by the native register
               // file; the JS mirror is inert (host-MAC writes via native export).
-              if (config.vddMv !== undefined) chip.setVddMv?.(config.vddMv);
-            if (chip._wasmLoader?.exports?.native_wifi_mac_set_mac) {
+              if (chip._wasmLoader?.exports?.native_wifi_mac_set_mac) {
                 chip._wasmLoader.exports.native_wifi_mac_set_mac(lo, hi);
               }
               try { chip.cores[0].writeUint32(0x3ff5a004, ((mac[2]<<24)|(mac[3]<<16)|(mac[4]<<8)|mac[5])>>>0); } catch(_) {}

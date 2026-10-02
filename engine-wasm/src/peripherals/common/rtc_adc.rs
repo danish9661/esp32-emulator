@@ -175,6 +175,12 @@ pub struct RtcCntlConfig {
     pub light_sleep_clocks: LightSleepClocks,
     pub irq: i32,
     pub strap_read_offset: i32,
+    // SoC-reset reason to report when the brownout detector fires its
+    // reset (reset_soc path). The ROM banner renders most causes as
+    // RTCWDT_SYS_RESET; the IDF bootloader maps the reset-reason register,
+    // so this must be the value whose esp_reset_reason() == 9 (BROWNOUT).
+    // Kept in config (not hardcoded) so a wrong constant is a one-line fix.
+    pub bod_reset_reason: u32,
 }
 
 // ============================================================
@@ -657,8 +663,11 @@ pub struct RtcCntlPeripheral {
     // Flag to cancel wakeup during reset (since MmioPeripheral::reset has no ctx)
     pub sleep_wakeup_cancelled: bool,
     // Brownout detector: host-driven VDD in mV (default nominal 3.3V) +
-    // last evaluated DET state (edge detect). Reset restores nominal so a
-    // brownout reboot doesn't immediately re-fire before the host acts.
+    // last evaluated DET state (edge detect). NOTE: reset does NOT touch
+    // vdd_mv — the supply rail is a physical input, not SoC state. The old
+    // code restored nominal here, which silently cleared the brownout the
+    // test was holding (rail stuck at 2000) and turned the BODRESET phase
+    // into a WDT-timed reboot loop (reason=7 instead of the BOD reset).
     pub vdd_mv: u32,
     pub bod_det: bool,
     // Previous ENA+RST_ENA arming (transition detect for the reset path).
@@ -882,8 +891,22 @@ impl RtcCntlPeripheral {
             _ if offset == ch.sw_cpu_stall => self.rtc_sw_cpu_stall,
             UART_REG31 => 0x40000000,
             _ if offset == ch.reset_state => {
-                // JS: return this.cpu.resetReason
-                ctx.reset_reason()
+                // reset_state is RTC_CNTL_RESET_STATE_REG (0x34): RO latch
+                // with RESET_CAUSE_PROCPU[5:0] + RESET_CAUSE_APPCPU[11:6].
+                // Real HW: the BOD HW reset latches cause 15 (0x0F =
+                // RESET_REASON_SYS_BROWN_OUT) in both fields; the ROM banner
+                // prints rst:0xN from it (verified: rst:0xf after the fix)
+                // and esp_reset_reason() maps 15 -> ESP_RST_BROWNOUT (9).
+                // The WDT paths write their own reasons via
+                // ctx.set_reset_reason() (7/8), so the latch only needs to
+                // cover the BOD case: report 15<<6|15 while a brownout reset
+                // is latched (bod_armed = "already reset for this arming",
+                // cleared only on disarm), JS resetReason otherwise.
+                if self.bod_armed {
+                    (15u32 << 6) | 15u32
+                } else {
+                    ctx.reset_reason()
+                }
             }
             _ if offset == ch.ana_conf => 12353,
             UART_REG38 => 0x80000000,
@@ -895,8 +918,20 @@ impl RtcCntlPeripheral {
                     && self.vdd_mv < BOD_THRES_MV[((cfg >> 27) & 7) as usize];
                 (cfg & !BOD_DET_BIT) | ((det as u32) << 31)
             }
-            // INT_ST: OR in the latched BOD bit (RAW & ENA); other bits
-            // keep plain-file behavior.
+            // INT_ST: report the latched BOD bit OR'd with the file (RAW &
+            // ENA). This is what the test polls (REG_READ INT_ST must show
+            // 0x80 after the trip) AND what IDF's shared rtc_isr dispatch
+            // reads to match against registered masks
+            // (rtc_brownout_isr_handler is registered for
+            // BROWN_OUT_INT_ENA) — without the bit set, the dispatcher
+            // never calls the brownout ISR and the chip never resets
+            // (observed: reboot loop with reason=7, BODINT never fires).
+            // The CLEAR_ALL race (rtc_isr's trailing CLEAR_ALL wiping RAW
+            // without the ISR running) does not apply here: the shared
+            // line DOES assert on RAW & ENA (evaluate_bod), so the ISR
+            // runs first, sees the bit, calls the brownout handler
+            // (which resets via hint+software-reset), and only then
+            // clears — same order as real HW.
             _ if offset == INT_ST_OFF => {
                 let raw = self.base.read_register(ch.int_raw_rtc);
                 let ena = self.base.read_register(INT_ENA_OFF);
@@ -1056,11 +1091,30 @@ impl RtcCntlPeripheral {
                         ctx.interrupt(self.config.irq as u32, false);
                     }
                 }
+                // INT_CLR on this controller clears the RAW bit named by the
+                // written mask (other controllers' CLEAR regs behave the
+                // same: raw &= ~mask). Generic fallback so IDF's
+                // CLEAR_ALL (0xFFFFFFFF) or any future bit also clears.
+                self.base
+                    .clear_register_bits(int_raw_rtc, val & !(UART_REG39 | BOD_INT_BIT));
                 return;
             }
             // BROWN_OUT_REG writes re-evaluate the detector (plain store
-            // already applied above).
+            // already applied above). NOTE: IDF's interrupt-mode init
+            // (esp_brownout_init, brownout.c) NEVER sets RST_ENA — with
+            // USE_INTR the ISR does esp_rom_software_reset_system() instead.
+            // So a BOD_REG write with RST_ENA *clear* must NOT reset; only
+            // the no-interrupt init (reset_enabled=true) arms the HW reset.
             _ if offset == BOD_REG_OFF => {
+                self.evaluate_bod(ctx);
+            }
+            // INT_ENA writes re-evaluate the detector: firmware arms the
+            // reset (RST_ENA in BOD_REG) while already browned-out, and the
+            // reset must fire even though DET has no rising edge (level,
+            // not edge — see evaluate_bod). Without this, arming RST_ENA
+            // after the rail already dipped never resets (observed: BOD
+            // reboot loop with reason=7 instead of the BODRESET reset).
+            _ if offset == INT_ENA_OFF => {
                 self.evaluate_bod(ctx);
             }
             // ULP force-start (RTCCNTL+0x2C bit15, set by ulp_run; entry
@@ -1100,39 +1154,105 @@ impl RtcCntlPeripheral {
         if !self.deep_sleep_pending {
             self.sleep_wakeup_cancelled = true;
         }
-        // Brownout: supply restored to nominal (a brownout reboot must not
-        // immediately re-fire before the host drives the rail again).
-        self.vdd_mv = 3300;
-        self.bod_det = false;
-        self.bod_armed = false;
+        // Brownout: vdd_mv is PHYSICAL rail state — reset must NOT restore
+        // nominal (see field comment). bod_det re-derives on the next eval.
+        // bod_armed ("already reset for this arming") SURVIVES reset_soc:
+        // the bootloader's own BOD_REG write must not double-reset the same
+        // still-asserted brownout (would wedge the boot ROM in a silent
+        // reset loop → WDT → reason=7, observed). It clears only on firmware
+        // disarm (ENA or RST_ENA low) in evaluate_bod. The fresh firmware
+        // arming after boot (IDF esp_brownout_init writes BOD_REG fresh)
+        // always disarms first (RST_ENA=0 in USE_INTR mode), so the
+        // second-phase arming is still treated as new and fires.
     }
 
     // Brownout detector evaluation. Runs after BROWN_OUT_REG writes and
     // after host voltage changes: DET = ENA && VDD < threshold(select).
-    // INT_RAW latches on the DET rising edge. The reset fires on DET
-    // rising OR on RST_ENA arming while already browned-out — but never
-    // repeatedly without a transition (reset-during-reset would wedge
-    // the boot ROM in a WDT loop). The irq line recomputes from RAW & ENA.
+    // INT_RAW latches on the DET rising edge. The reset fires when DET is
+    // present while fully armed (ENA+RST_ENA) — level-sensitive, not just
+    // on the DET/armed transition: the host drives the rail asynchronously
+    // (setVoltageMv is serviced inline mid-chunk), so "already browned-out
+    // when RST_ENA is armed" is the NORMAL firmware order (IDF enables the
+    // interrupt first, arms reset later), not a wedging corner. The one
+    // guard: never reset twice for the SAME still-asserted brownout without
+    // firmware re-arming (bod_armed tracks "already reset for this arming";
+    // it SURVIVES reset_soc — see reset_inner — and clears only when
+    // firmware disarms ENA or RST_ENA, which IDF's fresh
+    // esp_brownout_init always does before re-arming). The irq line
+    // recomputes from RAW & ENA.
+    //
+    // NOTE on bod_armed vs bod_det: they track different things. bod_det is
+    // the raw comparator state (clears when the rail recovers OR the
+    // firmware clears ENA). bod_armed is the "already reset for this
+    // arming" latch — set on reset, cleared ONLY when firmware disarms
+    // (ENA or RST_ENA low). A rail dip AFTER a reset (vdd 2000 still
+    // applied, firmware re-arms RST_ENA) has det=true (same as before) but
+    // bod_armed=false (arming is new), so the second reset fires. Gating on
+    // bod_det instead would swallow it (det never went low in between).
     pub fn evaluate_bod(&mut self, ctx: &mut CpuContext) {
         let cfg = self.base.read_register(BOD_REG_OFF);
         let det = (cfg & BOD_ENA_BIT) != 0
             && self.vdd_mv < BOD_THRES_MV[((cfg >> 27) & 7) as usize];
         let armed = (cfg & (BOD_ENA_BIT | BOD_RST_ENA_BIT)) == (BOD_ENA_BIT | BOD_RST_ENA_BIT);
         let rising = det && !self.bod_det;
-        let rearm = det && armed && !self.bod_armed;
+        // Level, not edge: fire whenever browned-out while armed unless THIS
+        // arming already produced a reset (bod_armed tracks that, cleared
+        // only on disarm — NOT on det falling, so a re-armed dip re-fires).
+        // NOTE: bod_armed is NOT updated on the !armed path here — reset_soc
+        // (via reset_inner) is the only place it clears besides disarm, so
+        // a single arming can never produce two resets even if the
+        // bootloader's BOD_REG write re-runs this eval before firmware
+        // disarms.
+        let need_reset = det && armed && !self.bod_armed;
         self.bod_det = det;
-        self.bod_armed = armed;
         if rising {
             self.base
                 .set_register_bits(self.config.rmt_channel_register.int_raw_rtc, BOD_INT_BIT);
+            // The shared RTC interrupt line is LEVEL: assert it NOW on the
+            // latching edge (in addition to the recompute below). The line
+            // assert below only runs when need_reset is false; on the very
+            // first trip need_reset is usually also true (IDF arms RST_ENA
+            // at init while the rail is already low) and the early `return`
+            // after reset_soc would skip the assert — leaving RAW set but
+            // the line silent, so the ISR never runs (observed: TRIP prints
+            // but BODINT never fires, reboot loop with reason=7).
+            //
+            // NOTE: ctx.interrupt() routes back through the JS interrupt
+            // matrix (js_interrupt FFI → native_interrupt → matrix). That
+            // round-trip is fine here (evaluate_bod runs on MMIO/FFI time,
+            // not inside the matrix dispatch), but never call it while
+            // holding matrix state.
+            if self.config.irq >= 0 {
+                let ena = self.base.read_register(INT_ENA_OFF);
+                if (ena & BOD_INT_BIT) != 0 {
+                    ctx.interrupt(self.config.irq as u32, true);
+                }
+            }
         }
-        if (rising || rearm) && armed {
+        if need_reset {
+            self.bod_armed = true;
             if ctx.on_reset() {
-                // NOTE: the ROM banner renders this as RTCWDT_SYS_RESET
-                // (reset_soc doesn't set the SW_SYS_RST cause bit the way
-                // esp_restart does); esp_reset_reason() == 9 (BROWNOUT) is
-                // authoritative and DRAM/RTC mem survive like SW reset.
-                ctx.set_reset_reason(9); // ESP_RST_BROWNOUT
+                // Real HW behavior (verified against IDF v5.5.4 source):
+                // the BOD HW reset leaves RTC cause 15
+                // (RTCWDT_BROWN_OUT_RESET = RESET_REASON_SYS_BROWN_OUT),
+                // which the ROM banner prints as RTCWDT_SYS_RESET and
+                // esp_reset_reason() maps to 9 (ESP_RST_BROWNOUT). The
+                // interrupt path instead calls esp_reset_reason_set_hint(9)
+                // then esp_rom_software_reset_system() (cause 12/SW), and
+                // get_reset_reason() returns the hint. Either way the
+                // guest sees reason 9. We take the HW-reset path: set the
+                // JS resetReason directly (reset_soc preserves it via the
+                // js_reset_soc keep/restore).
+                //
+                // NOTE: reset_soc() synchronously reboots the guest (the
+                // bootloader runs INSIDE this call, on the FFI stack). Any
+                // code after reset_soc() in this function runs AFTER the
+                // whole reboot — including the shared-line assert below.
+                // That post-reboot assert would fire the RTC line for the
+                // FRESH boot (whose RAW was just re-latched by its own
+                // BOD_REG write), wedging it. So: assert the line BEFORE
+                // resetting (done above on the rising edge), never after.
+                ctx.set_reset_reason(self.config.bod_reset_reason);
                 ctx.reset_soc();
             }
             return;
