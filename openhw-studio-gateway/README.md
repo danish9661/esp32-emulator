@@ -1,3 +1,9 @@
+> **DEPRECATED — use `openhw-unified-gateway/` instead.**
+> This per-board tree is frozen. The unified gateway (`openhw-unified-gateway/`,
+> default `ws://127.0.0.1:5030`) merges this tree with the STM32 (`:5070`) and
+> Pico (`:5090`) trees — one binary serves ESP32 + STM32F4 + Pico/RP2350 boards
+> with all features. This binary still works, but all new work lands there.
+
 # OpenHW Network Gateway 🌐
 
 This is the standalone **SLIRP/NAT Proxy & Multiplayer Bridge** for OpenHW Studio, written in **Go** using Google's `gVisor` virtual network stack! It bridges the gap between the browser-based ESP32 simulation sandbox and your native operating system's networking stack.

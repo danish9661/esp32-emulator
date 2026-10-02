@@ -201,14 +201,21 @@ jobs:
           B64="${{ needs.build-and-test.outputs.release_notes }}"
           if [ -z "$B64" ]; then
             echo "use_generated=true" >> "$GITHUB_OUTPUT"
-            echo "text=" >> "$GITHUB_OUTPUT"
           else
             echo "use_generated=false" >> "$GITHUB_OUTPUT"
             echo "$B64" | base64 -d > /tmp/release-body.md
-            # multiline output via heredoc delimiter
-            echo "text<<EOF" >> "$GITHUB_OUTPUT"
-            cat /tmp/release-body.md >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
+            # multiline output via heredoc delimiter. Use a unique delimiter
+            # (a body line of exactly "EOF" would prematurely close it) and
+            # force a newline before the closing marker: if the body does not
+            # end in a newline, `cat` + `echo EOF` land on one line and the
+            # runner reports "Matching delimiter not found 'EOF'".
+            DELIM="RELEASE_BODY_EOF_7f3a9c"
+            {
+              echo "text<<$DELIM"
+              cat /tmp/release-body.md
+              echo ""
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create release (custom notes)

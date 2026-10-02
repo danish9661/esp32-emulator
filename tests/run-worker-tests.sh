@@ -10,7 +10,7 @@
 #   ./tests/run-worker-tests.sh --timeout 600  # per-test timeout in seconds (default 900)
 #
 # The WiFi-gateway tests (wifi/web/webserver) are SKIPPED by default: they need
-# the openhw-studio-gateway server AND their wifi-association time is
+# the openhw-unified-gateway server AND their wifi-association time is
 # environmentally variable (7s in one session, 200s+ in another). Pass --wifi to
 # run them. They get a longer per-test timeout when enabled.
 #

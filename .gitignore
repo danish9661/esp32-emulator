@@ -52,6 +52,18 @@
 !/openhw-studio-gateway/start-gateway.sh
 !/openhw-studio-gateway/start-gateway.cmd
 !/openhw-studio-gateway/Dockerfile
+# Unified multi-board gateway (ESP32 + STM32F4 + Pico/RP2350 in one binary)
+!/openhw-unified-gateway/
+!/openhw-unified-gateway/*.go
+!/openhw-unified-gateway/go.mod
+!/openhw-unified-gateway/go.sum
+!/openhw-unified-gateway/README.md
+!/openhw-unified-gateway/start-gateway.sh
+!/openhw-unified-gateway/start-gateway.cmd
+!/openhw-unified-gateway/Dockerfile
+# Gateway binaries (rebuild via `cd openhw-unified-gateway && go build`); keep sources
+/openhw-unified-gateway/openhw-gw
+/openhw-unified-gateway/openhw-gw.exe
 # Root rom symlink -> tests/rom (tracked); tests/rom/*.bin is real data
 !/rom
 # Webdemo site (static browser demo: pages + bundled worker + prebuilt firmware)

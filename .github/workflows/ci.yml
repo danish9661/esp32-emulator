@@ -121,8 +121,8 @@ jobs:
       - name: Start gateway server
         if: github.event.inputs.run_wifi == 'true'
         run: |
-          chmod +x ./openhw-studio-gateway/openhw-gw
-          ./openhw-studio-gateway/openhw-gw &
+          chmod +x ./openhw-unified-gateway/openhw-gw
+          ./openhw-unified-gateway/openhw-gw &
           sleep 2
       - name: Run worker suite (skip bt; skip wifi unless requested)
         run: |

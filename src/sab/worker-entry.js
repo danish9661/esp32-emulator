@@ -1152,11 +1152,18 @@ function setupNativeWifiBridge(chip, config) {
   let socket = null;
   // Shared gateway room for ESP-NOW delivery: boards with the same
   // wifi.room join one L2 hub room so action frames reach each other.
+  // Gateway URL: wifi.gatewayUrl wins, else env GATEWAY_URL, else the
+  // unified gateway default (ws://127.0.0.1:5030). The legacy :5085
+  // per-board gateway still works when passed explicitly.
   const roomQuery = wifiOpts.room ? `?sessionId=${encodeURIComponent(wifiOpts.room)}` : '';
+  const gatewayBase = wifiOpts.gatewayUrl
+    || (typeof process !== 'undefined' && process.env && process.env.GATEWAY_URL)
+    || 'ws://127.0.0.1:5030';
+  const gatewayUrl = `${String(gatewayBase).replace(/\/$/, '')}/api/network-gateway${roomQuery}`;
   const connectGateway = () => {
     if (socket) return;
     try {
-      socket = new WebSocket(`ws://127.0.0.1:5085/api/network-gateway${roomQuery}`);
+      socket = new WebSocket(gatewayUrl);
       socket.binaryType = 'arraybuffer';
       socket.onopen = () => { while (packetBuffer.length > 0) socket.send(packetBuffer.shift()); };
       socket.onmessage = (ev) => {

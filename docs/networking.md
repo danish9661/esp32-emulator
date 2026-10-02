@@ -2,12 +2,12 @@
 
 The emulator runs the real ESP32 LWIP and WiFi-driver code on real 802.11
 frames. The Rust WiFi port bridges Ethernet frames over a WebSocket to the
-gateway (`openhw-studio-gateway/openhw-gw`, default `ws://127.0.0.1:5085`),
+gateway (`openhw-unified-gateway/openhw-gw`, default `ws://127.0.0.1:5030`),
 which serves DHCP/DNS (8.8.8.8), NATs TCP/UDP to the host network (gVisor
 userspace stack — no root needed, ICMP included), and port-forwards
 `127.0.0.1:8080` → board `:80` (TCP) plus `127.0.0.1:5683` → board `:5683`
 (UDP, for server roles on the board). Start it before any WiFi test
-(`openhw-studio-gateway/start-gateway.sh`) and **restart it fresh** before
+(`openhw-unified-gateway/start-gateway.sh`) and **restart it fresh** before
 WiFi runs — its NAT/state ages over many sessions (stale mappings were
 observed to blackhole inbound UDP after ~10 runs).
 
@@ -54,7 +54,7 @@ untested (driver-side CCMP should pass through opaquely).
 
 IPv6 works between board and gateway: link-local + SLAAC global ULA
 (`fd00::/64` via gateway RAs), ICMPv6 echo both ways, UDP echo. The
-gateway crafts RA/NA/echo/UDP replies by hand (`openhw-studio-gateway/handleIPv6.go`;
+gateway crafts RA/NA/echo/UDP replies by hand (`openhw-unified-gateway/ipv6.go`;
 the gVisor stack is v4-NAT only). Internet IPv6 egress is NOT implemented.
 
 Implementation notes (earned the hard way):

@@ -32,7 +32,7 @@ or the full battery:
 ```
 
 WiFi tests (`test-worker-wifi`, `-web`, `-webserver`, `-net-protocols`) also need the WiFi gateway
-(`openhw-studio-gateway/openhw-gw`, forwards 8080 → ESP32:80) and are skipped by
+(`openhw-unified-gateway/openhw-gw`, forwards 8080 → ESP32:80) and are skipped by
 default; run with `--wifi`. `test-worker-net-protocols` covers the full L3–L7
 battery (DNS/HTTP/NTP/ICMP/MQTT + pcap) — see [networking](./networking.md).
 

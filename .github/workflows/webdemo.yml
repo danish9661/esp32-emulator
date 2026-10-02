@@ -50,10 +50,21 @@ jobs:
         run: node tools/build-webdemo.mjs
 
       - name: Smoke-test the built pages (no console errors, matrix renders)
+        # NOTE: `install --with-deps` runs apt-get (system deps for Chromium)
+        # and takes ~7 min on ubuntu-latest — that is where the job time
+        # goes, NOT the smoke script itself (~30 s). The runner already
+        # ships Chromium system deps in most images, so try the browser
+        # download WITHOUT system deps first (fast path, ~1 min). Only if
+        # the smoke script fails to LAUNCH (missing .so) do we fall back
+        # to the slow --with-deps install and retry once.
         run: |
           npm install --no-save playwright-core
-          npx -y playwright@latest install --with-deps chromium 2>&1 | tail -n 2
-          node tools/webdemo-smoke.mjs
+          npx -y playwright@latest install chromium 2>&1 | tail -n 2
+          node tools/webdemo-smoke.mjs || {
+            echo "--- fast path failed, retrying with system deps (~7 min) ---"
+            npx -y playwright@latest install --with-deps chromium 2>&1 | tail -n 2
+            node tools/webdemo-smoke.mjs
+          }
 
       - name: Assemble Pages artifact (site root = webdemo/)
         run: |

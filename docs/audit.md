@@ -159,7 +159,7 @@ ESP32 boot ROM and arbitrary user firmware. Safety rests on the WASM sandbox.
   ADV/GATT completion *marks* are reachable via engine-side guest callback
   injection — no real RF advertising or GATT operations.
 - **Firmware tests need an external compile server** (`:5000`, arduino-cli) and
-  (for WiFi) the gateway (`:5085`). No-compile-server tests (`wasm-bench`,
+  (for WiFi) the gateway (`:5030`). No-compile-server tests (`wasm-bench`,
   `test-wasm-standalone`) run standalone.
 - **Browser use** requires a bundler to collapse `dist/` into one file and a
   COOP/COEP context for `SharedArrayBuffer`; the fetch-based loader already
@@ -178,7 +178,7 @@ node tests/test-wasm-standalone.mjs
 node ./tests/compile-server.mjs &
 ./tests/run-worker-tests.sh --timeout=900
 
-# requires gateway on :5085 (WiFi tests only)
+# requires gateway on :5030 (WiFi tests only)
 ./tests/run-worker-tests.sh --wifi --timeout=900
 
 # bundle size
