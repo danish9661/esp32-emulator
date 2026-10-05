@@ -238,6 +238,28 @@ pub extern "C" fn native_gpio_set_strap(val: u32) {
     crate::native_mmio::native_gpio_set_strap(val);
 }
 
+// Host GPIO output taps (esp32-emu.md §3): driven-level / direction / pull
+// readback + change-event arming. Pure reads of Rust pin state.
+#[no_mangle]
+pub extern "C" fn native_gpio_get_output(pin: u32) -> u32 {
+    crate::native_mmio::native_gpio_get_output(pin)
+}
+
+#[no_mangle]
+pub extern "C" fn native_gpio_get_direction(pin: u32) -> u32 {
+    crate::native_mmio::native_gpio_get_direction(pin)
+}
+
+#[no_mangle]
+pub extern "C" fn native_gpio_get_pull(pin: u32) -> u32 {
+    crate::native_mmio::native_gpio_get_pull(pin)
+}
+
+#[no_mangle]
+pub extern "C" fn native_gpio_set_change_hook(enable: u32) {
+    crate::native_mmio::native_gpio_set_change_hook(enable);
+}
+
 #[no_mangle]
 pub extern "C" fn native_frc_timer_reset() {
     crate::native_mmio::native_frc_timer_reset();

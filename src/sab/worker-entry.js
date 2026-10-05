@@ -46,6 +46,7 @@ function hashMem(data, maxBytes) {
 }
 
 const CMD_NONE = 0, CMD_RUN = 1, CMD_RESET = 2, CMD_SEED_MMU = 3, CMD_WRITE_UINT32 = 4, CMD_READ_MEMORY = 5, CMD_GET_PCAP = 6, CMD_GET_WIFI_STATS = 7, CMD_STEP = 8, CMD_DESTROY = 9, CMD_GET_FFI_COUNTS = 10, CMD_READ_MMIO = 11, CMD_UART_RX = 12, CMD_SET_PIN_INPUT = 13, CMD_SET_TOUCH_INPUT = 14, CMD_SET_VOLTAGE = 15, CMD_FEED_I2S_RX = 16, CMD_SEND_TWAI = 17, CMD_PUSH_TWAI = 18, CMD_GET_TWAI_TX = 19, CMD_WATCHPOINT = 20, CMD_PCTRACE = 21, CMD_PRESS_RESET = 22, CMD_PRESS_BOOT = 23, CMD_BT_HCI_POLL = 24, CMD_BT_HCI_PUSH = 25, CMD_BT_HCI_RESP = 26, CMD_BT_HCI_SEND = 27;
+const CMD_I2C_SET_SLAVE = 28, CMD_I2C_TX_PUSH = 29, CMD_I2C_RX_POP = 30, CMD_I2C_POLL = 31, CMD_SPI_INJECT = 32, CMD_SPI_POLL = 33, CMD_GET_GPIO_OUT = 34, CMD_SAMPLE_GPIO_OUT = 35, CMD_POLL_GPIO_CHANGES = 36, CMD_SET_ANALOG_INPUT = 37, CMD_GET_LEDC = 38;
 const _RESP_IDLE = 0, RESP_DONE = 1, RESP_ERROR = 2;
 
 const UART_RING_SIZE = 16384;
@@ -253,6 +254,128 @@ let simChunkSize = 500000;
 // TWAI peer-frame staging (SEND_TWAI stages id/flags/data0-3, PUSH_TWAI
 // delivers with data4-7) — the 3-arg CMD channel can't fit a full frame.
 let twaiStage = [0, 0, 0];
+
+// ---- Host tap CMD bodies (esp32-emu.md §1-4) ----
+// Shared by processCommand AND the runSimChunk inline servicing below (same
+// reason as the BT HCI CMDs: commandLoop never runs mid-chunk, so poll/get
+// CMDs posted while RUN=1 would spin-wait forever without inline service).
+// All bodies are idempotent one-shots against chip tap state.
+function tapI2c(bus) { return (bus >>> 0) === 0 ? chip?.i2c0 : chip?.i2c1; }
+function tapSpi(bus) { return chip?.spi?.[bus >>> 0] ?? null; }
+function doI2cSetSlave() {
+  const t = tapI2c(Atomics.load(ctrl, SAB_CMD_ARG0));
+  if (!t) return;
+  const addr = Atomics.load(ctrl, SAB_CMD_ARG1) & 0x7f;
+  if (Atomics.load(ctrl, SAB_CMD_ARG2)) t.attachSlave(addr);
+  else t.detachSlave(addr);
+}
+function doI2cTxPush() {
+  const t = tapI2c(Atomics.load(ctrl, SAB_CMD_ARG0));
+  if (!t || !readResp) return;
+  const addr = Atomics.load(ctrl, SAB_CMD_ARG1) & 0x7f;
+  const len = Math.min(Atomics.load(ctrl, SAB_CMD_ARG2) >>> 0, readResp.length);
+  t.preloadRead(addr, readResp.subarray(0, len));
+}
+function doI2cRxPop() {
+  const t = tapI2c(Atomics.load(ctrl, SAB_CMD_ARG0));
+  let n = 0;
+  if (t && readResp) {
+    const bytes = t.drainWriteLog(Atomics.load(ctrl, SAB_CMD_ARG1) & 0x7f);
+    n = Math.min(bytes.length, readResp.length);
+    for (let i = 0; i < n; i++) readResp[i] = bytes[i] & 0xff;
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doI2cPoll() {
+  const t = tapI2c(Atomics.load(ctrl, SAB_CMD_ARG0));
+  let n = 0;
+  if (t && readResp) {
+    const evs = t.pollEvents();
+    const dv = new DataView(readResp.buffer, readResp.byteOffset, readResp.length);
+    n = Math.min(evs.length, Math.floor(readResp.length / 4));
+    for (let i = 0; i < n; i++) {
+      const e = evs[i];
+      let w = 0;
+      if (e.t === 'start') w = (1 << 24) | (((e.addr & 0x7f) << 1) | (e.read ? 1 : 0));
+      else if (e.t === 'write') w = (2 << 24) | (e.byte & 0xff);
+      else if (e.t === 'read') w = (3 << 24) | (e.byte & 0xff);
+      else if (e.t === 'stop') w = (4 << 24) | (e.wasRead ? 1 : 0);
+      dv.setUint32(i * 4, w >>> 0, true);
+    }
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doSpiInject() {
+  const t = tapSpi(Atomics.load(ctrl, SAB_CMD_ARG0));
+  if (!t || !readResp) return;
+  const len = Math.min(Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0, readResp.length);
+  t.injectMiso(readResp.subarray(0, len));
+}
+function doSpiPoll() {
+  const t = tapSpi(Atomics.load(ctrl, SAB_CMD_ARG0));
+  let n = 0;
+  if (t && readResp) {
+    const bytes = t.drainMosi(65536);
+    n = Math.min(bytes.length, readResp.length);
+    for (let i = 0; i < n; i++) readResp[i] = bytes[i] & 0xff;
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doGetGpioOut() {
+  const pin = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  let level = 0, dir = 0, pull = 0;
+  try {
+    level = chip?.getGpioOut?.(pin) >>> 0 || 0;
+    dir = chip?.getGpioDir?.(pin) >>> 0 || 0;
+    pull = chip?.getGpioPull?.(pin) >>> 0 || 0;
+  } catch {}
+  Atomics.store(ctrl, SAB_CMD_ARG0, level);
+  Atomics.store(ctrl, SAB_CMD_ARG1, dir);
+  Atomics.store(ctrl, SAB_CMD_ARG2, pull);
+}
+function doSampleGpioOut() {
+  let n = 0;
+  if (readResp) {
+    const s = chip?.sampleGpioOut?.() ?? { levels: [], dirs: [], pulls: [] };
+    n = Math.min(40, s.levels.length);
+    for (let i = 0; i < n; i++) {
+      readResp[i * 3] = s.levels[i] & 0xff;
+      readResp[i * 3 + 1] = s.dirs[i] & 0xff;
+      readResp[i * 3 + 2] = s.pulls[i] & 0xff;
+    }
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doPollGpioChanges() {
+  let n = 0;
+  if (readResp && chip?.pollGpioChanges) {
+    const changes = chip.pollGpioChanges();
+    const dv = new DataView(readResp.buffer, readResp.byteOffset, readResp.length);
+    n = Math.min(changes.length, Math.floor(readResp.length / 4));
+    for (let i = 0; i < n; i++) dv.setUint32(i * 4, (((changes[i].pin >>> 0) << 1) | (changes[i].level ? 1 : 0)) >>> 0, true);
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doSetAnalogInput() {
+  try {
+    chip?.setAnalogInput?.(
+      Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0,
+      (Atomics.load(ctrl, SAB_CMD_ARG1) | 0) / 1000,
+    );
+  } catch {}
+}
+function doGetLedc() {
+  const ch = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  let duty = 0, freq = 0, timer = 0;
+  try {
+    duty = chip?.getLedcDuty?.(ch) >>> 0 || 0;
+    freq = chip?.getLedcFreq?.(ch) >>> 0 || 0;
+    timer = chip?.getLedcTimer?.(ch) >>> 0 || 0;
+  } catch {}
+  Atomics.store(ctrl, SAB_CMD_ARG0, duty);
+  Atomics.store(ctrl, SAB_CMD_ARG1, freq);
+  Atomics.store(ctrl, SAB_CMD_ARG2, timer);
+}
 
 function finishSim() {
   ctrl[SAB_RUN] = 0;
@@ -473,6 +596,66 @@ async function runSimChunk() {
           }
         } catch {}
         Atomics.store(ctrl, SAB_CMD_ARG0, n);
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      // Host tap CMDs inline (same bodies as processCommand; keep in sync):
+      // poll/get CMDs are posted while RUN=1 (bridge polls mid-run), and
+      // commandLoop never runs mid-chunk — without these the host
+      // spin-waits forever. Registration CMDs ride along for uniformity
+      // (attach-while-running must not deadlock either).
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_I2C_SET_SLAVE) {
+        try { doI2cSetSlave(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_I2C_TX_PUSH) {
+        try { doI2cTxPush(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_I2C_RX_POP) {
+        try { doI2cRxPop(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_I2C_POLL) {
+        try { doI2cPoll(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_SPI_INJECT) {
+        try { doSpiInject(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_SPI_POLL) {
+        try { doSpiPoll(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_GET_GPIO_OUT) {
+        try { doGetGpioOut(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_SAMPLE_GPIO_OUT) {
+        try { doSampleGpioOut(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_POLL_GPIO_CHANGES) {
+        try { doPollGpioChanges(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_SET_ANALOG_INPUT) {
+        try { doSetAnalogInput(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_GET_LEDC) {
+        try { doGetLedc(); } catch {}
         Atomics.store(ctrl, SAB_RESP, RESP_DONE);
         Atomics.store(ctrl, SAB_CMD, CMD_NONE);
       }
@@ -836,6 +1019,19 @@ function processCommand(cmd) {
       Atomics.store(ctrl, SAB_CMD_ARG0, n);
       break;
     }
+    // Host peripheral taps (esp32-emu.md §1-4): same bodies as the inline
+    // servicing above (shared do* helpers — keep behaviour identical).
+    case CMD_I2C_SET_SLAVE: { doI2cSetSlave(); break; }
+    case CMD_I2C_TX_PUSH: { doI2cTxPush(); break; }
+    case CMD_I2C_RX_POP: { doI2cRxPop(); break; }
+    case CMD_I2C_POLL: { doI2cPoll(); break; }
+    case CMD_SPI_INJECT: { doSpiInject(); break; }
+    case CMD_SPI_POLL: { doSpiPoll(); break; }
+    case CMD_GET_GPIO_OUT: { doGetGpioOut(); break; }
+    case CMD_SAMPLE_GPIO_OUT: { doSampleGpioOut(); break; }
+    case CMD_POLL_GPIO_CHANGES: { doPollGpioChanges(); break; }
+    case CMD_SET_ANALOG_INPUT: { doSetAnalogInput(); break; }
+    case CMD_GET_LEDC: { doGetLedc(); break; }
     // CMD_BT_HCI_RESP: copy the last stashed JSON control line (see the
     // socket 'data' handler) into readResp, report length in ARG1
     // (0 = none pending). Lets the host test consume connect/read results
@@ -891,7 +1087,7 @@ function blockingCommandLoop() {
     if (cmd !== CMD_NONE) {
       let ok = true;
       try {
-        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT || cmd === CMD_BT_HCI_POLL || cmd === CMD_BT_HCI_PUSH || cmd === CMD_BT_HCI_RESP || cmd === CMD_BT_HCI_SEND) {
+        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT || cmd === CMD_BT_HCI_POLL || cmd === CMD_BT_HCI_PUSH || cmd === CMD_BT_HCI_RESP || cmd === CMD_BT_HCI_SEND || cmd === CMD_I2C_SET_SLAVE || cmd === CMD_I2C_TX_PUSH || cmd === CMD_I2C_RX_POP || cmd === CMD_I2C_POLL || cmd === CMD_SPI_INJECT || cmd === CMD_SPI_POLL || cmd === CMD_GET_GPIO_OUT || cmd === CMD_SAMPLE_GPIO_OUT || cmd === CMD_POLL_GPIO_CHANGES || cmd === CMD_SET_ANALOG_INPUT || cmd === CMD_GET_LEDC) {
           processCommand(cmd);
         } else if (cmd === CMD_RUN) {
           ctrl[SAB_STATUS] = 0;

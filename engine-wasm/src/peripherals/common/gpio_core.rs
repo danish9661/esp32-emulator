@@ -17,6 +17,40 @@ fn read_field_value(val: u32, field: &FieldDef) -> u32 {
     (val >> field.shift) & field.mask
 }
 
+// ── Host output-change tap (esp32-emu.md §3) ──
+// Wiring flag (survives peripheral reset, like soldered probes) + last driven
+// wire level per pin (-1 = unknown/undriven — forces the first post-reset
+// drive to fire, so no edge is ever swallowed by a stale snapshot).
+// Fires js_gpio_changed(pin, level) when an output-enabled pin's driven level
+// changes. Checked ONLY on the output-update paths (update_gpio MMIO loop +
+// matrix_out), never on input changes — zero cost when disabled (one bool).
+pub static mut GPIO_CHANGE_HOOK: bool = false;
+static mut GPIO_LAST_WIRE: [i32; 64] = [-1; 64];
+
+/// Edge-detect + fire for one pin. `oe`/`level` are the freshly computed
+/// output-enable and driven logic value. Undriven (oe == 0) only records.
+pub fn gpio_output_edge(pin: usize, oe: u32, level: u32) {
+    if pin >= 64 {
+        return;
+    }
+    let wire: i32 = if oe != 0 { (level & 1) as i32 } else { -1 };
+    unsafe {
+        if GPIO_CHANGE_HOOK && wire >= 0 && wire != GPIO_LAST_WIRE[pin] {
+            crate::peripherals::common::ffi::js_gpio_changed(pin as u32, wire as u32);
+        }
+        // Always track (cheap): keeps post-reset first-drive firing even if
+        // the hook is enabled later — no stale snapshot can swallow an edge.
+        GPIO_LAST_WIRE[pin] = wire;
+    }
+}
+
+/// Clear edge state (called on controller reset: pins are undriven after).
+pub fn gpio_edge_reset() {
+    unsafe {
+        GPIO_LAST_WIRE = [-1; 64];
+    }
+}
+
 // ── Helper: convert SignalInfo (from GpioMatrix) to GpioSignalInfo ──
 fn signal_info_to_gpio_signal_info(sig: &SignalInfo, default_index: u32) -> GpioSignalInfo {
     GpioSignalInfo {
@@ -264,6 +298,10 @@ impl GpioPin {
         self.rtc_pull_up = 0;
         self.gpio_output = 0;
         self.gpio_output_enable = 0;
+        // Derived output-enable latch (read by native_gpio_get_direction):
+        // without this, direction reads stale-out after reset while every
+        // other field reports undriven (observed: dir stayed 1, level 0).
+        self.output_enable_value = 0;
         self.open_drain = 0;
         self.matrix_enable = 0;
         self.matrix_select_output_enable = 0;
@@ -508,6 +546,10 @@ impl GpioPin {
         self.matrix_output = if self.matrix_output_invert != 0 { if val != 0 { 0 } else { 1 } } else { val };
         self.matrix_output_enable = if self.matrix_output_enable_invert != 0 { if oe != 0 { 0 } else { 1 } } else { oe };
         self.update();
+        // Host output tap (esp32-emu.md §3): matrix-driven edge (LEDC/PWM…).
+        let oe_now = self.output_enable_value;
+        let lvl = if self.matrix_enable != 0 { self.matrix_output } else { self.gpio_output };
+        gpio_output_edge(self.gpio_num as usize, oe_now, lvl & 1);
     }
 }
 
@@ -621,6 +663,11 @@ impl<'a> GpioController<'a> {
             pin.gpio_output = (arg_val[bank_idx] & mask) >> (i & 31);
             pin.gpio_output_enable = (reg_val[bank_idx] & mask) >> (i & 31);
             pin.update();
+            // Host output tap (esp32-emu.md §3): GPIO-direct edge
+            // (digitalWrite/pinMode path). Level = selected output source.
+            let oe_now = pin.output_enable_value;
+            let lvl = if pin.matrix_enable != 0 { pin.matrix_output } else { pin.gpio_output };
+            gpio_output_edge(i, oe_now, lvl & 1);
         }
     }
 
@@ -1051,6 +1098,9 @@ impl<'a> MmioPeripheral for GpioController<'a> {
         for i in 0..(self.pin_count as usize) {
             self.pins[i].reset();
         }
+        // Host tap edge state resets with the pins (first post-reset drive
+        // always fires; the hook-enable flag itself survives — wiring).
+        gpio_edge_reset();
         let cfg = self.config;
         let func0_offset = cfg.reg_func0_out_sel_cfg as u32;
         for i in 0..cfg.gpio_count {

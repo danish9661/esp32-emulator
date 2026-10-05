@@ -332,6 +332,61 @@ js_log_u32: (val) => {
         const words = new Uint32Array(this.memBytes().slice(ptr, ptr + len * 4).buffer);
         this._i2sTxDataHook(idx, words);
       },
+      // Host I2C slave taps (esp32-emu.md §1) — synchronous dispatch to the
+      // per-bus tap objects (chip.i2c0/i2c1). NEVER throws: FFI must not
+      // unwind into Rust. Unclaimed → NACK (0) / 0xFF / no-op, preserving
+      // the legacy sibling/virt routing.
+      js_i2c_slave_start: (bus, addr, read) => {
+        try {
+          const tap = bus === 0 ? this.esp32?.i2c0 : this.esp32?.i2c1;
+          if (!tap) return 0;
+          return tap._ffiStart(addr >>> 0, read >>> 0) ? 1 : 0;
+        } catch { return 0; }
+      },
+      js_i2c_slave_write: (bus, byte) => {
+        try {
+          const tap = bus === 0 ? this.esp32?.i2c0 : this.esp32?.i2c1;
+          if (!tap) return 0;
+          return tap._ffiWrite(byte >>> 0) ? 1 : 0;
+        } catch { return 0; }
+      },
+      js_i2c_slave_read: (bus) => {
+        try {
+          const tap = bus === 0 ? this.esp32?.i2c0 : this.esp32?.i2c1;
+          if (!tap) return 0xFF;
+          return tap._ffiRead() & 0xFF;
+        } catch { return 0xFF; }
+      },
+      js_i2c_slave_stop: (bus, wasRead) => {
+        try {
+          const tap = bus === 0 ? this.esp32?.i2c0 : this.esp32?.i2c1;
+          tap?._ffiStop(wasRead !== 0);
+        } catch {}
+      },
+      // Host SPI transfer tap (esp32-emu.md §2) — synchronous exchange.
+      // MOSI staged at the mosi scratch by Rust; MISO staged back at the
+      // miso scratch; returns MISO length (0 = not claimed → sibling/
+      // loopback path). NEVER throws.
+      js_spi_transfer: (bus, sendLen, recvLen) => {
+        try {
+          const tap = this.esp32?.spi?.[bus >>> 0];
+          if (!tap) return 0;
+          const mosiPtr = this.exports?.native_spi_xfer_mosi_ptr?.() >>> 0;
+          const misoPtr = this.exports?.native_spi_xfer_miso_ptr?.() >>> 0;
+          if (!mosiPtr || !misoPtr) return 0;
+          const mem = this.memBytes();
+          const mosi = mem.slice(mosiPtr, mosiPtr + (sendLen >>> 0));
+          const miso = tap._ffiTransfer(mosi, recvLen >>> 0) || [];
+          const n = Math.min(miso.length, 128);
+          for (let i = 0; i < n; i++) mem[misoPtr + i] = miso[i] & 0xFF;
+          return n;
+        } catch { return 0; }
+      },
+      // GPIO output change events (esp32-emu.md §3) — queue only (listeners
+      // fan out on pollGpioChanges(), never re-entrant). NEVER throws.
+      js_gpio_changed: (pin, level) => {
+        try { this.esp32?._onGpioChanged?.(pin >>> 0, level >>> 0); } catch {}
+      },
       // Native RTC bridge: sleep wakeup on the rcSlow clock event queue.
       // Fires native_rtc_fire_sleep_wakeup when rcSlow ticks reach the target.
       js_rtc_schedule_wakeup: (target) => {
@@ -818,13 +873,16 @@ js_log_u32: (val) => {
     if (!this.exports?.native_gpio_seed) return;
     const gpio = this.esp32?.gpio;
     if (!gpio?.pins) return;
-    const ptr = this.exports.native_gpio_seed_scratch();
-    const u32 = this.memU32(ptr, 41);
+    const ptr = this.exports.native_gpio_seed_scratch() >>> 0;
+    // NOTE: DataView, not Uint32Array — the scratch static's linear-memory
+    // address is NOT guaranteed 4-aligned (static layout shifts with every
+    // new Rust static; observed: adding I2C/SPI tap statics moved it).
+    // The Rust side reads it with u32::from_le_bytes (alignment-agnostic).
+    const dv = new DataView(this.memory.buffer);
     for (let i = 0; i < gpio.pins.length; i++) {
-      const pin = gpio.pins[i];
-      u32[i] = pin.inputValue ? 1 : 0;
+      dv.setUint32(ptr + i * 4, gpio.pins[i].inputValue ? 1 : 0, true);
     }
-    u32[40] = (gpio.strapValue ?? 0) >>> 0;
+    dv.setUint32(ptr + 160, (gpio.strapValue ?? 0) >>> 0, true);
     try { this.exports.native_gpio_seed(); } catch {}
   }
 

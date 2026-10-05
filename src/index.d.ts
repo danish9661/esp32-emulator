@@ -126,6 +126,67 @@ export class SimulatorWorker {
   feedI2SRX(sample: number): Promise<void>;
   sendTwaiFrame(id: number, data: number[] | Uint8Array, opts?: { ext?: boolean; rtr?: boolean }): Promise<void>;
   getTwaiTx(): Promise<{ count: number; id: number; ext: boolean; rtr: boolean; dlc: number; data: number[] } | null>;
+  /** Attach a host I2C slave model at a 7-bit address (Worker split mode). Registered addresses ACK; others NACK. */
+  attachI2cSlave(bus: number, addr: number): Promise<void>;
+  detachI2cSlave(bus: number, addr: number): Promise<void>;
+  /** Pre-stage bytes a future master READ will consume (split-mode onRead). */
+  pushI2cTx(bus: number, addr: number, bytes: number[] | Uint8Array): Promise<void>;
+  /** Drain bytes the master WROTE since the last drain. */
+  popI2cRx(bus: number, addr: number): Promise<number[]>;
+  /** Drain staged I2C transaction events since the last poll. */
+  pollI2c(bus: number): Promise<Array<{ t: string; addr?: number; read?: boolean; byte?: number; wasRead?: boolean }>>;
+  /** Pre-stage MISO bytes for future master transfers (split-mode onTransfer). */
+  injectSpiMiso(bus: number, bytes: number[] | Uint8Array): Promise<void>;
+  /** Drain captured MOSI bytes since the last drain. */
+  pollSpiTx(bus: number): Promise<number[]>;
+  /** Fresh core-side GPIO output readback (output value, not input stimulus). */
+  getGpioOut(pin: number): Promise<{ level: number; dir: number; pull: number }>;
+  /** Snapshot of all 40 pins: {levels, dirs, pulls}. */
+  sampleGpioOut(): Promise<{ levels: number[]; dirs: number[]; pulls: number[] }>;
+  /** Drain staged GPIO output edges since the last poll: [{pin, level}]. */
+  pollGpioChanges(): Promise<Array<{ pin: number; level: number }>>;
+  /** Drive a per-pin analog voltage at runtime (host-driven ADC inject). */
+  setAnalogInput(pin: number, volts: number): Promise<void>;
+  /** LEDC/PWM readback: effective duty, Hz (0 = unconfigured), timer index. */
+  getLedc(channel: number): Promise<{ duty: number; freq: number; timer: number }>;
+  /** GPIO pin driven by an LEDC channel (-1 = none). */
+  getLedcPin(channel: number): Promise<number>;
+}
+
+// ---- Host peripheral taps (esp32-emu.md §1-2) ----
+export interface I2cSlaveHandlers {
+  onWrite?: (byte: number) => boolean | void;
+  onRead?: () => number | void;
+  onStop?: (wasRead: boolean) => void;
+  onStart?: (addr: number, read: boolean) => void;
+}
+
+export class I2cTap {
+  constructor(chip: ESP32, bus: number);
+  bus: number;
+  slaves: Map<number, I2cSlaveHandlers & { readQueue: number[]; writeLog: number[] }>;
+  onStart: ((addr: number, read: boolean) => boolean | void) | null;
+  onWrite: ((byte: number) => boolean | void) | null;
+  onRead: (() => number | void) | null;
+  onStop: ((wasRead: boolean) => void) | null;
+  events: Array<{ t: string; addr?: number; read?: boolean; byte?: number; wasRead?: boolean }>;
+  attachSlave(addr: number, handlers?: I2cSlaveHandlers): unknown;
+  detachSlave(addr: number): void;
+  clearSlaves(): void;
+  preloadRead(addr: number, bytes: number[] | Uint8Array): number;
+  drainWriteLog(addr: number): number[];
+  pollEvents(): Array<{ t: string; addr?: number; read?: boolean; byte?: number; wasRead?: boolean }>;
+}
+
+export class SpiTap {
+  constructor(chip: ESP32, bus: number);
+  bus: number;
+  onTransfer: ((txBytes: number[], recvLen: number) => number[] | void) | null;
+  misoQueue: number[];
+  mosiLog: number[];
+  injectMiso(bytes: number[] | Uint8Array): number;
+  drainMosi(maxBytes?: number): number[];
+  pollTx(maxBytes?: number): number[];
 }
 
 export class MultiSimulator {
@@ -167,6 +228,16 @@ export class ESP32 {
   dataMem: Memory;
   rtcFastMem: Memory;
   psram: Uint8Array;
+  /** Host I2C slave taps (bus 0 = I2C0, bus 1 = I2C1). Post-create attachable. */
+  i2c0: I2cTap;
+  i2c1: I2cTap;
+  i2c: I2cTap[];
+  /** Host SPI transfer taps (index 0..3 = SPI1, SPI0, SPI2, SPI3; user buses are 2/HSPI and 3/VSPI). */
+  spi0: SpiTap;
+  spi1: SpiTap;
+  spi2: SpiTap;
+  spi3: SpiTap;
+  spi: SpiTap[];
 
   loadROM(cpuVal: Uint8Array): void;
   loadWasm(wasmBytes: Uint8Array | ArrayBuffer, enabled?: string): Promise<void>;
@@ -174,6 +245,32 @@ export class ESP32 {
   step(): void;
   mapAddress(cpuVal: number, coreIdx?: number): Uint8Array | null;
   interrupt(cpuVal: number, tmpVal?: boolean, idxVal?: number): void;
+  /** Driven GPIO output level of a pin (0/1). Fresh core-side read. */
+  getGpioOut(pin: number): number;
+  /** Direction of a pin: 0 = in, 1 = out, 2 = inout. */
+  getGpioDir(pin: number): number;
+  /** Pull mode of a pin: 0 = none, 1 = up, 2 = down, 3 = both. */
+  getGpioPull(pin: number): number;
+  /** Snapshot of all 40 pins: {levels, dirs, pulls}. */
+  sampleGpioOut(): { levels: number[]; dirs: number[]; pulls: number[] };
+  /** Subscribe to GPIO output edges. Returns an unsubscribe function. Listener must not re-enter the engine. */
+  onGpioOutChange(cb: (changes: Array<{ pin: number; level: number }>) => void): () => void;
+  /** Drain staged output edges, fan out to listeners, return them. */
+  pollGpioChanges(): Array<{ pin: number; level: number }>;
+  /** Read back a configured per-pin analog voltage (volts). */
+  getAnalogInput(pin: number): number | undefined;
+  /** Drive a per-pin analog voltage at runtime (host-driven ADC inject). */
+  setAnalogInput(pin: number, volts: number): void;
+  /** Number of LEDC channels (16: 8 HS + 8 LS). */
+  ledcChannelCount(): number;
+  /** Effective duty of an LEDC channel (fade-interpolated). */
+  getLedcDuty(ch: number): number;
+  /** Selected timer index of an LEDC channel. */
+  getLedcTimer(ch: number): number;
+  /** Output frequency of an LEDC channel's timer, in Hz (0 = unconfigured). */
+  getLedcFreq(ch: number): number;
+  /** GPIO pin driven by an LEDC channel (-1 = none). */
+  getLedcPin(ch: number): number;
 }
 
 /** Facade exposing WASM core state (PC, regs, ccompare) to JS. Does NOT execute. */

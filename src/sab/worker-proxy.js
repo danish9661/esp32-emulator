@@ -51,6 +51,21 @@ const CMD_BT_HCI_POLL = 24;
 const CMD_BT_HCI_PUSH = 25;
 const CMD_BT_HCI_RESP = 26;
 const CMD_BT_HCI_SEND = 27;
+// Host peripheral taps (esp32-emu.md §1-4): async split of the synchronous
+// engine taps for the Worker build (no round-trip mid-transaction — the
+// worker thread owns the tap objects; the host pre-stages reads and drains
+// writes/events around run chunks).
+const CMD_I2C_SET_SLAVE = 28; // ARG0=bus, ARG1=addr7, ARG2=enable
+const CMD_I2C_TX_PUSH = 29; // ARG0=bus, ARG1=addr7, ARG2=len + readResp bytes (preload master-read data)
+const CMD_I2C_RX_POP = 30; // ARG0=bus, ARG1=addr7 → ARG1=len + readResp bytes (captured master writes)
+const CMD_I2C_POLL = 31; // ARG0=bus → ARG1=count + readResp u32 events
+const CMD_SPI_INJECT = 32; // ARG0=bus, ARG1=len + readResp bytes (preload MISO)
+const CMD_SPI_POLL = 33; // ARG0=bus → ARG1=len + readResp bytes (captured MOSI)
+const CMD_GET_GPIO_OUT = 34; // ARG0=pin → ARG0=level, ARG1=dir, ARG2=pull
+const CMD_SAMPLE_GPIO_OUT = 35; // → ARG1=120 + readResp 40x{level,dir,pull}
+const CMD_POLL_GPIO_CHANGES = 36; // → ARG1=count + readResp u32 (pin<<1|level)
+const CMD_SET_ANALOG_INPUT = 37; // ARG0=pin, ARG1=millivolts
+const CMD_GET_LEDC = 38; // ARG0=channel → ARG0=duty, ARG1=freqHz, ARG2=timer
 
 const RESP_IDLE = 0;
 const _RESP_DONE = 1;
@@ -359,6 +374,222 @@ class SimulatorWorker {
     Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_PUSH_TWAI);
     Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
     while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  // ---- Host peripheral taps (esp32-emu.md §1-4, Worker split mode) ----
+  // The worker thread owns the tap objects (same I2cTap/SpiTap classes);
+  // these methods sync wiring/preloads/polls across the SAB (no synchronous
+  // round-trip mid-transaction — preload reads BEFORE run, drain writes
+  // AFTER run chunks).
+
+  /**
+   * Attach/detach a host I2C slave model at a 7-bit address on a bus
+   * (0 = I2C0, 1 = I2C1). Registered addresses ACK; all others NACK, so
+   * scan() enumerates only attached models. Wiring survives reset.
+   */
+  async attachI2cSlave(bus, addr) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, addr & 0x7f);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG2, 1);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_I2C_SET_SLAVE);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  async detachI2cSlave(bus, addr) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, addr & 0x7f);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG2, 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_I2C_SET_SLAVE);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /**
+   * Pre-stage bytes a future master READ from `addr` will consume
+   * (sensor ROM, split-mode equivalent of onRead). Survives reset.
+   */
+  async pushI2cTx(bus, addr, bytes) {
+    this._checkReady();
+    const arr = Uint8Array.from(bytes ?? []).slice(0, 4096);
+    this.readResp.set(arr, 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, addr & 0x7f);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG2, arr.length);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_I2C_TX_PUSH);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /** Drain bytes the master WROTE to `addr` since the last drain. */
+  async popI2cRx(bus, addr) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, addr & 0x7f);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_I2C_RX_POP);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    return Array.from(this.readResp.subarray(0, Math.min(n, this.readResp.length)));
+  }
+
+  /**
+   * Drain staged I2C transaction events on a bus since the last poll.
+   * @returns {Promise<Array<{t:string,addr?:number,read?:boolean,byte?:number,wasRead?:boolean}>>}
+   */
+  async pollI2c(bus) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_I2C_POLL);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    const dv = new DataView(this.readResp.buffer, this.readResp.byteOffset, Math.min(n * 4, this.readResp.length));
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const w = dv.getUint32(i * 4, true);
+      const type = w >>> 24, payload = w & 0xffffff;
+      if (type === 1) out.push({ t: 'start', addr: (payload >>> 1) & 0x7f, read: !!(payload & 1) });
+      else if (type === 2) out.push({ t: 'write', byte: payload & 0xff });
+      else if (type === 3) out.push({ t: 'read', byte: payload & 0xff });
+      else if (type === 4) out.push({ t: 'stop', wasRead: !!payload });
+    }
+    return out;
+  }
+
+  /**
+   * Pre-stage MISO bytes for future master transfers on a bus
+   * (0..3 = SPI1, SPI0, SPI2, SPI3; user buses are 2/HSPI and 3/VSPI).
+   * Split-mode equivalent of onTransfer; survives reset.
+   */
+  async injectSpiMiso(bus, bytes) {
+    this._checkReady();
+    const arr = Uint8Array.from(bytes ?? []).slice(0, 4096);
+    this.readResp.set(arr, 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, arr.length);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_SPI_INJECT);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /** Drain captured MOSI bytes on a bus since the last drain. */
+  async pollSpiTx(bus) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_SPI_POLL);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    return Array.from(this.readResp.subarray(0, Math.min(n, this.readResp.length)));
+  }
+
+  /**
+   * Fresh core-side GPIO output readback (output value, NOT input stimulus).
+   * @returns {Promise<{level:number,dir:number,pull:number}>} dir 0=in,1=out,2=inout; pull 0=none,1=up,2=down,3=both.
+   */
+  async getGpioOut(pin) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, pin >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_GET_GPIO_OUT);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    return {
+      level: Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG0) >>> 0,
+      dir: Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0,
+      pull: Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG2) >>> 0,
+    };
+  }
+
+  /** Snapshot of all 40 pins: {levels, dirs, pulls} arrays. */
+  async sampleGpioOut() {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_SAMPLE_GPIO_OUT);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Math.min(Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1), 40);
+    const levels = [], dirs = [], pulls = [];
+    for (let i = 0; i < n; i++) {
+      levels.push(this.readResp[i * 3] || 0);
+      dirs.push(this.readResp[i * 3 + 1] || 0);
+      pulls.push(this.readResp[i * 3 + 2] || 0);
+    }
+    return { levels, dirs, pulls };
+  }
+
+  /** Drain staged GPIO output edges since the last poll: [{pin, level}]. */
+  async pollGpioChanges() {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_POLL_GPIO_CHANGES);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    const dv = new DataView(this.readResp.buffer, this.readResp.byteOffset, Math.min(n * 4, this.readResp.length));
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const w = dv.getUint32(i * 4, true);
+      out.push({ pin: w >>> 1, level: w & 1 });
+    }
+    return out;
+  }
+
+  /**
+   * Drive a per-pin analog voltage at runtime (host-driven ADC inject).
+   * @param {number} pin - GPIO pin number
+   * @param {number} volts - volts (full-scale per attenuation, see analogRead cells)
+   */
+  async setAnalogInput(pin, volts) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, pin >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, Math.round(Number(volts) * 1000));
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_SET_ANALOG_INPUT);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /**
+   * GPIO pin driven by an LEDC channel (-1 = none). Register-file scan of
+   * FUNC_OUT_SEL_CFG for the channel's matrix signal (71 + ch).
+   */
+  async getLedcPin(channel) {
+    this._checkReady();
+    const sig = 71 + (channel >>> 0);
+    for (let pin = 0; pin < 40; pin++) {
+      const sel = (await this.readMmio(5, (0x3ff44000 + 1328 + pin * 4) >>> 0, 4)) & 0x1ff;
+      if (sel === sig) return pin;
+    }
+    return -1;
+  }
+
+  /**
+   * LEDC/PWM readback for servo/LED cells.
+   * @returns {Promise<{duty:number,freq:number,timer:number}>} duty = effective duty, freq = derived Hz.
+   */
+  async getLedc(channel) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, channel >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_GET_LEDC);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    return {
+      duty: Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG0) >>> 0,
+      freq: Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1) >>> 0,
+      timer: Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG2) >>> 0,
+    };
   }
 
   /**

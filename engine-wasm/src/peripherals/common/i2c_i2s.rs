@@ -226,6 +226,12 @@ pub struct I2cPeripheral {
     /// controller, e.g. the OV2640 camera). Mutually exclusive with
     /// bus_slave; ACKs and participates like a real slave.
     pub bus_virt: bool,
+    /// Host-claimed transaction (esp32-emu.md §1 I2C slave tap): the JS host
+    /// answered js_i2c_slave_start with ACK for this transaction's address.
+    /// Mutually exclusive with bus_slave/bus_virt for the transaction's
+    /// lifetime; cleared on START/STOP/reset. Data bytes route to the
+    /// js_i2c_slave_write/read/stop FFI instead of sibling/virt FIFOs.
+    pub bus_host: bool,
 }
 
 impl I2cPeripheral {
@@ -251,6 +257,7 @@ impl I2cPeripheral {
             bus_is_read: false,
             bus_slave: None,
             bus_virt: false,
+            bus_host: false,
         }
     }
 
@@ -542,6 +549,7 @@ impl I2cPeripheral {
         self.bus_is_read = false;
         self.bus_slave = None;
         self.bus_virt = false;
+        self.bus_host = false;
     }
 }
 

@@ -39,6 +39,7 @@ import { writePartitionTable, parseMacAddress, parseFirmwareOffset } from "../co
 import { applyBoardPreset } from "../../boards/esp32-cam.js";
 import { XtensaCore } from "../../engine/esp-xtensa/xtensa-core.js";
 import { WasmLoader } from "../../engine/esp-xtensa/wasm-loader.js";
+import { I2cTap, SpiTap } from "../common/bus-taps.js";
 import * as WM from "../../engine/wasm-memory-layout.js";
 
 // Interrupt enum (local copy, matches factory)
@@ -247,6 +248,25 @@ class ESP32 {
       (this.lastMappedAddress = 0),
       this.flash.fill(255),
       config.partitions && writePartitionTable(this.flash, config.partitions));
+    // Host peripheral taps (esp32-emu.md §1-4): post-create attachable,
+    // F1-parity shapes (mcu.i2c0.onStart = …, mcu.spi1.onTransfer = …).
+    // Wiring survives reset; in-flight state clears in reset() below.
+    // SPI unit index → controller: 0 = SPI1 (flash), 1 = SPI0 (flash/cache),
+    // 2 = SPI2 (HSPI, user), 3 = SPI3 (VSPI, user). User buses are 2 and 3.
+    this.i2c0 = new I2cTap(this, 0);
+    this.i2c1 = new I2cTap(this, 1);
+    this.i2c = [this.i2c0, this.i2c1];
+    this.spi0 = new SpiTap(this, 0);
+    this.spi1 = new SpiTap(this, 1);
+    this.spi2 = new SpiTap(this, 2);
+    this.spi3 = new SpiTap(this, 3);
+    this.spi = [this.spi0, this.spi1, this.spi2, this.spi3];
+    // GPIO output-change queue + listeners (esp32-emu.md §3). The Rust
+    // js_gpio_changed FFI appends here synchronously; listeners fire on
+    // pollGpioChanges() (host-driven, never re-entrant inside step()) and
+    // opportunistically at the end of step() when listeners exist.
+    this._gpioChangeQueue = [];
+    this._gpioChangeListeners = [];
     const uartConfig = {
         hasTXState: true,
         toutMultiply: true,
@@ -474,6 +494,9 @@ class ESP32 {
       this._nativeEmacReset = () => { try { loader.exports?.native_emac_reset?.(); } catch {} };
       this._nativeSweepReset = () => { try { loader.exports?.native_sweep_reset?.(); } catch {} };
       this._nativeBtRfReset = () => { try { loader.exports?.native_bt_rf_reset?.(); } catch {} };
+      // Re-arm host tap wiring registered before load (registrations made
+      // pre-load sync here; attach-time sync covers later ones).
+      try { this._applyTapHooks(); } catch {}
       console.log(`WASM engine loaded (${this._wasmCores.length} cores). Mode: ${enabled}`);
       return true;
     } catch (err) {
@@ -490,6 +513,21 @@ class ESP32 {
   reset() {
     // Invalidate cached step exports (WASM may be reloaded).
     this._stepExp = undefined;
+    // Sim-time restarts at boot (cross-cutting §2: reset clears everything,
+    // synchronously — the cycle counter is part of "everything").
+    this.cycles = 0;
+    // Host taps: clear PENDING (in-flight transaction bytes, staged events,
+    // gpio change queue). Wiring (registrations, preloads, listeners, hook
+    // flags) survives — physical devices stay soldered across reboot.
+    try {
+      this.i2c0?._resetFlight?.();
+      this.i2c1?._resetFlight?.();
+      this.spi0?._resetFlight?.();
+      this.spi1?._resetFlight?.();
+      this.spi2?._resetFlight?.();
+      this.spi3?._resetFlight?.();
+      if (this._gpioChangeQueue) this._gpioChangeQueue.length = 0;
+    } catch {}
     for (let e of this.cores) e.reset();
     if (this._wasmCores) { for (let wc of this._wasmCores) wc.reset(); }
     for (let e of ((this.cores[1].enabled =
@@ -534,6 +572,129 @@ class ESP32 {
     regIdx
       ? (applySingleResetValues(regIdx, Esp32FullResetValues), regIdx.reset())
       : console.error("Peripheral to reset not found", addr.toString(16));
+  }
+
+  // ---- Host tap wiring sync (esp32-emu.md §1-4) ----
+  // Re-push tap registrations + hook flags to Rust (needed after loadWasm:
+  // a fresh instantiation starts all statics cleared; attach-time sync
+  // covers everything registered later). Safe to call anytime (no-op
+  // before WASM loads).
+  _applyTapHooks() {
+    try {
+      for (const tap of [this.i2c0, this.i2c1]) tap?._syncHooks?.();
+      for (const tap of [this.spi0, this.spi1, this.spi2, this.spi3]) tap?._syncHooks?.();
+      if (this._gpioChangeListeners?.length) {
+        this._wasmLoader?.exports?.native_gpio_set_change_hook?.(1);
+      }
+    } catch {}
+  }
+
+  // ---- GPIO output readback + events (esp32-emu.md §3) ----
+  // Fresh core-side reads of Rust pin state (output value, NOT the
+  // input-stimulus holder). setPinInput (input-only) is unchanged.
+  /** Driven output level of a pin (0/1). 0 when WASM is absent. */
+  getGpioOut(pin) {
+    try { return this._wasmLoader?.exports?.native_gpio_get_output?.(pin >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /** Direction of a pin: 0 = in, 1 = out, 2 = inout. */
+  getGpioDir(pin) {
+    try { return this._wasmLoader?.exports?.native_gpio_get_direction?.(pin >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /** Pull mode of a pin: 0 = none, 1 = up, 2 = down, 3 = both. */
+  getGpioPull(pin) {
+    try { return this._wasmLoader?.exports?.native_gpio_get_pull?.(pin >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /** Snapshot of all 40 pins: {levels, dirs, pulls} (arrays of 0/1, 0/1/2, 0..3). */
+  sampleGpioOut() {
+    const levels = [], dirs = [], pulls = [];
+    for (let pin = 0; pin < 40; pin++) {
+      levels.push(this.getGpioOut(pin));
+      dirs.push(this.getGpioDir(pin));
+      pulls.push(this.getGpioPull(pin));
+    }
+    return { levels, dirs, pulls };
+  }
+  /**
+   * Subscribe to GPIO output edges. Returns an unsubscribe function.
+   * Delivery is via pollGpioChanges() (host-driven, never re-entrant) plus
+   * an opportunistic drain at the end of step() while listeners exist.
+   * Listener MUST NOT call back into the engine (record-only).
+   */
+  onGpioOutChange(cb) {
+    if (typeof cb !== 'function') return () => {};
+    this._gpioChangeListeners.push(cb);
+    try { this._wasmLoader?.exports?.native_gpio_set_change_hook?.(1); } catch {}
+    return () => {
+      const i = this._gpioChangeListeners.indexOf(cb);
+      if (i >= 0) this._gpioChangeListeners.splice(i, 1);
+    };
+  }
+  /** Drain staged output edges, fan out to listeners, return [{pin, level}]. */
+  pollGpioChanges() {
+    const q = this._gpioChangeQueue?.splice(0) ?? [];
+    if (q.length) {
+      for (const cb of [...this._gpioChangeListeners]) {
+        try { cb(q); } catch (e) { console.warn(`[GPIO-TAP] listener threw: ${e?.message || e}`); }
+      }
+    }
+    return q;
+  }
+  /** FFI sink for js_gpio_changed (never throws; queue is bounded). */
+  _onGpioChanged(pin, level) {
+    if (!this._gpioChangeQueue) this._gpioChangeQueue = [];
+    this._gpioChangeQueue.push({ pin: pin >>> 0, level: level ? 1 : 0 });
+    if (this._gpioChangeQueue.length > 4096) {
+      this._gpioChangeQueue.splice(0, this._gpioChangeQueue.length - 4096);
+    }
+  }
+
+  // ---- ADC (esp32-emu.md §6) ----
+  /** Read back a configured per-pin analog voltage (volts, undefined when unset). */
+  getAnalogInput(pin) {
+    return this.analogVolts?.[pin];
+  }
+
+  // ---- LEDC/PWM readback (esp32-emu.md §7) ----
+  /** Number of LEDC channels (16: 8 HS + 8 LS), 0 when WASM absent. */
+  ledcChannelCount() {
+    try { return this._wasmLoader?.exports?.native_ledc_channel_count?.() >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /** Effective duty of an LEDC channel (fade-interpolated). */
+  getLedcDuty(ch) {
+    try { return this._wasmLoader?.exports?.native_ledc_get_duty?.(ch >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /** Selected timer index of an LEDC channel. */
+  getLedcTimer(ch) {
+    try { return this._wasmLoader?.exports?.native_ledc_get_timer?.(ch >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /** Output frequency of an LEDC channel's timer, in Hz (derived from timer config). */
+  getLedcFreq(ch) {
+    try { return this._wasmLoader?.exports?.native_ledc_get_freq?.(ch >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /**
+   * GPIO pin driven by an LEDC channel (-1 = none). Resolves the pin whose
+   * FUNC_OUT_SEL_CFG routes the channel's matrix signal (71 + ch). Lets a
+   * servo/LED cell attribute a duty to its pin without firmware knowledge.
+   * Pure register-file scan (no behavior change).
+   */
+  getLedcPin(ch) {
+    try {
+      const ex = this._wasmLoader?.exports;
+      if (!ex?.native_diag_read) return -1;
+      const sig = 71 + (ch >>> 0);
+      for (let pin = 0; pin < 40; pin++) {
+        const sel = ex.native_diag_read(5, (0x3ff44000 + 1328 + pin * 4) >>> 0, 32) >>> 0;
+        if ((sel & 0x1ff) === sig) return pin;
+      }
+      return -1;
+    } catch { return -1; }
   }
   mapAddress(addr, value) {
     if (
@@ -608,6 +769,12 @@ class ESP32 {
     if (this._sabU32) {
       this._sabU32[998] = this.clocks.cpu.ticks >>> 0;
       this._sabU32[999] = this.cycles >>> 0;
+    }
+    // Opportunistic GPIO-change drain (esp32-emu.md §3): only when listeners
+    // exist (two length checks when idle). Manual pollGpioChanges() always
+    // works regardless.
+    if (this._gpioChangeListeners?.length && this._gpioChangeQueue?.length) {
+      try { this.pollGpioChanges(); } catch {}
     }
   }
   // MMU-table entry governing `addr` (or undefined when not MMU-routed).

@@ -153,3 +153,51 @@ extern "C" {
     pub fn js_dport_core1_reset();
     pub fn js_dport_refresh_core1_enabled();
 }
+
+// Host I2C slave taps (esp32-emu.md §1) — synchronous, additive-only.
+// The engine calls these ONLY when the per-bus hook is enabled via
+// native_i2c_set_slave_hook (set when the first host slave attaches or a
+// bus-level onStart handler is assigned; cleared never — wiring survives
+// reset, in-flight transaction state does not). With no hook the legacy
+// sibling/virt routing is untouched (zero behavior change, one bool check).
+//
+// Contract (mirrors the F1 runner tap shape):
+// - js_i2c_slave_start(bus, addr7, read): host claims the address?
+//   Return 1 = ACK (host owns this transaction), 0 = not claimed (fall
+//   through to sibling/virt routing, then historical NACK-ish path).
+// - js_i2c_slave_write(bus, byte): data byte on a host-claimed WRITE.
+//   Return 1 = ACK, 0 = NACK (propagates to ACK_ERR + abort, real-HW parity).
+// - js_i2c_slave_read(bus): next byte for a host-claimed READ (0..255).
+//   Called only while claimed; host must answer synchronously (pre-staged
+//   queue or model function). Default when unimplemented: 0xFF.
+// - js_i2c_slave_stop(bus, was_read): transaction close (model commit point).
+// Handlers MUST be synchronous pure-JS (no WASM re-entry, no await) — they
+// run inside the guest's MMIO write.
+extern "C" {
+    pub fn js_i2c_slave_start(bus: u32, addr: u32, read: u32) -> u32;
+    pub fn js_i2c_slave_write(bus: u32, byte: u32) -> u32;
+    pub fn js_i2c_slave_read(bus: u32) -> u32;
+    pub fn js_i2c_slave_stop(bus: u32, was_read: u32);
+}
+
+// Host SPI transfer tap (esp32-emu.md §2) — synchronous, additive-only.
+// Called ONLY when the per-unit hook is enabled via
+// native_spi_set_transfer_hook (set on onTransfer assignment or injectMiso
+// preload; wiring survives reset). MOSI bytes are staged at the scratch
+// returned by native_spi_xfer_mosi_ptr(); the handler writes MISO bytes at
+// native_spi_xfer_miso_ptr() and returns the MISO length (0 = not claimed,
+// fall through to the sibling virtual-bus exchange, then loopback).
+// Fires once per CPU-mode (W-reg) transaction at CMD USR time — the ESP32
+// equivalent of F1's per-DR-write onTransfer. DMA and flash-controller
+// transfers never call it (documented limitation).
+extern "C" {
+    pub fn js_spi_transfer(bus: u32, send_len: u32, recv_len: u32) -> u32;
+}
+
+// GPIO output change events (esp32-emu.md §3) — level, additive-only.
+// Fired synchronously from the output-update path when the driven level of
+// a pin changes AND the hook is enabled via native_gpio_set_change_hook.
+// Handlers MUST be non-reentrant (record, never MMIO back into WASM).
+extern "C" {
+    pub fn js_gpio_changed(pin: u32, level: u32);
+}

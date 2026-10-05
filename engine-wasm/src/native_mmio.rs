@@ -315,6 +315,63 @@ pub extern "C" fn native_i2c_reset() {
         // Virtual sensor back to power-on defaults (esp_camera_init power-
         // cycles via PWDN on every init, so this matches real behavior).
         CAM_SENSOR.init = false;
+        // NOTE: I2C_HOST_ADDR (host slave registry = physical wiring) and
+        // in-flight bus_host flags are NOT cleared here: reset() on the
+        // peripheral already clears bus_host via reset_peripheral(), and the
+        // registry must survive reset like soldered devices (re-attaching
+        // after every reboot would break the BODRESET-style reboot tests and
+        // the acceptance scan cell). Pending events are JS-side (drained on
+        // poll); in-flight bytes mid-transaction are dropped by the fresh
+        // bus_expect_addr state. See esp32-emu.md cross-cutting §2.
+    }
+}
+
+// ---- Host I2C slave taps (esp32-emu.md §1) ----
+// Registry of host-claimed 7-bit addresses per bus (physical wiring: survives
+// reset, synced from JS attachSlave/detachSlave or bus-level onStart assignment).
+// When a master addresses a registered slave, the transaction routes to the
+// js_i2c_slave_* FFI (synchronous host model) INSTEAD OF the sibling/virt bus;
+// unregistered addresses keep the legacy sibling/virt/NACK path bit-for-bit,
+// so firmware behavior is frozen when no tap is attached.
+static mut I2C_HOST_ADDR: [[bool; 128]; 2] = [[false; 128]; 2];
+// Promiscuous per-bus host mode (esp32-emu.md §1, F1 style): when a bus-level
+// onStart handler is assigned (mcu.i2c0.onStart = …), the FFI is consulted
+// for EVERY address on that bus (the handler itself decides ACK/NACK, so
+// scan() still enumerates only what the handler claims). Registry mode above
+// only calls FFI for pre-registered addresses (zero FFI otherwise).
+static mut I2C_HOST_PROMISC: [bool; 2] = [false; 2];
+
+/// Register/unregister a host slave address on a bus (0 = I2C0, 1 = I2C1).
+/// Wiring, not state: survives native_i2c_reset (see above).
+#[no_mangle]
+pub extern "C" fn native_i2c_set_host_slave(bus: u32, addr7: u32, enable: u32) {
+    unsafe {
+        if (bus as usize) < 2 && (addr7 as usize) < 128 {
+            I2C_HOST_ADDR[bus as usize][addr7 as usize] = enable != 0;
+        }
+    }
+}
+
+/// Query (for tests/diag): is this address host-claimed on this bus?
+#[no_mangle]
+pub extern "C" fn native_i2c_host_claimed(bus: u32, addr7: u32) -> u32 {
+    unsafe {
+        if (bus as usize) < 2 && (addr7 as usize) < 128 && I2C_HOST_ADDR[bus as usize][addr7 as usize] {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// Enable/disable promiscuous host mode on a bus (bus-level onStart style).
+/// Wiring, not state: survives native_i2c_reset.
+#[no_mangle]
+pub extern "C" fn native_i2c_set_promisc(bus: u32, enable: u32) {
+    unsafe {
+        if (bus as usize) < 2 {
+            I2C_HOST_PROMISC[bus as usize] = enable != 0;
+        }
     }
 }
 
@@ -427,6 +484,7 @@ pub fn i2c_bus_start(master: usize) {
             me.bus_expect_addr = true;
             me.bus_slave = None;
             me.bus_virt = false;
+            me.bus_host = false;
         }
     }
 }
@@ -448,6 +506,30 @@ pub fn i2c_bus_write_byte(master: usize, byte: u8, ctx: &mut CpuContext) -> bool
             None => return false,
         };
         if is_addr_phase {
+            // Host tap FIRST (esp32-emu.md §1): a registered host slave
+            // shadows sibling/virt at the same address (deterministic
+            // external-world-wins; the acceptance scan has no sibling
+            // anyway). The FFI consults the JS registry + bus-level onStart;
+            // 1 = host claims (ACK now, route data phases to FFI).
+            // Unregistered (or hookless) = legacy path below, untouched.
+            let host_claimed = unsafe {
+                (master < 2)
+                    && (addr as usize) < 128
+                    && (I2C_HOST_PROMISC[master] || I2C_HOST_ADDR[master][addr as usize])
+                    && crate::peripherals::common::ffi::js_i2c_slave_start(
+                        master as u32,
+                        addr,
+                        if is_read { 1 } else { 0 },
+                    ) != 0
+            };
+            if host_claimed {
+                if let Some(me) = I2CS[master].as_mut() {
+                    me.bus_slave = None;
+                    me.bus_virt = false;
+                    me.bus_host = true;
+                }
+                return true;
+            }
             // Match against the sibling's programmed slave address (0 = none).
             let matched = addr != 0
                 && I2CS[other]
@@ -460,6 +542,7 @@ pub fn i2c_bus_write_byte(master: usize, byte: u8, ctx: &mut CpuContext) -> bool
             if let Some(me) = I2CS[master].as_mut() {
                 me.bus_slave = if matched { Some(other) } else { None };
                 me.bus_virt = matched_virt;
+                me.bus_host = false;
             }
             // On match, drive the slave STATUS bits HW would show: addressed,
             // direction, and busy. The slave ISR/task keys on these
@@ -486,6 +569,14 @@ pub fn i2c_bus_write_byte(master: usize, byte: u8, ctx: &mut CpuContext) -> bool
         }
         // Phase 2: data byte on a matched slave WRITE transaction → slave RX.
         if !is_read {
+            // Host-claimed transaction (esp32-emu.md §1): route to the host
+            // model; its ACK decides (NACK mid-data → ACK_ERR + abort, HW parity).
+            if I2CS[master].as_ref().map(|me| me.bus_host).unwrap_or(false) {
+                let ack = unsafe {
+                    crate::peripherals::common::ffi::js_i2c_slave_write(master as u32, byte as u32)
+                };
+                return ack != 0;
+            }
             if I2CS[master].as_ref().map(|me| me.bus_virt).unwrap_or(false) {
                 cam_write_byte(byte);
                 return true;
@@ -517,10 +608,15 @@ pub fn i2c_bus_write_byte(master: usize, byte: u8, ctx: &mut CpuContext) -> bool
 
 pub fn i2c_bus_read_byte(master: usize, ctx: &mut CpuContext) -> u8 {
     unsafe {
-        let (is_read, virt) = match I2CS[master].as_ref() {
-            Some(me) => (me.bus_is_read, me.bus_virt),
-            _ => (false, false),
+        let (is_read, virt, host) = match I2CS[master].as_ref() {
+            Some(me) => (me.bus_is_read, me.bus_virt, me.bus_host),
+            _ => (false, false, false),
         };
+        // Host-claimed transaction (esp32-emu.md §1): the host model serves
+        // the byte synchronously (pre-staged queue or model function).
+        if is_read && host {
+            return crate::peripherals::common::ffi::js_i2c_slave_read(master as u32) as u8;
+        }
         if is_read && virt {
             return cam_read_byte();
         }
@@ -553,6 +649,21 @@ pub fn i2c_bus_read_byte(master: usize, ctx: &mut CpuContext) -> u8 {
 pub fn i2c_bus_stop(master: usize, ctx: &mut CpuContext) {
     unsafe {
         if let Some(me) = I2CS[master].as_mut() {
+            // Host-claimed transaction close (esp32-emu.md §1): model commit
+            // point (e.g. SSD1306 flushes its framebuffer here). No sibling
+            // STATUS/IRQ side-effects (no sibling involved).
+            if me.bus_host {
+                let was_read = me.bus_is_read;
+                me.bus_host = false;
+                me.bus_slave = None;
+                me.bus_expect_addr = true;
+                me.bus_virt = false;
+                crate::peripherals::common::ffi::js_i2c_slave_stop(
+                    master as u32,
+                    if was_read { 1 } else { 0 },
+                );
+                return;
+            }
             if let Some(si) = me.bus_slave {
                 let was_read = me.bus_is_read;
                 if let Some(s) = I2CS[si].as_mut() {
@@ -701,6 +812,28 @@ pub fn spi_bus_exchange(
         if !SPI_INIT {
             return None;
         }
+        // Host transfer tap FIRST (esp32-emu.md §2): when enabled, the host
+        // model sees every CPU-mode transaction and may claim it (external
+        // world wins over the sibling virtual bus; 0 = not claimed → fall
+        // through below). Synchronous: MOSI staged at the scratch, MISO
+        // staged back, length returned.
+        if (master_idx < 4) && SPI_HOST_HOOK[master_idx] {
+            let send_n = core::cmp::min(mosi.len(), 128);
+            for (i, b) in mosi[..send_n].iter().enumerate() {
+                SPI_XFER_MOSI[i] = *b;
+            }
+            let got = crate::peripherals::common::ffi::js_spi_transfer(
+                master_idx as u32,
+                send_n as u32,
+                recv_len,
+            ) as usize;
+            let take = core::cmp::min(core::cmp::min(got, recv_len as usize), 128);
+            if take > 0 {
+                let mut miso = [0u8; 128];
+                miso[..take].copy_from_slice(&SPI_XFER_MISO[..take]);
+                return Some((miso, take as u32));
+            }
+        }
         // Find a slave-enabled sibling (non-flash, not self).
         let mut slave_idx = None;
         for i in 0..4 {
@@ -765,6 +898,42 @@ pub extern "C" fn native_spi_flash_erase_done(idx: u32) {
             if let Some(s) = SPI[idx as usize].as_mut() { s.erase_done(); }
         }
     }
+}
+
+// ---- Host SPI transfer tap (esp32-emu.md §2) ----
+// Per-unit hook flag (wiring, survives reset) + 128B MOSI/MISO scratch.
+// When enabled, spi_bus_exchange stages MOSI at the scratch, calls
+// js_spi_transfer(bus, send_len, recv_len), and uses the returned MISO
+// length (0 = not claimed → fall through to sibling exchange, then
+// loopback). Fires once per CPU-mode (W-reg) transaction at CMD USR time —
+// the ESP32 equivalent of F1's per-DR-write onTransfer. DMA and
+// flash-controller transfers never call it (documented limitation).
+static mut SPI_HOST_HOOK: [bool; 4] = [false; 4];
+static mut SPI_XFER_MOSI: [u8; 128] = [0; 128];
+static mut SPI_XFER_MISO: [u8; 128] = [0; 128];
+
+/// Enable/disable the host transfer hook on an SPI unit (0..3 = SPI1, SPI0,
+/// SPI2, SPI3). Wiring, not state: survives native_spi_reset.
+#[no_mangle]
+pub extern "C" fn native_spi_set_transfer_hook(bus: u32, enable: u32) {
+    unsafe {
+        if (bus as usize) < 4 {
+            SPI_HOST_HOOK[bus as usize] = enable != 0;
+        }
+    }
+}
+
+/// Linear-memory scratch pointers for the js_spi_transfer exchange.
+/// The handler reads MOSI at the mosi ptr and stages MISO at the miso ptr.
+#[no_mangle]
+pub extern "C" fn native_spi_xfer_mosi_ptr() -> u32 {
+    unsafe { &mut SPI_XFER_MOSI as *mut [u8; 128] as u32 }
+}
+
+/// Linear-memory scratch pointers for the js_spi_transfer exchange.
+#[no_mangle]
+pub extern "C" fn native_spi_xfer_miso_ptr() -> u32 {
+    unsafe { &mut SPI_XFER_MISO as *mut [u8; 128] as u32 }
 }
 
 // ---- SHA ----
@@ -1200,6 +1369,97 @@ pub fn native_gpio_set_strap(val: u32) {
     }
 }
 
+// ---- Host GPIO output taps (esp32-emu.md §3) ----
+// Driven-output level / direction / pull readback + change events. All pure
+// reads of Rust pin state (fresh, never the JS input-value holder):
+// - output: selected output value (matrix output when matrix-driven, else
+//   GPIO OUT register value), 0/1. This is the driven value, not input.
+// - direction: 0 = in, 1 = out, 2 = inout (output-enable && input-enable).
+// - pull: 0 = none, 1 = up, 2 = down, 3 = both (internal or RTC pulls).
+// Change events fire from the output-update path (update_gpio, below) when
+// the driven level of an output-enabled pin changes AND the hook is enabled
+// via native_gpio_set_change_hook. Wiring, not state: survives reset (reset
+// clears pin state; the hook flag persists like soldered probes).
+/// Enable/disable GPIO output-change events (js_gpio_changed FFI).
+/// Wiring, not state: survives native_gpio_reset (edge state itself resets
+/// with the pins, so the first post-reset drive always fires).
+/// Exported via the exports.rs shim (like the other gpio bridges).
+pub extern "C" fn native_gpio_set_change_hook(enable: u32) {
+    unsafe {
+        crate::peripherals::common::gpio_core::GPIO_CHANGE_HOOK = enable != 0;
+    }
+}
+
+fn gpio_pin_output_level(pin_idx: usize) -> u32 {
+    unsafe {
+        if !GPIO_INIT {
+            return 0;
+        }
+        let g = gpio();
+        if pin_idx >= g.pins.len() {
+            return 0;
+        }
+        let pin = &g.pins[pin_idx];
+        // Selected output source (mirrors GpioPin::update's cond, without
+        // open-drain/pull resolution — the driven logic value).
+        // NOTE: matrix_output is stored POST-invert (matrix_out applies
+        // matrix_output_invert at set time), so no second invert here —
+        // re-inverting would flip the level (was a double-invert bug).
+        let cond = if pin.matrix_enable != 0 {
+            pin.matrix_output
+        } else {
+            pin.gpio_output
+        };
+        cond & 1
+    }
+}
+
+/// Driven output level of a pin (0/1). Fresh core-side read (esp32-emu.md §3).
+/// Exported via the exports.rs shim (like the other gpio bridges).
+pub extern "C" fn native_gpio_get_output(pin: u32) -> u32 {
+    gpio_pin_output_level(pin as usize)
+}
+
+/// Direction of a pin: 0 = in, 1 = out, 2 = inout.
+/// Exported via the exports.rs shim (like the other gpio bridges).
+pub extern "C" fn native_gpio_get_direction(pin: u32) -> u32 {
+    unsafe {
+        if !GPIO_INIT {
+            return 0;
+        }
+        let g = gpio();
+        if (pin as usize) >= g.pins.len() {
+            return 0;
+        }
+        let p = &g.pins[pin as usize];
+        let oe = p.output_enable_value != 0;
+        let ie = p.input_enable != 0;
+        match (oe, ie) {
+            (true, true) => 2,
+            (true, false) => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// Pull mode of a pin: 0 = none, 1 = up, 2 = down, 3 = both.
+/// Exported via the exports.rs shim (like the other gpio bridges).
+pub extern "C" fn native_gpio_get_pull(pin: u32) -> u32 {
+    unsafe {
+        if !GPIO_INIT {
+            return 0;
+        }
+        let g = gpio();
+        if (pin as usize) >= g.pins.len() {
+            return 0;
+        }
+        let p = &g.pins[pin as usize];
+        let up = (p.internal_pull_up != 0 || p.rtc_pull_up != 0) as u32;
+        let down = (p.internal_pull_down != 0 || p.rtc_pull_down != 0) as u32;
+        up | (down << 1)
+    }
+}
+
 // JS→Rust bridge: one-shot bulk seed — 41 u32 LE written by JS into the
 // GPIO_SEED_SCRATCH (native_gpio_seed_scratch): pins 0..39 input levels,
 // index 40 = strap value. Replaces the per-pin FFI round-trips
@@ -1296,6 +1556,17 @@ pub extern "C" fn native_mmio_read_debug(enabled: u32) {
 #[no_mangle]
 pub extern "C" fn native_diag_read(handler_id: u32, addr: u32, size: u32) -> u32 {
     native_mmio_read(handler_id, addr, size)
+}
+
+// MMIO backdoor write half (esp32-emu.md §10): drives a native peripheral
+// register synchronously from JS (tests, GDB-style pokes, host harnesses).
+// Same routing as the guest path (native_mmio_write → HID dispatch), so
+// tap hooks (I2C/SPI/GPIO) fire exactly as under firmware. Size in bits
+// (8/16/32); hid selects the handler (HID_GPIO = 5, HID_I2C = 10,
+// HID_SPI = 11, HID_LEDC = 16, … — see the HID_* consts above).
+#[no_mangle]
+pub extern "C" fn native_diag_write(handler_id: u32, addr: u32, val: u32, size: u32) {
+    native_mmio_write(handler_id, addr, val, size)
 }
 static mut FRC_TIMER: Option<FrcTimerPeripheral> = None;
 
@@ -11748,6 +12019,84 @@ pub extern "C" fn native_ledc_reset() {
         MmioPeripheral::reset(ledc());
         // Re-seed (JS chip.reset() re-applies Esp32FullResetValues each reset)
         seed_periph_base_strided(&mut ledc().base, &LEDC_SEED);
+    }
+}
+
+// ---- Host LEDC/PWM readback (esp32-emu.md §7) ----
+// Pure reads of channel/timer state (duty/frequency for servo/LED cells).
+// No behavior change: read-only, no FFI out. Channels 0..7 = high-speed,
+// 8..15 = low-speed (config hs_channels = 8, ls_channels = 8).
+
+/// Number of LEDC channels (16: 8 HS + 8 LS), 0 when uninitialized.
+#[no_mangle]
+pub extern "C" fn native_ledc_channel_count() -> u32 {
+    unsafe {
+        if !LEDC_INIT {
+            return 0;
+        }
+        ledc().channel_count as u32
+    }
+}
+
+/// Effective duty of a channel (current_duty incl. fade interpolation).
+#[no_mangle]
+pub extern "C" fn native_ledc_get_duty(ch: u32) -> u32 {
+    unsafe {
+        if !LEDC_INIT {
+            return 0;
+        }
+        let l = ledc();
+        if (ch as usize) < l.channel_count {
+            l.channels[ch as usize].current_duty
+        } else {
+            0
+        }
+    }
+}
+
+/// Selected timer index of a channel (into its speed group's timers).
+#[no_mangle]
+pub extern "C" fn native_ledc_get_timer(ch: u32) -> u32 {
+    unsafe {
+        if !LEDC_INIT {
+            return 0;
+        }
+        let l = ledc();
+        if (ch as usize) < l.channel_count {
+            l.channels[ch as usize].timer_index
+        } else {
+            0
+        }
+    }
+}
+
+/// Output frequency of a channel's selected timer, in Hz (0 = unconfigured).
+#[no_mangle]
+pub extern "C" fn native_ledc_get_freq(ch: u32) -> u32 {
+    unsafe {
+        if !LEDC_INIT {
+            return 0;
+        }
+        let ctx = make_ctx();
+        let l = ledc();
+        if (ch as usize) >= l.channel_count {
+            return 0;
+        }
+        let c = &l.channels[ch as usize];
+        let hs = (ch as usize) < l.config.hs_channels;
+        let t = c.timer_index as usize;
+        let f = if hs {
+            if t < l.hs_timer_count {
+                l.hs_timers[t].get_output_frequency(&ctx)
+            } else {
+                0.0
+            }
+        } else if t < l.ls_timer_count {
+            l.ls_timers[t].get_output_frequency(&ctx)
+        } else {
+            0.0
+        };
+        f as u32
     }
 }
 

@@ -3,6 +3,40 @@
 All notable changes to the `esp32-emu` package are documented here.
 This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
 
+## [Unreleased]
+
+### Added (esp32-emu.md §1–4 + §6–7: host peripheral taps)
+- I2C slave taps (`chip.i2c0`/`i2c1`): bus-level `onStart`/`onWrite`/`onRead`/
+  `onStop` (F1 parity) + per-address `attachSlave`/`detachSlave` with NACK at
+  unregistered addresses, `preloadRead` staging, write/event draining.
+  Synchronous Rust `js_i2c_slave_*` FFI; registry-gated (zero cost unattached).
+- SPI transfer taps (`chip.spi[0..3]`, user buses 2/HSPI + 3/VSPI): both
+  `onTransfer(tx, recvLen) → rx` and split `injectMiso` + `drainMosi`
+  supported; fires per CPU-mode transaction. Synchronous `js_spi_transfer`
+  FFI over scratch; DMA/flash transfers excluded.
+- GPIO output readback + events: `getGpioOut`/`getGpioDir`/`getGpioPull`,
+  `sampleGpioOut`, `onGpioOutChange` + `pollGpioChanges` (Rust
+  `native_gpio_get_*` + `js_gpio_changed` from GPIO and matrix paths).
+- Worker split for all of the above (`CMD_*` 28–38 + proxy methods:
+  `attachI2cSlave`/`pushI2cTx`/`popI2cRx`/`pollI2c`, `injectSpiMiso`/
+  `pollSpiTx`, `getGpioOut`/`sampleGpioOut`/`pollGpioChanges`,
+  `setAnalogInput`, `getLedc`), serviced inline mid-run.
+- `proxy.setAnalogInput(pin, volts)` (per-pin ADC inject runtime path) +
+  `chip.getAnalogInput`; `getLedcDuty`/`getLedcFreq`/`getLedcTimer` PWM
+  readback (+ worker `getLedc`) plus `getLedcPin(ch)` channel→GPIO
+  resolution via FUNC_OUT_SEL_CFG scan (+ worker `getLedcPin`).
+- `native_diag_write(hid, addr, val, size)` completes the MMIO backdoor
+  (the old facade `writeUint32` could not reach native pages).
+- `chip.reset()` zeroes `chip.cycles`; tap in-flight state clears while
+  wiring/preloads/listeners survive. Covered by `tests/test-taps-host.mjs`
+  (112 checks, no compile server needed).
+
+### Fixed
+- `GpioPin::reset` now clears the derived `output_enable_value` latch
+  (direction read stale-out after reset).
+- `seedNativeGpio` uses DataView (the seed scratch is not guaranteed
+  4-aligned across Rust static-layout shifts).
+
 ## [1.1.0] - 2026-10-01
 
 ### Changed
