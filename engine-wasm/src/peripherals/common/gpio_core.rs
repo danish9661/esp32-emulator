@@ -26,6 +26,11 @@ fn read_field_value(val: u32, field: &FieldDef) -> u32 {
 // matrix_out), never on input changes — zero cost when disabled (one bool).
 pub static mut GPIO_CHANGE_HOOK: bool = false;
 static mut GPIO_LAST_WIRE: [i32; 64] = [-1; 64];
+// Separate snapshot for the responder path (esp32-emu.md §11): it MUST NOT
+// share GPIO_LAST_WIRE — gpio_output_edge runs first at every call site and
+// would always leave prev == wire, so the responder could never fire
+// (observed: change events flowed, responder stayed silent forever).
+static mut GPIO_RESP_WIRE: [i32; 64] = [-1; 64];
 
 /// Edge-detect + fire for one pin. `oe`/`level` are the freshly computed
 /// output-enable and driven logic value. Undriven (oe == 0) only records.
@@ -48,6 +53,45 @@ pub fn gpio_output_edge(pin: usize, oe: u32, level: u32) {
 pub fn gpio_edge_reset() {
     unsafe {
         GPIO_LAST_WIRE = [-1; 64];
+        GPIO_RESP_WIRE = [-1; 64];
+    }
+}
+
+// ── Synchronous edge responder (esp32-emu.md §11, OneWire P1) ──
+// Per-pin registry (wiring, survives reset like the change hook). When set,
+// output edges AND releases on that pin synchronously notify the host model
+// with the APB tick, and IN-register reads consult the host override first.
+// This is what makes microsecond-slot protocols (OneWire) emulatable: the
+// model reacts in zero sim-time inside the guest's own MMIO write instead
+// of racing it from a 50ms host poll.
+pub static mut GPIO_RESPONDER: [bool; 64] = [false; 64];
+
+/// Current APB tick (low 32 bits) for responder timestamps.
+#[inline]
+fn edge_tick() -> u32 {
+    crate::native_mmio::clk_apb() as u32
+}
+
+/// Edge-detect + notify + release reporting for one pin. `oe`/`level` are
+/// the freshly computed output-enable and driven logic value (same inputs
+/// as gpio_output_edge). In addition to the change-hook path, responder
+/// pins ALWAYS report (level 0/1 on driven change, 2 on release-to-float)
+// via js_gpio_edge, and the new wire state is latched as an input level
+// so a subsequent IN read without override still sees something sane.
+pub fn gpio_output_respond(pin: usize, oe: u32, level: u32) {
+    if pin >= 64 {
+        return;
+    }
+    let wire: i32 = if oe != 0 { (level & 1) as i32 } else { -1 };
+    unsafe {
+        let prev = GPIO_RESP_WIRE[pin];
+        GPIO_RESP_WIRE[pin] = wire;
+        if !GPIO_RESPONDER[pin] || wire == prev {
+            return;
+        }
+        // 2 = released to float (undriven); 0/1 = driven level.
+        let ev = if wire < 0 { 2 } else { wire as u32 };
+        crate::peripherals::common::ffi::js_gpio_edge(pin as u32, ev, edge_tick());
     }
 }
 
@@ -547,9 +591,11 @@ impl GpioPin {
         self.matrix_output_enable = if self.matrix_output_enable_invert != 0 { if oe != 0 { 0 } else { 1 } } else { oe };
         self.update();
         // Host output tap (esp32-emu.md §3): matrix-driven edge (LEDC/PWM…).
+        // Synchronous responder (esp32-emu.md §11): OneWire-style models.
         let oe_now = self.output_enable_value;
         let lvl = if self.matrix_enable != 0 { self.matrix_output } else { self.gpio_output };
         gpio_output_edge(self.gpio_num as usize, oe_now, lvl & 1);
+        gpio_output_respond(self.gpio_num as usize, oe_now, lvl & 1);
     }
 }
 
@@ -665,9 +711,11 @@ impl<'a> GpioController<'a> {
             pin.update();
             // Host output tap (esp32-emu.md §3): GPIO-direct edge
             // (digitalWrite/pinMode path). Level = selected output source.
+            // Synchronous responder (esp32-emu.md §11) shares the edge.
             let oe_now = pin.output_enable_value;
             let lvl = if pin.matrix_enable != 0 { pin.matrix_output } else { pin.gpio_output };
             gpio_output_edge(i, oe_now, lvl & 1);
+            gpio_output_respond(i, oe_now, lvl & 1);
         }
     }
 
@@ -907,14 +955,43 @@ impl<'a> GpioController<'a> {
     }
 }
 
+/// Apply synchronous responder overrides to a GPIO IN bank read
+/// (esp32-emu.md §11). For each responder pin in the bank, the host model
+/// computes the read level as a pure function of (edge history, now) —
+// override wins over the latched input value; 2+ means no override.
+fn apply_read_override(bank: usize, mut val: u32) -> u32 {
+    unsafe {
+        for pin in (bank * 32)..((bank + 1) * 32).min(64) {
+            if !GPIO_RESPONDER[pin] {
+                continue;
+            }
+            let ov = crate::peripherals::common::ffi::js_gpio_read_override(
+                pin as u32,
+                edge_tick(),
+            );
+            if ov < 2 {
+                let bit = pin % 32;
+                if ov != 0 {
+                    val |= 1 << bit;
+                } else {
+                    val &= !(1 << bit);
+                }
+            }
+        }
+    }
+    val
+}
+
 impl<'a> MmioPeripheral for GpioController<'a> {
     fn read_u32(&mut self, _ctx: &mut CpuContext, addr: u32) -> u32 {
         let offset = addr.wrapping_sub(self.base_addr);
         let r = self.config;
         match offset as i32 {
             x if x == r.reg_strap => self.strap_value,
-            x if x == r.reg_syscon_tick_count_mask => self.input_values[0],
-            x if x == r.reg_in1 => self.input_values[1],
+            x if x == r.reg_syscon_tick_count_mask => {
+                apply_read_override(0, self.input_values[0])
+            }
+            x if x == r.reg_in1 => apply_read_override(1, self.input_values[1]),
             x if x == r.reg_status => self.int_status[0],
             x if x == r.reg_status1 => self.int_status[1],
             x if x == r.reg_acpu_int => self.int_status[0] & self.app_int_enable[0],

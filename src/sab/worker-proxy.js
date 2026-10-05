@@ -66,6 +66,13 @@ const CMD_SAMPLE_GPIO_OUT = 35; // → ARG1=120 + readResp 40x{level,dir,pull}
 const CMD_POLL_GPIO_CHANGES = 36; // → ARG1=count + readResp u32 (pin<<1|level)
 const CMD_SET_ANALOG_INPUT = 37; // ARG0=pin, ARG1=millivolts
 const CMD_GET_LEDC = 38; // ARG0=channel → ARG0=duty, ARG1=freqHz, ARG2=timer
+const CMD_I2S_POLL_TX = 39; // ARG0=idx → ARG1=word-count + readResp u32 LE words (guest→host TX)
+const CMD_I2S_TX_ARM = 40; // arm the TX hook (sticky wiring)
+const CMD_OW_ATTACH = 41; // ARG0=pin (attach DS18B20-compatible slave model)
+const CMD_OW_SET_TEMP = 42; // ARG0=pin, ARG1=millidegrees C (two's complement u32)
+const CMD_OW_POLL = 43; // ARG0=pin → ARG1=entry-count + readResp u32 (type<<24|payload)
+const CMD_OW_SCRATCH = 44; // ARG0=pin, ARG1=len + readResp bytes (preload scratchpad)
+const CMD_WRITE_MMIO = 45; // ARG0=hid, ARG1=addr, ARG2=val (32-bit native backdoor write)
 
 const RESP_IDLE = 0;
 const _RESP_DONE = 1;
@@ -572,6 +579,109 @@ class SimulatorWorker {
       if (sel === sig) return pin;
     }
     return -1;
+  }
+
+  /**
+   * Drain staged I2S TX DMA words for a controller (guest→host).
+   * @returns {Promise<number[]>} u32 words in DMA order.
+   */
+  async pollI2sTx(idx = 0) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, idx >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_I2S_POLL_TX);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    const dv = new DataView(this.readResp.buffer, this.readResp.byteOffset, Math.min(n * 4, this.readResp.length));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(dv.getUint32(i * 4, true) >>> 0);
+    return out;
+  }
+
+  /** Arm the I2S TX hook (sticky wiring; staging starts on next TX DMA). */
+  async armI2sTx() {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_I2S_TX_ARM);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /**
+   * Attach a DS18B20-compatible OneWire slave model to a pin (P1).
+   * The model answers presence + ROM/scratchpad reads synchronously on
+   * sim-time ticks — no host round-trip, so microsecond slots hold.
+   */
+  async attachOneWire(pin) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, pin >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_OW_ATTACH);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /** Set the OneWire model's temperature in °C (recomputes scratchpad + CRC). */
+  async setOneWireTemp(pin, celsius) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, pin >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, (Math.round(Number(celsius) * 1000) | 0) >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_OW_SET_TEMP);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /** Replace the OneWire model's scratchpad (8 bytes → CRC recomputed; 9 used as-is). */
+  async preloadOneWireScratch(pin, bytes) {
+    this._checkReady();
+    const arr = Uint8Array.from(bytes ?? []).slice(0, 9);
+    this.readResp.set(arr, 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, pin >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, arr.length);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_OW_SCRATCH);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /**
+   * Drain the OneWire model's decoded master traffic since the last poll.
+   * @returns {Promise<{log:Array<{t:string,byte?:number}>,presence:number}>}
+   */
+  async pollOneWire(pin) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, pin >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_OW_POLL);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    const dv = new DataView(this.readResp.buffer, this.readResp.byteOffset, Math.min(n * 4, this.readResp.length));
+    const log = [];
+    let presence = 0;
+    for (let i = 0; i < n; i++) {
+      const w = dv.getUint32(i * 4, true);
+      if ((w >>> 24) === 1) { log.push({ t: 'presence' }); presence++; }
+      else if ((w >>> 24) === 2) log.push({ t: 'byte', byte: w & 0xff });
+    }
+    return { log, presence };
+  }
+
+  /**
+   * 32-bit native MMIO backdoor write (mirrors readMmio; same HID dispatch
+   * as the guest path, so tap hooks fire identically).
+   */
+  async writeMmio(hid, addr, value) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, hid >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, addr >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG2, value >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_WRITE_MMIO);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
   }
 
   /**

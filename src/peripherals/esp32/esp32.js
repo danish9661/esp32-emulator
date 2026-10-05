@@ -39,7 +39,7 @@ import { writePartitionTable, parseMacAddress, parseFirmwareOffset } from "../co
 import { applyBoardPreset } from "../../boards/esp32-cam.js";
 import { XtensaCore } from "../../engine/esp-xtensa/xtensa-core.js";
 import { WasmLoader } from "../../engine/esp-xtensa/wasm-loader.js";
-import { I2cTap, SpiTap } from "../common/bus-taps.js";
+import { I2cTap, SpiTap, OneWireDevice } from "../common/bus-taps.js";
 import * as WM from "../../engine/wasm-memory-layout.js";
 
 // Interrupt enum (local copy, matches factory)
@@ -267,6 +267,14 @@ class ESP32 {
     // opportunistically at the end of step() when listeners exist.
     this._gpioChangeQueue = [];
     this._gpioChangeListeners = [];
+    // OneWire slave devices, pin -> OneWireDevice (esp32-emu.md §11, P1).
+    // Wiring survives reset (soldered); parse state clears in reset().
+    this.onewire = new Map();
+    // I2S TX capture queues, idx -> u32[] (esp32-emu.md §9). Staged by the
+    // loader's _i2sTxDataHook when armed (onI2sTx subscribe); drained by
+    // pollI2sTx(). Bounded (drop-oldest); cleared on reset.
+    this._i2sTxQueue = [[], []];
+    this._i2sTxListeners = [];
     const uartConfig = {
         hasTXState: true,
         toutMultiply: true,
@@ -527,6 +535,8 @@ class ESP32 {
       this.spi2?._resetFlight?.();
       this.spi3?._resetFlight?.();
       if (this._gpioChangeQueue) this._gpioChangeQueue.length = 0;
+      for (const dev of this.onewire?.values?.() ?? []) dev?._resetFlight?.();
+      if (this._i2sTxQueue) { this._i2sTxQueue[0].length = 0; this._i2sTxQueue[1].length = 0; }
     } catch {}
     for (let e of this.cores) e.reset();
     if (this._wasmCores) { for (let wc of this._wasmCores) wc.reset(); }
@@ -586,6 +596,10 @@ class ESP32 {
       if (this._gpioChangeListeners?.length) {
         this._wasmLoader?.exports?.native_gpio_set_change_hook?.(1);
       }
+      for (const pin of this.onewire?.keys?.() ?? []) {
+        try { this._wasmLoader?.exports?.native_gpio_set_responder?.(pin >>> 0, 1); } catch {}
+      }
+      if (this._i2sTxListeners?.length) this._armI2sTxHook();
     } catch {}
   }
 
@@ -655,6 +669,97 @@ class ESP32 {
   /** Read back a configured per-pin analog voltage (volts, undefined when unset). */
   getAnalogInput(pin) {
     return this.analogVolts?.[pin];
+  }
+
+  // ---- OneWire slave devices (esp32-emu.md §11, P1) ----
+  /**
+   * Attach a OneWire slave model (DS18B20-compatible subset) to a pin.
+   * Post-create safe; wiring survives reset (ROM/scratchpad/temperature
+   * survive, parse state clears). Arms the synchronous Rust edge responder
+   * for the pin (zero cost otherwise). Returns the device.
+   */
+  attachOneWire(pin, device = null) {
+    pin >>>= 0;
+    let dev = this.onewire.get(pin) ?? null;
+    if (!dev) {
+      dev = device instanceof OneWireDevice ? device : new OneWireDevice(pin);
+      dev.pin = pin;
+      this.onewire.set(pin, dev);
+    } else if (device instanceof OneWireDevice) {
+      this.onewire.set(pin, device);
+      device.pin = pin;
+      dev = device;
+    }
+    try { this._wasmLoader?.exports?.native_gpio_set_responder?.(pin, 1); } catch {}
+    return dev;
+  }
+
+  /** Detach a OneWire slave model from a pin. */
+  detachOneWire(pin) {
+    pin >>>= 0;
+    this.onewire.delete(pin);
+    try { this._wasmLoader?.exports?.native_gpio_set_responder?.(pin, 0); } catch {}
+  }
+
+  /** FFI sink for js_gpio_edge (never throws; pure dispatch). */
+  _onGpioEdge(pin, level, tick) {
+    try { this.onewire.get(pin >>> 0)?._ffiEdge(level >>> 0, tick >>> 0); } catch {}
+  }
+
+  /** FFI sink for js_gpio_read_override (never throws; 2 = no override). */
+  _onGpioReadOverride(pin, tick) {
+    try {
+      const dev = this.onewire.get(pin >>> 0);
+      if (!dev) return 2;
+      return dev._ffiRead(tick >>> 0) & 0xff;
+    } catch { return 2; }
+  }
+
+  // ---- I2S TX capture (esp32-emu.md §9) ----
+  /** Arm the TX hook (wiring; survives reset). Called by onI2sTx. */
+  _armI2sTxHook() {
+    try { this._wasmLoader?.exports?.native_i2s_set_tx_hook?.(1); } catch {}
+  }
+  /**
+   * Subscribe to guest→host I2S TX DMA words. Returns an unsubscribe fn.
+   * Staged per controller idx; drain with pollI2sTx (host-driven, never
+   * re-entrant). Listener must not re-enter the engine.
+   */
+  onI2sTx(cb) {
+    if (typeof cb !== 'function') return () => {};
+    this._i2sTxListeners.push(cb);
+    this._armI2sTxHook();
+    return () => {
+      const i = this._i2sTxListeners.indexOf(cb);
+      if (i >= 0) this._i2sTxListeners.splice(i, 1);
+    };
+  }
+  /** Drain staged TX words: pollI2sTx() → both, pollI2sTx(idx) → one. Fans out to listeners. */
+  pollI2sTx(idx = null) {
+    const out = [];
+    const idxs = idx === null ? [0, 1] : [idx >>> 0];
+    for (const i of idxs) {
+      const q = this._i2sTxQueue?.[i];
+      if (q?.length) {
+        const words = q.splice(0);
+        out.push({ idx: i, words });
+        for (const cb of [...this._i2sTxListeners]) {
+          try { cb(i, words); } catch (e) { console.warn(`[I2S-TAP] listener threw: ${e?.message || e}`); }
+        }
+      }
+    }
+    return out;
+  }
+  /** FFI sink for js_i2s_tx_data (never throws; bounded staging). */
+  _onI2sTxData(idx, words) {
+    try {
+      const q = this._i2sTxQueue?.[idx >>> 0];
+      if (!q) return;
+      for (const w of words) {
+        q.push(w >>> 0);
+        if (q.length > 16384) q.shift();
+      }
+    } catch {}
   }
 
   // ---- LEDC/PWM readback (esp32-emu.md §7) ----

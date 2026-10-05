@@ -201,3 +201,22 @@ extern "C" {
 extern "C" {
     pub fn js_gpio_changed(pin: u32, level: u32);
 }
+
+// GPIO synchronous edge responder (esp32-emu.md §11, OneWire P1) —
+// timing-critical protocols (OneWire slots are 60–120us; host SAB polling
+// at 50ms wall can NEVER react in-slot). The responder runs synchronously
+// inside the guest's own MMIO write, on sim-time ticks:
+// - js_gpio_edge(pin, level, tick): notify on every driven change AND on
+//   release-to-float (level 2). Fired ONLY for pins with an attached
+//   responder (native_gpio_set_responder). Return void.
+// - js_gpio_read_override(pin, tick): consulted on IN-register reads for
+//   responder pins BEFORE the latched input value. Return 0/1 to drive the
+//   read, 2+ for no override (use latched). Lets a slave model answer
+//   purely as a function of (edge history, current tick) — e.g. OneWire
+//   presence pulses and read-slot bits — with zero timed-drive machinery.
+// tick = low 32 bits of the 80MHz APB counter (wraps ~53s; deltas are
+// wrapping-safe). Handlers MUST be synchronous pure-JS (no WASM re-entry).
+extern "C" {
+    pub fn js_gpio_edge(pin: u32, level: u32, tick: u32);
+    pub fn js_gpio_read_override(pin: u32, tick: u32) -> u32;
+}

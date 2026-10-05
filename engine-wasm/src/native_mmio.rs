@@ -1390,6 +1390,21 @@ pub extern "C" fn native_gpio_set_change_hook(enable: u32) {
     }
 }
 
+// ---- Synchronous GPIO edge responder (esp32-emu.md §11, OneWire P1) ----
+// Per-pin registry (wiring, survives reset): attached pins report every
+// driven change AND release-to-float to js_gpio_edge with APB ticks, and
+// IN-register reads consult js_gpio_read_override first. This is what makes
+// microsecond-slot protocols emulatable without host round-trips.
+#[no_mangle]
+pub extern "C" fn native_gpio_set_responder(pin: u32, enable: u32) {
+    unsafe {
+        if (pin as usize) < 64 {
+            crate::peripherals::common::gpio_core::GPIO_RESPONDER[pin as usize] =
+                enable != 0;
+        }
+    }
+}
+
 fn gpio_pin_output_level(pin_idx: usize) -> u32 {
     unsafe {
         if !GPIO_INIT {

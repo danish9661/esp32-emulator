@@ -27,6 +27,24 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
   resolution via FUNC_OUT_SEL_CFG scan (+ worker `getLedcPin`).
 - `native_diag_write(hid, addr, val, size)` completes the MMIO backdoor
   (the old facade `writeUint32` could not reach native pages).
+- I2S TX tap (§9): `onI2sTx` + `pollI2sTx` stage guest→host DMA words
+  (existing Rust hook, previously unwired) + worker `armI2sTx`/`pollI2sTx`
+  (`CMD_I2S_POLL_TX` 39 / `CMD_I2S_TX_ARM` 40).
+- OneWire P1 (§11): DS18B20-compatible `OneWireDevice` (reset/presence,
+  SKIP/READ ROM, CONVERT, READ SCRATCHPAD + authentic Dallas CRC8) driven by
+  synchronous Rust edge/release notifications with APB-tick stamps
+  (`js_gpio_edge` + `js_gpio_read_override`, per-pin
+  `native_gpio_set_responder`) — microsecond slots hold with zero host
+  round-trips. `chip.attachOneWire` + worker `attachOneWire`/
+  `setOneWireTemp`/`preloadOneWireScratch`/`pollOneWire` (`CMD_OW_*` 41–44).
+- Worker `writeMmio(hid, addr, val)` 32-bit backdoor write (`CMD_WRITE_MMIO`
+  45); worker auto-arms the GPIO change hook at setup (early edges staged).
+- SDIO slave / USB-device audited: stub + unwired dead code respectively —
+  no tap applies (documented in esp32-emu.md §11).
+- Acceptance cells (real firmware): `test-worker-i2s-tx` (TX pattern),
+  `test-worker-onewire` (bit-bang presence/CRC/23.5°C/ROM),
+  `test-worker-i2c-oled` (vramFill=1024), `test-worker-spi-max7219`
+  (8 digits), `test-worker-gpio-led` (SAB level + edges).
 - `chip.reset()` zeroes `chip.cycles`; tap in-flight state clears while
   wiring/preloads/listeners survive. Covered by `tests/test-taps-host.mjs`
   (112 checks, no compile server needed).

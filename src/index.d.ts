@@ -151,6 +151,20 @@ export class SimulatorWorker {
   getLedc(channel: number): Promise<{ duty: number; freq: number; timer: number }>;
   /** GPIO pin driven by an LEDC channel (-1 = none). */
   getLedcPin(channel: number): Promise<number>;
+  /** Drain staged I2S TX DMA words for a controller (guest→host). */
+  pollI2sTx(idx?: number): Promise<number[]>;
+  /** Arm the I2S TX hook (sticky wiring). */
+  armI2sTx(): Promise<void>;
+  /** Attach a DS18B20-compatible OneWire slave model to a pin. */
+  attachOneWire(pin: number): Promise<void>;
+  /** Set the OneWire model's temperature in °C. */
+  setOneWireTemp(pin: number, celsius: number): Promise<void>;
+  /** Replace the OneWire model's scratchpad (8 bytes → CRC recomputed; 9 used as-is). */
+  preloadOneWireScratch(pin: number, bytes: number[] | Uint8Array): Promise<void>;
+  /** Drain the OneWire model's decoded master traffic since the last poll. */
+  pollOneWire(pin: number): Promise<{ log: Array<{ t: string; byte?: number }>; presence: number }>;
+  /** 32-bit native MMIO backdoor write (mirrors readMmio). */
+  writeMmio(hid: number, addr: number, value: number): Promise<void>;
 }
 
 // ---- Host peripheral taps (esp32-emu.md §1-2) ----
@@ -187,6 +201,20 @@ export class SpiTap {
   injectMiso(bytes: number[] | Uint8Array): number;
   drainMosi(maxBytes?: number): number[];
   pollTx(maxBytes?: number): number[];
+}
+
+export function dallasCrc8(bytes: number[] | Uint8Array): number;
+
+export class OneWireDevice {
+  constructor(pin: number);
+  pin: number;
+  rom: number[];
+  scratchpad: number[];
+  log: Array<{ t: string; byte?: number }>;
+  presenceCount: number;
+  setTemperature(celsius: number): number;
+  preloadScratch(bytes: number[] | Uint8Array): void;
+  pollLog(): { log: Array<{ t: string; byte?: number }>; presence: number };
 }
 
 export class MultiSimulator {
@@ -271,6 +299,16 @@ export class ESP32 {
   getLedcFreq(ch: number): number;
   /** GPIO pin driven by an LEDC channel (-1 = none). */
   getLedcPin(ch: number): number;
+  /** Attach a DS18B20-compatible OneWire slave model to a pin. Returns the device. */
+  attachOneWire(pin: number, device?: OneWireDevice): OneWireDevice;
+  /** Detach a OneWire slave model from a pin. */
+  detachOneWire(pin: number): void;
+  /** Subscribe to guest→host I2S TX DMA words. Returns an unsubscribe function. */
+  onI2sTx(cb: (idx: number, words: Uint32Array) => void): () => void;
+  /** Drain staged I2S TX words: pollI2sTx() → both controllers, pollI2sTx(idx) → one. */
+  pollI2sTx(idx?: number | null): Array<{ idx: number; words: number[] }>;
+  /** OneWire slave devices by pin. */
+  onewire: Map<number, OneWireDevice>;
 }
 
 /** Facade exposing WASM core state (PC, regs, ccompare) to JS. Does NOT execute. */

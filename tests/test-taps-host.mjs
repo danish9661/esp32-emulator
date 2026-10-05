@@ -6,7 +6,7 @@
 //   I2C master WRITE/READ/NACK via COMD programming, SPI transfer echo.
 // Part C (Worker, ROM-only): SAB plumbing for all 11 tap CMDs (no deadlock,
 //   sane values).
-import { ESP32, SimulatorWorker, I2cTap, SpiTap } from '../src/index.js';
+import { ESP32, SimulatorWorker, I2cTap, SpiTap, OneWireDevice, dallasCrc8 } from '../src/index.js';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -96,6 +96,53 @@ async function partA() {
   assert(i2c.events.length === 0, 'reset clears staged events');
   assert(i2c._ffiStart(0x3c, true) === 1 && i2c._ffiRead() === 0x11, 'reset keeps preloads');
   i2c.pollEvents();
+
+  // OneWire device model (pure timing simulation on synthetic APB ticks)
+  assert(dallasCrc8([0x28, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]) === new OneWireDevice(4).rom[7], 'dallas CRC8 matches ROM CRC');
+  const ow = new OneWireDevice(4);
+  ow.setTemperature(23.5);
+  assert(ow.scratchpad[0] === 0x78 && ow.scratchpad[1] === 0x01, 'setTemperature encodes 23.5°C (0x0178)');
+  assert(ow.scratchpad[8] === dallasCrc8(ow.scratchpad.slice(0, 8)), 'scratchpad CRC authentic');
+  const T = (us) => Math.round(us * 80); // APB ticks
+  let now = 1000000;
+  const fall = () => ow._ffiEdge(0, now);
+  const releaseAfter = (lowUs) => { now += T(lowUs); ow._ffiEdge(2, now); };
+  const writeBit = (b) => { fall(); releaseAfter(b ? 5 : 70); };
+  const writeByte = (v) => { for (let i = 0; i < 8; i++) writeBit((v >> i) & 1); now += T(70); };
+  const readBit = () => { fall(); releaseAfter(5); now += T(10); return ow._ffiRead(now); };
+  const readByte = () => { let v = 0; for (let i = 0; i < 8; i++) v |= readBit() << i; now += T(70); return v; };
+  fall(); releaseAfter(500); // reset pulse
+  assert(ow.presenceCount === 1, 'reset pulse arms presence');
+  now += T(70);
+  assert(ow._ffiRead(now) === 0, 'presence pulse reads 0 in-window');
+  now += T(300);
+  assert(ow._ffiRead(now) === 1, 'bus idles high after presence window');
+  writeByte(0xcc); writeByte(0xbe); // SKIP ROM + READ SCRATCHPAD
+  const got = [];
+  for (let i = 0; i < 9; i++) got.push(readByte());
+  assert(JSON.stringify(got) === JSON.stringify(ow.scratchpad), 'scratchpad reads back byte-exact');
+  assert(dallasCrc8(got.slice(0, 8)) === got[8], 'served scratchpad CRC verifies');
+  const logged = ow.pollLog();
+  assert(logged.presence === 1, 'presence logged');
+  assert(JSON.stringify(logged.log.filter((e) => e.t === 'byte').map((e) => e.byte)) === '[204,190]', 'command bytes logged');
+  ow._resetFlight();
+  assert(ow.pollLog().log.length === 0, 'onewire reset clears log');
+
+  // I2S TX staging (no WASM: direct _onI2sTxData)
+  {
+    const c0 = makeChip();
+    const seen = [];
+    const unsub = c0.onI2sTx((idx, words) => seen.push([idx, Array.from(words)]));
+    c0._onI2sTxData(0, [1, 2, 3]);
+    c0._onI2sTxData(1, [9]);
+    const drained = c0.pollI2sTx();
+    assert(drained.length === 2 && JSON.stringify(drained[0].words) === '[1,2,3]', 'pollI2sTx drains per-idx queues');
+    assert(seen.length === 2, 'onI2sTx listener fired');
+    unsub();
+    c0._onI2sTxData(0, [7]);
+    c0.reset();
+    assert(c0.pollI2sTx(0).length === 0, 'reset clears i2s tx queues');
+  }
 
   // SPI tap
   const spi = new SpiTap(fakeChip, 2);

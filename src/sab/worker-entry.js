@@ -47,6 +47,7 @@ function hashMem(data, maxBytes) {
 
 const CMD_NONE = 0, CMD_RUN = 1, CMD_RESET = 2, CMD_SEED_MMU = 3, CMD_WRITE_UINT32 = 4, CMD_READ_MEMORY = 5, CMD_GET_PCAP = 6, CMD_GET_WIFI_STATS = 7, CMD_STEP = 8, CMD_DESTROY = 9, CMD_GET_FFI_COUNTS = 10, CMD_READ_MMIO = 11, CMD_UART_RX = 12, CMD_SET_PIN_INPUT = 13, CMD_SET_TOUCH_INPUT = 14, CMD_SET_VOLTAGE = 15, CMD_FEED_I2S_RX = 16, CMD_SEND_TWAI = 17, CMD_PUSH_TWAI = 18, CMD_GET_TWAI_TX = 19, CMD_WATCHPOINT = 20, CMD_PCTRACE = 21, CMD_PRESS_RESET = 22, CMD_PRESS_BOOT = 23, CMD_BT_HCI_POLL = 24, CMD_BT_HCI_PUSH = 25, CMD_BT_HCI_RESP = 26, CMD_BT_HCI_SEND = 27;
 const CMD_I2C_SET_SLAVE = 28, CMD_I2C_TX_PUSH = 29, CMD_I2C_RX_POP = 30, CMD_I2C_POLL = 31, CMD_SPI_INJECT = 32, CMD_SPI_POLL = 33, CMD_GET_GPIO_OUT = 34, CMD_SAMPLE_GPIO_OUT = 35, CMD_POLL_GPIO_CHANGES = 36, CMD_SET_ANALOG_INPUT = 37, CMD_GET_LEDC = 38;
+const CMD_I2S_POLL_TX = 39, CMD_I2S_TX_ARM = 40, CMD_OW_ATTACH = 41, CMD_OW_SET_TEMP = 42, CMD_OW_POLL = 43, CMD_OW_SCRATCH = 44, CMD_WRITE_MMIO = 45;
 const _RESP_IDLE = 0, RESP_DONE = 1, RESP_ERROR = 2;
 
 const UART_RING_SIZE = 16384;
@@ -376,6 +377,67 @@ function doGetLedc() {
   Atomics.store(ctrl, SAB_CMD_ARG1, freq);
   Atomics.store(ctrl, SAB_CMD_ARG2, timer);
 }
+function doI2sPollTx() {
+  const idx = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  let n = 0;
+  if (readResp && chip?.pollI2sTx) {
+    try {
+      const groups = chip.pollI2sTx(idx);
+      const words = [];
+      for (const g of groups) for (const w of g.words) words.push(w >>> 0);
+      const dv = new DataView(readResp.buffer, readResp.byteOffset, readResp.length);
+      n = Math.min(words.length, Math.floor(readResp.length / 4));
+      for (let i = 0; i < n; i++) dv.setUint32(i * 4, words[i], true);
+    } catch {}
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doI2sTxArm() {
+  try { chip?._armI2sTxHook?.(); } catch {}
+}
+function doOwAttach() {
+  try { chip?.attachOneWire?.(Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0); } catch {}
+}
+function doOwSetTemp() {
+  try {
+    const pin = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+    const mc = Atomics.load(ctrl, SAB_CMD_ARG1) | 0;
+    chip?.onewire?.get?.(pin)?.setTemperature?.(mc / 1000);
+  } catch {}
+}
+function doOwPoll() {
+  const pin = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  let n = 0;
+  if (readResp && chip?.onewire?.get?.(pin)?.pollLog) {
+    try {
+      const { log } = chip.onewire.get(pin).pollLog();
+      const dv = new DataView(readResp.buffer, readResp.byteOffset, readResp.length);
+      n = Math.min(log.length, Math.floor(readResp.length / 4));
+      for (let i = 0; i < n; i++) {
+        const e = log[i];
+        dv.setUint32(i * 4, (e.t === 'presence' ? (1 << 24) : (2 << 24) | (e.byte & 0xff)) >>> 0, true);
+      }
+    } catch {}
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doOwScratch() {
+  try {
+    const pin = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+    const len = Math.min(Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0, 9, readResp?.length ?? 0);
+    chip?.onewire?.get?.(pin)?.preloadScratch?.(readResp.subarray(0, len));
+  } catch {}
+}
+function doWriteMmio() {
+  try {
+    chip?._wasmLoader?.exports?.native_diag_write?.(
+      Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0,
+      Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0,
+      Atomics.load(ctrl, SAB_CMD_ARG2) >>> 0,
+      32,
+    );
+  } catch {}
+}
 
 function finishSim() {
   ctrl[SAB_RUN] = 0;
@@ -656,6 +718,41 @@ async function runSimChunk() {
       }
       if (Atomics.load(ctrl, SAB_CMD) === CMD_GET_LEDC) {
         try { doGetLedc(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_I2S_POLL_TX) {
+        try { doI2sPollTx(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_I2S_TX_ARM) {
+        try { doI2sTxArm(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_OW_ATTACH) {
+        try { doOwAttach(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_OW_SET_TEMP) {
+        try { doOwSetTemp(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_OW_POLL) {
+        try { doOwPoll(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_OW_SCRATCH) {
+        try { doOwScratch(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_WRITE_MMIO) {
+        try { doWriteMmio(); } catch {}
         Atomics.store(ctrl, SAB_RESP, RESP_DONE);
         Atomics.store(ctrl, SAB_CMD, CMD_NONE);
       }
@@ -1032,6 +1129,13 @@ function processCommand(cmd) {
     case CMD_POLL_GPIO_CHANGES: { doPollGpioChanges(); break; }
     case CMD_SET_ANALOG_INPUT: { doSetAnalogInput(); break; }
     case CMD_GET_LEDC: { doGetLedc(); break; }
+    case CMD_I2S_POLL_TX: { doI2sPollTx(); break; }
+    case CMD_I2S_TX_ARM: { doI2sTxArm(); break; }
+    case CMD_OW_ATTACH: { doOwAttach(); break; }
+    case CMD_OW_SET_TEMP: { doOwSetTemp(); break; }
+    case CMD_OW_POLL: { doOwPoll(); break; }
+    case CMD_OW_SCRATCH: { doOwScratch(); break; }
+    case CMD_WRITE_MMIO: { doWriteMmio(); break; }
     // CMD_BT_HCI_RESP: copy the last stashed JSON control line (see the
     // socket 'data' handler) into readResp, report length in ARG1
     // (0 = none pending). Lets the host test consume connect/read results
@@ -1087,7 +1191,7 @@ function blockingCommandLoop() {
     if (cmd !== CMD_NONE) {
       let ok = true;
       try {
-        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT || cmd === CMD_BT_HCI_POLL || cmd === CMD_BT_HCI_PUSH || cmd === CMD_BT_HCI_RESP || cmd === CMD_BT_HCI_SEND || cmd === CMD_I2C_SET_SLAVE || cmd === CMD_I2C_TX_PUSH || cmd === CMD_I2C_RX_POP || cmd === CMD_I2C_POLL || cmd === CMD_SPI_INJECT || cmd === CMD_SPI_POLL || cmd === CMD_GET_GPIO_OUT || cmd === CMD_SAMPLE_GPIO_OUT || cmd === CMD_POLL_GPIO_CHANGES || cmd === CMD_SET_ANALOG_INPUT || cmd === CMD_GET_LEDC) {
+        if (cmd === CMD_STEP || cmd === CMD_RESET || cmd === CMD_SEED_MMU || cmd === CMD_WRITE_UINT32 || cmd === CMD_READ_MEMORY || cmd === CMD_GET_PCAP || cmd === CMD_GET_WIFI_STATS || cmd === CMD_READ_MMIO || cmd === CMD_UART_RX || cmd === CMD_SET_PIN_INPUT || cmd === CMD_SET_TOUCH_INPUT || cmd === CMD_SET_VOLTAGE || cmd === CMD_FEED_I2S_RX || cmd === CMD_SEND_TWAI || cmd === CMD_PUSH_TWAI || cmd === CMD_GET_TWAI_TX || cmd === CMD_WATCHPOINT || cmd === CMD_PCTRACE || cmd === CMD_PRESS_RESET || cmd === CMD_PRESS_BOOT || cmd === CMD_BT_HCI_POLL || cmd === CMD_BT_HCI_PUSH || cmd === CMD_BT_HCI_RESP || cmd === CMD_BT_HCI_SEND || cmd === CMD_I2C_SET_SLAVE || cmd === CMD_I2C_TX_PUSH || cmd === CMD_I2C_RX_POP || cmd === CMD_I2C_POLL || cmd === CMD_SPI_INJECT || cmd === CMD_SPI_POLL || cmd === CMD_GET_GPIO_OUT || cmd === CMD_SAMPLE_GPIO_OUT || cmd === CMD_POLL_GPIO_CHANGES || cmd === CMD_SET_ANALOG_INPUT || cmd === CMD_GET_LEDC || cmd === CMD_I2S_POLL_TX || cmd === CMD_I2S_TX_ARM || cmd === CMD_OW_ATTACH || cmd === CMD_OW_SET_TEMP || cmd === CMD_OW_POLL || cmd === CMD_OW_SCRATCH || cmd === CMD_WRITE_MMIO) {
           processCommand(cmd);
         } else if (cmd === CMD_RUN) {
           ctrl[SAB_STATUS] = 0;
@@ -1718,6 +1822,14 @@ async function onMessage(type, data) {
             // 8b. BT HCI proxy (Bumble virtual controller) — opt-in ONLY
             // via config.btHciProxy; default OFF (no behavior change).
             try { setupBtHciProxy(chip, config); } catch (e) { console.error('[BT-HCI] setup FAILED:', e?.message || e); }
+
+            // 8c. GPIO output-change capture (esp32-emu.md §3) — ALWAYS armed
+            // in the worker (unlike the main-thread subscribe-to-arm): early
+            // firmware edges (setup-time drives) must already be staged
+            // when the host first polls, and the queue is bounded
+            // (4096, drop-oldest) with one FFI per real edge. No behavior
+            // change to the guest (pure observation).
+            try { chip._wasmLoader?.exports?.native_gpio_set_change_hook?.(1); } catch (_) {}
 
             // 9. Virtual-camera frame size (finite sensor frame per capture;
             // host-known, e.g. 160*120*2 for QQVGA RGB565).

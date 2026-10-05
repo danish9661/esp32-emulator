@@ -326,11 +326,26 @@ js_log_u32: (val) => {
 
 
       // Native I2S TX data hook — forwards consumed DMA TX words to the JS
-      // host (JS parity with I2sPeripheral.onTxData).
+      // host (JS parity with I2sPeripheral.onTxData). Stages on the chip
+      // (chip._onI2sTxData → pollI2sTx); the legacy _i2sTxDataHook override
+      // still runs first when installed. NEVER throws (FFI must not unwind).
       js_i2s_tx_data: (idx, ptr, len) => {
-        if (!this._i2sTxDataHook) return;
-        const words = new Uint32Array(this.memBytes().slice(ptr, ptr + len * 4).buffer);
-        this._i2sTxDataHook(idx, words);
+        try {
+          const words = new Uint32Array(this.memBytes().slice(ptr, ptr + len * 4).buffer);
+          try { this._i2sTxDataHook?.(idx, words); } catch {}
+          this.esp32?._onI2sTxData?.(idx >>> 0, words);
+        } catch {}
+      },
+      // Synchronous GPIO edge responder (esp32-emu.md §11, OneWire P1).
+      // Notify on every responder-pin driven change AND release (level 2),
+      // with the APB tick for slot timing. Read override answers IN reads
+      // as a pure function of (edge history, now). NEVER throws.
+      js_gpio_edge: (pin, level, tick) => {
+        try { this.esp32?._onGpioEdge?.(pin >>> 0, level >>> 0, tick >>> 0); } catch {}
+      },
+      js_gpio_read_override: (pin, tick) => {
+        try { return this.esp32?._onGpioReadOverride?.(pin >>> 0, tick >>> 0) ?? 2; }
+        catch { return 2; }
       },
       // Host I2C slave taps (esp32-emu.md §1) — synchronous dispatch to the
       // per-bus tap objects (chip.i2c0/i2c1). NEVER throws: FFI must not

@@ -1,5 +1,6 @@
-// Host peripheral taps (esp32-emu.md §1-4) — JS models for I2C slaves and SPI
-// transfers, plus the registry sync that arms the Rust FFI hooks.
+// Host peripheral taps (esp32-emu.md §1-4, §9, §11) — JS models for I2C slaves,
+// SPI transfers, I2S TX capture and OneWire slaves, plus the registry sync
+// that arms the Rust FFI hooks.
 //
 // Design (documented contract):
 // - Registration is WIRING (survives chip.reset(), like soldered devices).
@@ -267,6 +268,9 @@ export class SpiTap {
     this.misoQueue = [];
     /** Captured MOSI bytes since last drain (host observability). */
     this.mosiLog = [];
+    /** Capture-only arming (injectMiso called, even empty — the host is
+     * observing a write-only device like MAX7219 and stages no MISO). */
+    this._captureArmed = false;
   }
 
   get _exports() { return this.chip?._wasmLoader?.exports ?? null; }
@@ -275,14 +279,16 @@ export class SpiTap {
     const ex = this._exports;
     if (!ex) return;
     try {
-      if (this.onTransfer || this.misoQueue.length) {
+      if (this.onTransfer || this.misoQueue.length || this._captureArmed) {
         ex.native_spi_set_transfer_hook?.(this.bus, 1);
       }
     } catch {}
   }
 
-  /** Pre-stage MISO bytes for future master reads (split mode). Survives reset. */
+  /** Pre-stage MISO bytes for future master reads (split mode). Survives reset.
+   * Calling with an empty array arms capture-only observation (no MISO). */
   injectMiso(bytes) {
+    this._captureArmed = true;
     for (const b of bytes ?? []) {
       this.misoQueue.push(b & 0xff);
       if (this.misoQueue.length > 4096) this.misoQueue.shift();
@@ -321,5 +327,192 @@ export class SpiTap {
       return this.misoQueue.splice(0, n);
     }
     return [];
+  }
+}
+
+/**
+ * Dallas CRC8 (poly 0x8C reversed, init 0) — the DS18B20 scratchpad/ROM CRC.
+ * Firmware (DallasTemperature) rejects reads with a bad CRC, so the model
+ * must serve authentic bytes.
+ */
+export function dallasCrc8(bytes) {
+  let crc = 0;
+  for (const byte of bytes ?? []) {
+    let b = byte & 0xff;
+    for (let i = 0; i < 8; i++) {
+      const mix = (crc ^ b) & 1;
+      crc >>>= 1;
+      if (mix) crc ^= 0x8c;
+      b >>>= 1;
+    }
+  }
+  return crc & 0xff;
+}
+
+/**
+ * OneWire slave tap — DS18B20-compatible subset (esp32-emu.md §11, P1).
+ *
+ * Why a synchronous edge responder instead of host polling: OneWire slots
+ * are 60–120us and the host SAB poll runs at 50ms wall — polling can NEVER
+ * react in-slot. Instead the model runs synchronously inside the guest's
+ * own MMIO writes (Rust js_gpio_edge / js_gpio_read_override FFI on
+ * sim-time APB ticks): edges are observed with exact tick stamps, and IN
+ * reads are answered as a pure function of (edge history, now). Wall speed
+ * is irrelevant; busy-spun firmware keeps sim:wall ≈ 1 anyway.
+ *
+ * Supported: reset + presence pulse, SKIP ROM (0xCC), READ ROM (0x33),
+ * CONVERT T (0x44), READ SCRATCHPAD (0xBE, 9 bytes incl. CRC). Single-drop
+ * only (no SEARCH ROM — document the limit; enough for DallasTemperature
+ * cells with one sensor). LSB-first, like the wire.
+ *
+ * Timing (us): reset low ≥ 480 → presence 0 for ≤ 250 after release;
+ * slot release < 30 (after a >0 fall) → 1-bit / read-slot start;
+ * release ≥ 30 (and < 480) → 0-bit. Read sampling is the master's business
+ * (it reads IN at +15us); the model just serves the next TX bit.
+ */
+export class OneWireDevice {
+  constructor(pin) {
+    this.pin = pin >>> 0;
+    this.rom = [0x28, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00];
+    this.rom[7] = dallasCrc8(this.rom.slice(0, 7));
+    this.scratchpad = [0x50, 0x05, 0x4b, 0x46, 0x7f, 0xff, 0x0c, 0x10, 0x00];
+    this._fixScratchCrc();
+    this._resetState();
+    /** Decoded master traffic for host verification: [{t:'presence'} | {t:'byte', byte}] */
+    this.log = [];
+    this.presenceCount = 0;
+  }
+
+  _fixScratchCrc() {
+    this.scratchpad[8] = dallasCrc8(this.scratchpad.slice(0, 8));
+  }
+
+  /** Set temperature in °C (12-bit, 1/16th units, two's complement). */
+  setTemperature(celsius) {
+    const raw = Math.max(-880, Math.min(880, Math.round(Number(celsius) * 16)));
+    const u = raw & 0xffff;
+    this.scratchpad[0] = u & 0xff;
+    this.scratchpad[1] = (u >> 8) & 0xff;
+    this._fixScratchCrc();
+    return raw / 16;
+  }
+
+  /** Replace the scratchpad (8 bytes → CRC recomputed; 9 bytes used as-is). */
+  preloadScratch(bytes) {
+    const arr = Array.from(bytes ?? []).slice(0, 9).map((b) => b & 0xff);
+    for (let i = 0; i < Math.min(8, arr.length); i++) this.scratchpad[i] = arr[i];
+    if (arr.length >= 9) this.scratchpad[8] = arr[8];
+    else this._fixScratchCrc();
+  }
+
+  _resetState() {
+    this.state = 'idle'; // idle | presence | cmd | serving
+    this.lastFallTick = -1;
+    this.cmdByte = 0;
+    this.cmdBits = 0;
+    this.txBytes = [];
+    this.txBit = 0;
+  }
+
+  /** Clear transient parse state (chip.reset(); ROM/scratchpad survive). */
+  _resetFlight() {
+    this._resetState();
+    this.log.length = 0;
+    this.presenceCount = 0;
+  }
+
+  _usSince(tick, ref) {
+    return (((tick >>> 0) - (ref >>> 0)) >>> 0) / 80;
+  }
+
+  // ---- FFI-facing (synchronous, never throws) ----
+  /** Edge notify: level 0 = fall, 1 = drive-high, 2 = release-to-float. tick = APB. */
+  _ffiEdge(level, tick) {
+    tick >>>= 0;
+    if (level === 0) {
+      this.lastFallTick = tick;
+      return;
+    }
+    // Release (or driven high — the master only ever releases high here).
+    if (this.lastFallTick < 0) return;
+    const lowUs = this._usSince(tick, this.lastFallTick);
+    this.lastFallTick = -1;
+    if (lowUs >= 480) {
+      // Reset pulse → presence armed.
+      this.state = 'presence';
+      this.resetTick = tick;
+      this.presenceCount++;
+      this.log.push({ t: 'presence' });
+      this.cmdByte = 0;
+      this.cmdBits = 0;
+      return;
+    }
+    if (lowUs < 30) this._slotBit(1);
+    else this._slotBit(0);
+  }
+
+  _slotBit(bit) {
+    if (this.state === 'serving') {
+      // Read slot: the value is ours (served on the following IN read);
+      // nothing to accumulate — but a stray write-slot here would corrupt
+      // framing, so ignore short releases while serving (the read consumes).
+      return;
+    }
+    if (this.state !== 'cmd' && this.state !== 'presence') return;
+    this.state = 'cmd';
+    this.cmdByte |= (bit & 1) << this.cmdBits;
+    this.cmdBits++;
+    if (this.cmdBits >= 8) {
+      const byte = this.cmdByte & 0xff;
+      this.log.push({ t: 'byte', byte });
+      this.cmdByte = 0;
+      this.cmdBits = 0;
+      this._dispatch(byte);
+    }
+  }
+
+  _dispatch(byte) {
+    if (byte === 0xcc) { this.state = 'cmd'; } // SKIP ROM → next byte is a function
+    else if (byte === 0x44) { this.state = 'idle'; } // CONVERT T (instant in emulation)
+    else if (byte === 0xbe) { this._serve(this.scratchpad); } // READ SCRATCHPAD
+    else if (byte === 0x33) { this._serve(this.rom); } // READ ROM
+    else { this.state = 'idle'; } // unknown → idle (real slaves ignore)
+  }
+
+  _serve(bytes) {
+    this.txBytes = Array.from(bytes);
+    this.txBit = 0;
+    this.state = 'serving';
+  }
+
+  /** IN-read override: pure function of (state, now). 2 = no override. */
+  _ffiRead(tick) {
+    tick >>>= 0;
+    if (this.state === 'presence') {
+      // Presence pulse: 0 while within the window, bus-high after — but the
+      // session STAYS armed until command bits arrive or a new reset comes.
+      // (Disarming here would drop the ROM/function bytes the master sends
+      // right after sampling presence — the normal Dallas flow.)
+      if (this.resetTick !== undefined && this._usSince(tick, this.resetTick) <= 250) return 0;
+      return 1;
+    }
+    if (this.state === 'serving') {
+      if (this.txBit >= this.txBytes.length * 8) {
+        this.state = 'idle';
+        return 1;
+      }
+      const bit = (this.txBytes[this.txBit >> 3] >> (this.txBit & 7)) & 1;
+      this.txBit++;
+      return bit;
+    }
+    return 2; // no override — use latched input
+  }
+
+  /** Drain decoded master traffic + presence count for host verification. */
+  pollLog() {
+    const log = this.log.splice(0);
+    const presence = this.presenceCount;
+    this.presenceCount = 0;
+    return { log, presence };
   }
 }
