@@ -29,7 +29,8 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
   (the old facade `writeUint32` could not reach native pages).
 - I2S TX tap (§9): `onI2sTx` + `pollI2sTx` stage guest→host DMA words
   (existing Rust hook, previously unwired) + worker `armI2sTx`/`pollI2sTx`
-  (`CMD_I2S_POLL_TX` 39 / `CMD_I2S_TX_ARM` 40).
+  (`CMD_I2S_POLL_TX` 39 / `CMD_I2S_TX_ARM` 40). Direct-chip
+  `feedI2sRxSample` twin of the worker `feedI2SRX` sample path.
 - OneWire P1 (§11): DS18B20-compatible `OneWireDevice` (reset/presence,
   SKIP/READ ROM, CONVERT, READ SCRATCHPAD + authentic Dallas CRC8) driven by
   synchronous Rust edge/release notifications with APB-tick stamps
@@ -39,21 +40,101 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
   `setOneWireTemp`/`preloadOneWireScratch`/`pollOneWire` (`CMD_OW_*` 41–44).
 - Worker `writeMmio(hid, addr, val)` 32-bit backdoor write (`CMD_WRITE_MMIO`
   45); worker auto-arms the GPIO change hook at setup (early edges staged).
+- RMT single-wire sensor tap (DHT22): `chip.rmt` (`RmtTap`, exported from
+  the package index). Guest→host TX capture per channel (`onRmtTx` +
+  `pollRmtTx` → items + zero terminator + tick rate; armed per channel via
+  `native_rmt_set_tx_hook`, unarmed channels keep loopback bit-for-bit) and
+  host→guest RX inject (`injectRmtRx`: immediate delivery when RX-armed,
+  else pending for the next RX_EN arm — sensor-answers-start parity; RAM +
+  MEM_OWNER + WADDR + RX_END like loopback). `getRmtTickHz` (APB/ref ÷
+  divider) for host-model µs↔tick conversion, plus `RmtTap.item`/
+  `splitItem`/`usToTicks` word helpers. Worker split `armRmtTx`/
+  `pollRmtTx`/`injectRmtRx`/`getRmtTickHz` (`CMD_RMT_*` 46–49), serviced
+  inline mid-run. Pre-WASM injects stage locally and flush through the real
+  path at loadWasm (failure-atomic).
+- Camera frame tap + OV2640 sensor model: `onCameraFrame`/`pollCameraFrame`
+  stage sensor bytes consumed by I2S RX DMA in camera mode (per-DMA-chunk
+  `js_i2s_cam_data`, armed via `native_i2s_set_cam_hook` — sits next to the
+  I2S TX tap), `setCameraFrameBytes`/`getCameraFrameBytes` size the
+  virtual-sensor frame (`native_i2s_cam_frame_bytes` + new
+  `native_i2s_cam_frame_len`). Host→sensor feed for scripted scenes:
+  `feedCameraFrame`/`cameraFeedLength` (chunked 4KB exchange over
+  `native_i2s_cam_feed_scratch_ptr`; a full staged frame replaces the ramp
+  for exactly one capture, short staging stays queued, empty feed clears;
+  cap one QQVGA RGB565 frame) + worker `feedCameraFrame`/`cameraFeedLength`
+  (`CMD_CAM_FEED` 55 / `CMD_CAM_FEED_LEN` 56). `Ov2640` (exported) models
+  the SCCB slave (0x30, PID 0x26/0x42, reg-pointer protocol with STOP-commit
+  log, `attachToI2c` reuses the I2C tap) plus the DVP expectation
+  (`frameBytes`/`expectedFrame` = the engine ramp, byte-exact for firmware
+  cells). `chip.attachOv2640`/`detachOv2640` wire it to a bus. Worker split
+  `armCamera`/`pollCameraFrame`/`setCameraFrameBytes`/`getCameraFrameBytes`/
+  `attachCameraSccb` (`CMD_CAM_*` 50–54), serviced inline mid-run.
 - SDIO slave / USB-device audited: stub + unwired dead code respectively —
   no tap applies (documented in esp32-emu.md §11).
 - Acceptance cells (real firmware): `test-worker-i2s-tx` (TX pattern),
   `test-worker-onewire` (bit-bang presence/CRC/23.5°C/ROM),
   `test-worker-i2c-oled` (vramFill=1024), `test-worker-spi-max7219`
-  (8 digits), `test-worker-gpio-led` (SAB level + edges).
+  (8 digits), `test-worker-gpio-led` (SAB level + edges),
+  `test-worker-rmt-dht` (DHT22 start-pulse capture + host sensor answer:
+  echo verified, 55.5% RH / 23.5°C decoded, checksum), `test-worker-camera`
+  (real esp-camera init over the OV2640 SCCB model + QQVGA RGB565 ramp frame
+  + frame-tap staging proof), `test-worker-camera-fed` (host-fed scripted
+  scene found byte-exact in the frame-tap stream).
 - `chip.reset()` zeroes `chip.cycles`; tap in-flight state clears while
   wiring/preloads/listeners survive. Covered by `tests/test-taps-host.mjs`
-  (112 checks, no compile server needed).
+  (302 checks, no compile server needed).
 
 ### Fixed
 - `GpioPin::reset` now clears the derived `output_enable_value` latch
   (direction read stale-out after reset).
 - `seedNativeGpio` uses DataView (the seed scratch is not guaranteed
   4-aligned across Rust static-layout shifts).
+- `LedcChannel::start_fade` degenerate latch stores `duty >> 4`
+  (2026-10-06): the DUTY register holds driver `<<4` format
+  (`ledc_ll_set_duty_int_part`) but `current_duty` is integer scale, so
+  plain `ledc_set_duty` + `ledc_update_duty` read back 16x
+  (`getLedcDuty` 32768 for a 13-bit 2048; guest `DUTY_RD>>4` likewise).
+  `getLedcDuty`/`DUTY_RD` now return the integer duty; zero-state (0)
+  unchanged. Covered by 10 new MMIO-driven checks in
+  `tests/test-taps-host.mjs` (148 checks: programmed timer/duty/freq/pin, sensor
+  write-pointer + repeated-START read with `0xFF` over-read fill,
+  capture-only SPI arm) — 141 checks total, plus re-verified firmware
+  cells (`gpio-led`, `i2c-oled`, `spi-max7219`, `onewire`, `i2s-tx`,
+  `pwm`, `analog`, `twai`, `rmt`).
+- v3 pin-API LEDC duty latch (2026-10-06): Arduino-3.x
+  `ledcWrite(pin, duty)` (`ledc_set_duty` + `ledc_update_duty`) stages
+  INC/NUM=1/CYCLE=1/SCALE=0 filler in CONF1 (`ledc_duty_config`) with the
+  new duty in DUTY; `DUTY_START` then ran it as a 1-step fade to
+  `start+1`, so `ledcAttach(16, 5000, 8)` + `ledcWrite(16, 192)` read back
+  duty 1 (stable, fade never configured — proven live via firmware:
+  host `getLedc(0)` and guest `ledcRead()` both returned 1 @ 5000 Hz).
+  `START` with NUM=1/CYCLE=1/SCALE=0 now latches `DUTY>>4` like hardware;
+  genuine stepped fades always carry SCALE!=0 or CYCLE!=1 or NUM!=1
+  (unchanged path — `test-worker-pwm` fade still reads exactly 255).
+  Covered by a v3 register-replay case in `tests/test-taps-host.mjs`
+  (now 154 checks) plus the live-firmware transcript (192 @ 5000 Hz).
+- Slow-cadence v3 LEDC duty (2026-10-07): the 1-step filler also armed a
+  real 16000-APB-tick fade pre-fix, so under coarse SAB-worker stepping
+  (browser cadence) the guest `DUTY_RD` sampled mid-fade read 0 while the
+  host tap sampled post-fade read 1 — neither the DUTY register (guest 0)
+  nor `current_duty` (host 1) ever showed the staged 192. The START latch
+  above already fixes the model (both read 192 at any cadence — verified
+  slow via real Arduino 3.3.10 firmware through the SAB `CMD_GET_LEDC`
+  path: guest `ledcRead(16)` = 192 ×5, host ch0 = 192 @ 5000 Hz, pin 16,
+  ch1–7 duty 0, raw `CONF1=0x40100400/DUTY=DUTY_RD=0xC00/hstimer0
+  res8/div16000`). No further model change. Covered by two slow-cadence
+  cases in `tests/test-taps-host.mjs` (now 167 checks): a throttled direct
+  replay (3.84M instructions interleaved between writes) and a worker SAB
+  replay (`writeMmio` program + 1.5 s coarse poll + `getLedc`/`readMmio`
+  readback with a timer-elapse guard).
+- `readMmio` deadlocked mid-run (2026-10-07): `CMD_READ_MMIO` was the only
+  tap/backdoor command missing from the `runSimChunk` inline servicing —
+  `writeMmio`/`getLedc`/I2C/SPI/GPIO/OneWire were all served inline, but a
+  `readMmio` issued while `RUN=1` spun forever (found via the slow SAB
+  LEDC case: `writeMmio` + `getLedc` answered in 0 ms, `readMmio` never).
+  `doReadMmio()` now shares one body between `processCommand` and the
+  inline block (same pattern as the other tap CMDs); idle behavior
+  unchanged. The SAB slow-cadence LEDC case above guards it.
 
 ## [1.1.0] - 2026-10-01
 

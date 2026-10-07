@@ -165,6 +165,28 @@ export class SimulatorWorker {
   pollOneWire(pin: number): Promise<{ log: Array<{ t: string; byte?: number }>; presence: number }>;
   /** 32-bit native MMIO backdoor write (mirrors readMmio). */
   writeMmio(hid: number, addr: number, value: number): Promise<void>;
+  /** Arm RMT guest→host TX capture on a channel (sticky wiring). */
+  armRmtTx(ch: number): Promise<void>;
+  /** Drain staged RMT TX item words for a channel (guest→host, incl. terminator). */
+  pollRmtTx(ch?: number): Promise<number[]>;
+  /** Stage host→guest RMT RX items (≤ 64 words). Returns words staged. */
+  injectRmtRx(ch: number, words: number[] | Uint8Array): Promise<number>;
+  /** RMT channel tick rate in Hz (host-model µs↔tick conversion). */
+  getRmtTickHz(ch: number): Promise<number>;
+  /** Arm the camera-frame hook on a controller (sticky wiring). */
+  armCamera(idx?: number): Promise<void>;
+  /** Drain staged camera sensor bytes for a controller (guest→host). */
+  pollCameraFrame(idx?: number): Promise<number[]>;
+  /** Set the virtual-sensor frame size in bytes for a controller. */
+  setCameraFrameBytes(idx: number, len: number): Promise<void>;
+  /** Virtual-sensor frame size in bytes for a controller. */
+  getCameraFrameBytes(idx?: number): Promise<number>;
+  /** Attach an in-worker OV2640 SCCB sensor model on an I2C bus. */
+  attachCameraSccb(bus?: number, addr?: number): Promise<void>;
+  /** Feed host-side sensor bytes for upcoming captures (scripted scenes). */
+  feedCameraFrame(idx: number, bytes: number[] | Uint8Array): Promise<number>;
+  /** Staged (unconsumed) host-fed sensor bytes, for flow control. */
+  cameraFeedLength(idx?: number): Promise<number>;
 }
 
 // ---- Host peripheral taps (esp32-emu.md §1-2) ----
@@ -217,6 +239,36 @@ export class OneWireDevice {
   pollLog(): { log: Array<{ t: string; byte?: number }>; presence: number };
 }
 
+export class RmtTap {
+  constructor(chip: ESP32);
+  txQueue: number[][];
+  txListeners: Array<Array<(ch: number, items: number[], tickHz: number) => void>>;
+  onRmtTx(ch: number, cb: (ch: number, items: number[], tickHz: number) => void): () => void;
+  pollRmtTx(ch?: number | null): Array<{ ch: number; items: number[]; tickHz: number }>;
+  injectRmtRx(ch: number, words: number[] | Uint8Array): number;
+  getRmtTickHz(ch: number): number;
+  static item(d0: number, l0: number, d1: number, l1: number): number;
+  static splitItem(w: number): { d0: number; l0: number; d1: number; l1: number };
+  static usToTicks(us: number, hz: number): number;
+}
+
+export class Ov2640 {
+  constructor();
+  addr: number;
+  regs: Uint8Array;
+  width: number;
+  height: number;
+  format: string;
+  sccbLog: Array<{ reg: number; bytes: number[] }>;
+  attachToI2c(i2cTap: I2cTap, addr?: number): unknown;
+  detachFromI2c(): void;
+  drainSccbLog(): Array<{ reg: number; bytes: number[] }>;
+  setResolution(w: number, h: number): void;
+  setFormat(f: string): void;
+  frameBytes(): number;
+  expectedFrame(): Uint8Array;
+}
+
 export class MultiSimulator {
   constructor();
   nodes: Array<{ chip: ESP32; [key: string]: unknown }>;
@@ -266,6 +318,8 @@ export class ESP32 {
   spi2: SpiTap;
   spi3: SpiTap;
   spi: SpiTap[];
+  /** Host RMT single-wire sensor tap (DHT22): per-channel TX capture + RX inject. */
+  rmt: RmtTap;
 
   loadROM(cpuVal: Uint8Array): void;
   loadWasm(wasmBytes: Uint8Array | ArrayBuffer, enabled?: string): Promise<void>;
@@ -303,10 +357,28 @@ export class ESP32 {
   attachOneWire(pin: number, device?: OneWireDevice): OneWireDevice;
   /** Detach a OneWire slave model from a pin. */
   detachOneWire(pin: number): void;
+  /** Feed one I2S RX sample word (pairs combine per rx_chan_mod). */
+  feedI2sRxSample(idx: number, sample: number): void;
   /** Subscribe to guest→host I2S TX DMA words. Returns an unsubscribe function. */
   onI2sTx(cb: (idx: number, words: Uint32Array) => void): () => void;
   /** Drain staged I2S TX words: pollI2sTx() → both controllers, pollI2sTx(idx) → one. */
   pollI2sTx(idx?: number | null): Array<{ idx: number; words: number[] }>;
+  /** Subscribe to guest→host camera sensor bytes (I2S RX DMA in camera mode). */
+  onCameraFrame(idx: number | ((idx: number, words: number[]) => void), cb?: (idx: number, words: number[]) => void): () => void;
+  /** Drain staged sensor bytes: pollCameraFrame() → both, pollCameraFrame(idx) → one. */
+  pollCameraFrame(idx?: number | null): Array<{ idx: number; words: number[] }>;
+  /** Virtual-sensor frame size in bytes for a controller (host framing). */
+  setCameraFrameBytes(idx: number, len: number): void;
+  /** Read back the configured virtual-sensor frame size (0 when WASM absent). */
+  getCameraFrameBytes(idx: number): number;
+  /** Attach an OV2640 sensor model as an SCCB slave on an I2C bus. Returns the model. */
+  attachOv2640(bus?: number, addr?: number, model?: Ov2640): Ov2640;
+  /** Detach an OV2640 sensor model from an I2C bus. */
+  detachOv2640(bus?: number, addr?: number): void;
+  /** Feed host-side sensor bytes for upcoming captures (0 staged pre-WASM). */
+  feedCameraFrame(idx: number, bytes: number[] | Uint8Array): number;
+  /** Staged (unconsumed) host-fed sensor bytes (0 when WASM absent). */
+  cameraFeedLength(idx: number): number;
   /** OneWire slave devices by pin. */
   onewire: Map<number, OneWireDevice>;
 }

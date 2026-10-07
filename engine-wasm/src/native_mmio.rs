@@ -12292,6 +12292,81 @@ pub extern "C" fn native_rmt_reset() {
     }
 }
 
+// ---- Host RMT tap (DHT22-style single-wire sensors) ----
+// Guest TX capture + host RX inject. Additive-only: with no hook armed and
+// no pending inject, the TX/loopback path is bit-for-bit unchanged (the
+// capture branch is one bool check at transmit_done; inject only runs when
+// the host calls it).
+
+/// Arm/disarm guest→host TX capture on a channel (0..7). Wiring, not
+/// state: survives native_rmt_reset. When armed, each completed TX reports
+/// its channel-RAM item words (+ zero terminator) via js_rmt_tx_items.
+#[no_mangle]
+pub extern "C" fn native_rmt_set_tx_hook(ch: u32, enable: u32) {
+    unsafe {
+        if !RMT_INIT || ch >= 8 { return; }
+        let p = rmt();
+        if (ch as usize) < p.channel_count as usize {
+            p.channels[ch as usize].tx_hook = if enable != 0 { 1 } else { 0 };
+        }
+    }
+}
+
+/// Linear-memory scratch for the host→engine RX inject exchange: the host
+/// stages raw 32-bit item words here (LE), then calls native_rmt_rx_inject.
+static mut RMT_RX_SCRATCH_IN: [u8; 256] = [0u8; 256];
+
+#[no_mangle]
+pub extern "C" fn native_rmt_rx_scratch_ptr() -> u32 {
+    unsafe { &mut RMT_RX_SCRATCH_IN as *mut [u8; 256] as u32 }
+}
+
+/// Host RMT RX inject: copy nwords item words from linear memory at ptr
+/// into channel ch's pending staging. If the channel is RX-armed, delivers
+/// immediately (RAM + MEM_OWNER + WADDR + RX_END); otherwise the words stay
+/// pending and deliver on the next RX_EN arm (sensor-answers-start parity).
+/// Returns words staged (0..64). Pending = preload: survives reset.
+#[no_mangle]
+pub extern "C" fn native_rmt_rx_inject(ch: u32, ptr: u32, nwords: u32) -> u32 {
+    unsafe {
+        if !RMT_INIT || ch >= 8 { return 0; }
+        let n = core::cmp::min(nwords as usize, 64);
+        if n == 0 { return 0; }
+        let p = rmt();
+        if (ch as usize) >= p.channel_count as usize { return 0; }
+        let src = core::slice::from_raw_parts(ptr as *const u8, n * 4);
+        let c = &mut p.channels[ch as usize];
+        for i in 0..n {
+            c.rx_pending[i] = (src[i * 4] as u32)
+                | ((src[i * 4 + 1] as u32) << 8)
+                | ((src[i * 4 + 2] as u32) << 16)
+                | ((src[i * 4 + 3] as u32) << 24);
+        }
+        c.rx_pending_len = n as u32;
+        if c.rx_enabled != 0 {
+            let mut buf = [0u32; 64];
+            buf[..n].copy_from_slice(&c.rx_pending[..n]);
+            c.rx_pending_len = 0;
+            let mut ctx = make_ctx();
+            p.deliver_host_rx(&mut ctx, ch as usize, &buf[..n]);
+        }
+        n as u32
+    }
+}
+
+/// RMT channel tick rate in Hz (clock parent ÷ divider) for host-model
+/// µs↔tick conversion (DHT22 slots are specified in µs, items in ticks).
+#[no_mangle]
+pub extern "C" fn native_rmt_tick_hz(ch: u32) -> u32 {
+    unsafe {
+        if !RMT_INIT || ch >= 8 { return 0; }
+        let p = rmt();
+        if (ch as usize) >= p.channel_count as usize { return 0; }
+        let ctx = make_ctx();
+        p.channels[ch as usize].clock_freq_hz(&ctx) as u32
+    }
+}
+
 fn rmt_read_region(addr: u32, size: u32) -> u32 {
     if unsafe { !RMT_INIT } { return 0; }
     let mut ctx = make_ctx();
@@ -12459,6 +12534,97 @@ pub extern "C" fn native_i2s_cam_frame_bytes(idx: u32, len: u32) {
         }
         if let Some(ref mut p) = I2SS[idx as usize] {
             p.camera_frame_bytes = len;
+        }
+    }
+}
+
+/// Virtual-camera frame size readback (host framing: pollCameraFrame words
+/// assemble into frames of exactly this many sensor bytes).
+#[no_mangle]
+pub extern "C" fn native_i2s_cam_frame_len(idx: u32) -> u32 {
+    unsafe {
+        if !I2S_INIT || idx > 1 {
+            return 0;
+        }
+        if let Some(ref p) = I2SS[idx as usize] {
+            p.camera_frame_bytes
+        } else {
+            0
+        }
+    }
+}
+
+/// Arm/disarm the host camera-frame hook on a controller (0..1). Wiring,
+/// not state: survives native_i2s_reset. When armed, sensor bytes consumed
+/// by RX DMA in camera mode are reported via js_i2s_cam_data.
+#[no_mangle]
+pub extern "C" fn native_i2s_set_cam_hook(idx: u32, enable: u32) {
+    unsafe {
+        if !I2S_INIT || idx > 1 {
+            return;
+        }
+        if let Some(ref mut p) = I2SS[idx as usize] {
+            p.cam_frame_hook = enable != 0;
+        }
+    }
+}
+
+/// Host→sensor frame feed (OV2640 cells with scripted scenes): stage raw
+/// sensor bytes (one byte per DMA element) for upcoming captures. Appends
+/// up to one QQVGA RGB565 frame (38400B); returns bytes staged this call.
+/// A full staged frame replaces the ramp for exactly one capture (latched
+/// at capture start); short staging stays queued until topped up. Call
+/// with len 0 to clear the queue. Preload-ish: survives capture starts,
+/// cleared on native_i2s_reset.
+#[no_mangle]
+pub extern "C" fn native_i2s_cam_feed(idx: u32, ptr: u32, len: u32) -> u32 {
+    unsafe {
+        if !I2S_INIT || idx > 1 {
+            return 0;
+        }
+        if let Some(ref mut p) = I2SS[idx as usize] {
+            if len == 0 {
+                p.cam_host_len = 0;
+                p.cam_host_read = 0;
+                p.cam_host_active = false;
+                return 0;
+            }
+            let room = 38400usize.saturating_sub(p.cam_host_len);
+            let n = core::cmp::min(len as usize, room);
+            if n == 0 {
+                return 0;
+            }
+            let src = core::slice::from_raw_parts(ptr as *const u8, n);
+            p.cam_host_buf[p.cam_host_len..p.cam_host_len + n].copy_from_slice(src);
+            p.cam_host_len += n;
+            n as u32
+        } else {
+            0
+        }
+    }
+}
+
+/// Linear-memory scratch for the feed exchange (JS stages 4KB pieces here;
+/// the export appends them to the sensor queue, so frames of any staged
+/// size transfer without a 38KB static).
+static mut CAM_FEED_SCRATCH: [u8; 4096] = [0u8; 4096];
+
+#[no_mangle]
+pub extern "C" fn native_i2s_cam_feed_scratch_ptr() -> u32 {
+    unsafe { &mut CAM_FEED_SCRATCH as *mut [u8; 4096] as u32 }
+}
+
+/// Staged (unconsumed) host-fed sensor bytes, for host flow control.
+#[no_mangle]
+pub extern "C" fn native_i2s_cam_host_len(idx: u32) -> u32 {
+    unsafe {
+        if !I2S_INIT || idx > 1 {
+            return 0;
+        }
+        if let Some(ref p) = I2SS[idx as usize] {
+            p.cam_host_len as u32
+        } else {
+            0
         }
     }
 }

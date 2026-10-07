@@ -1,3 +1,11 @@
+// Camera host-feed cell: scripted sensor scenes through the published API.
+// Firmware captures 6 QQVGA RGB565 frames with the real esp-camera driver;
+// after the first capture lands, the host feeds one scripted frame
+// (F[i] = (i*13+7)&0xFF, never equal to the ramp at any index) via
+// feedCameraFrame. The frame-tap stream is searched post-hoc for F's
+// signature — deterministic regardless of wall/sim pacing (consumption is
+// latched at capture start; the tap reports every consumed byte).
+// Requires the compile server (:5525). No gateway needed.
 import { SimulatorWorker } from '../src/index.js';
 import axios from 'axios';
 import { readFileSync } from 'fs';
@@ -16,12 +24,6 @@ async function compile(code) {
   }
 }
 
-// Real esp-camera driver against the virtual OV2640: SCCB probe + full
-// register init over the native I2C master, then one RGB565 QQVGA frame via
-// I2S0 camera DMA. The sensor serves PID (0x26) + file-backed init regs;
-// DVP bytes are the virtual-camera ramp (byte[i] = i & 0xFF). The host
-// pulses VSYNC (GPIO 25) while the frame is awaited — capture itself is
-// synchronous once VSYNC arrives (no tight timing).
 const firmware = `
 #include "esp_camera.h"
 #define CAM_PIN_PWDN 32
@@ -42,8 +44,7 @@ const firmware = `
 #define CAM_PIN_PCLK 22
 void setup() {
   Serial.begin(115200);
-  Serial.println("=== CAMERA TEST ===");
-  esp_log_level_set("*", ESP_LOG_INFO);
+  Serial.println("=== CAMERA-FED TEST ===");
   bool pass = true;
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -74,23 +75,12 @@ void setup() {
   esp_err_t err = esp_camera_init(&config);
   Serial.printf("CAM_INIT=%d\\n", (int)err);
   if (err != ESP_OK) { Serial.println("RESULT=FAIL"); Serial.println("\\n=== ALL TESTS PASSED ==="); return; }
-  else Serial.println("CAM_INIT=PASS");
-  camera_fb_t *fb = NULL;
-  for (int attempt = 0; attempt < 8 && !fb; attempt++) {
-    if (attempt > 0) Serial.printf("CAM_RETRY=%d\\n", attempt);
-    fb = esp_camera_fb_get();
-  }
-  if (!fb) { Serial.println("CAM_FB=FAIL"); pass = false; }
-  else {
-    Serial.printf("CAM_FB=%u %u %u\\n", (unsigned)fb->len, (unsigned)fb->width, (unsigned)fb->height);
-    bool ok = (fb->len == 160 * 120 * 2) && (fb->width == 160) && (fb->height == 120);
-    // Ramp check: first/last bytes + strided samples across the frame.
-    for (uint32_t i = 0; ok && i < fb->len; i += 4096) {
-      if (fb->buf[i] != (uint8_t)(i & 0xFF)) ok = false;
-    }
-    if (ok && fb->buf[fb->len - 1] != (uint8_t)((fb->len - 1) & 0xFF)) ok = false;
-    Serial.print("CAM_DATA="); Serial.println(ok ? "PASS" : "FAIL");
-    if (!ok) pass = false;
+  for (int k = 0; k < 6; k++) {
+    camera_fb_t *fb = NULL;
+    for (int attempt = 0; attempt < 8 && !fb; attempt++) fb = esp_camera_fb_get();
+    if (!fb) { Serial.printf("CAM_FB%d=FAIL\\n", k); pass = false; break; }
+    Serial.printf("CAM_FB%d=%u\\n", k, (unsigned)fb->len);
+    if (fb->len != 160 * 120 * 2) pass = false;
     esp_camera_fb_return(fb);
   }
   Serial.print("RESULT="); Serial.println(pass ? "PASS" : "FAIL");
@@ -98,6 +88,15 @@ void setup() {
 }
 void loop() { delay(1000); }
 `;
+
+// Scripted scene: F[i] = (i*13+7) & 0xFF. Distinct from the ramp at every
+// index (13i+7 = i mod 256 has no solution) and no 64-run of F can match a
+// ramp run (steps of 13 vs 1 mod 256), so a contiguous 64-word tap run is
+// proof the fed frame was captured.
+const FRAME = 160 * 120 * 2;
+const FED = new Uint8Array(FRAME);
+for (let i = 0; i < FRAME; i++) FED[i] = (i * 13 + 7) & 0xff;
+const SIG = Array.from(FED.slice(0, 64));
 
 async function run() {
   const b64 = await compile(firmware);
@@ -111,64 +110,64 @@ async function run() {
   proxy._onError = (e) => console.error('\n[test] Error:', e.message);
 
   await proxy.init('ESP32', { flashSizeMB: 4, mmuPages: 64, strapValue: 0x13, budget: 500000000, camFrameBytes: 38400 }, flash, rom);
-  // OV2640 sensor model as an SCCB slave on I2C0 (answers the driver's PID
-  // probe + register init through the I2C tap) + explicit frame-size config
-  // through the SAB API (mirrors the init config above).
   await proxy.attachCameraSccb(0, 0x30);
   await proxy.setCameraFrameBytes(0, 38400);
-  if ((await proxy.getCameraFrameBytes(0)) !== 38400) {
-    console.error('[test] FAILED: frame-size SAB roundtrip');
-    process.exit(1);
-  }
-  // Arm the frame tap: sensor bytes consumed by I2S RX DMA stage for the
-  // post-run content proof (guest→host, next to the I2S TX tap).
   await proxy.armCamera(0);
   proxy.run();
 
-  // VSYNC: falling edges (driver configures NEGEDGE). The sim runs much
-  // faster than wall-clock, so firmware fb_get windows elapse in a fraction
-  // of a second of wall-time: pulse a frame boundary every ~150ms from
-  // CAM_INIT until CAM_FB so every attempt window contains several complete
-  // frame opportunities. A boundary ending a partial frame just discards it
-  // (FB-SIZE error, harmless); the next boundary starts fresh.
-  let phase = 0;
+  const tapBytes = [];
+  let fed = false;
   let closes = 0;
   const vsyncFall = async () => {
     try { await proxy.setPinInput(25, 1); } catch {}
     await new Promise(r => setTimeout(r, 30));
     try { await proxy.setPinInput(25, 0); } catch {}
   };
-  for (let i = 0; i < 800; i++) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 240000) {
     await new Promise(r => setTimeout(r, 100));
     proxy.pollUart();
-    if (out.includes('CAM_INIT=') && phase === 0) {
-      phase = 1;
-      console.log('[test] VSYNC pulsing started');
+    // Drain the tap every iteration (staging caps at 65536 words ≈ 1.7
+    // frames; draining at loop cadence loses nothing).
+    try {
+      for (const w of await proxy.pollCameraFrame(0)) tapBytes.push((w >>> 16) & 0xff);
+    } catch {}
+    // Feed the scripted scene once the first capture proves the pipeline.
+    if (!fed && out.includes('CAM_FB0=')) {
+      const staged = await proxy.feedCameraFrame(0, FED);
+      const queued = await proxy.cameraFeedLength(0);
+      console.log(`[test] fed frame: staged=${staged} queued=${queued}`);
+      if (staged !== FRAME || queued !== FRAME) throw new Error('feed shortfall');
+      fed = true;
     }
-    if (phase >= 1 && closes < 240 && !out.includes('CAM_FB=')) {
+    if (!out.includes('RESULT=') && closes < 400) {
       await new Promise(r => setTimeout(r, 50));
       await vsyncFall();
       closes++;
-      if (closes % 40 === 0) console.log(`[test] VSYNC pulses=${closes}`);
     }
     if (out.includes('ALL TESTS PASSED')) break;
   }
-  // Frame-tap proof (guest→host, next to the I2S TX tap): the armed hook
-  // staged sensor words consumed by RX DMA during the captures above.
-  // Drained before stop (terminate destroys the channel).
-  const camWords = await proxy.pollCameraFrame(0);
-  console.log(`CAM_TAP_WORDS=${camWords.length}`);
+  try {
+    for (const w of await proxy.pollCameraFrame(0)) tapBytes.push((w >>> 16) & 0xff);
+  } catch {}
   proxy.stop();
   await new Promise(r => setTimeout(r, 100));
   proxy.terminate();
 
-  const get = (re) => { const m = out.match(re); return m ? m[1] : 'MISSING'; };
-  console.log('CAM_INIT=' + get(/CAM_INIT=([-\d]+|PASS)/));
-  console.log('CAM_FB=' + get(/CAM_FB=(.*)/), 'CAM_DATA=' + get(/CAM_DATA=(\w+)/));
-  const result = get(/RESULT=(\w+)/);
-  console.log('RESULT=' + result);
-  if (process.env.CAMDUMP) console.log('---UART---\n' + out.slice(-3000));
-  if (result !== 'PASS' || camWords.length === 0) { console.error('[test] FAILED'); process.exit(1); }
+  console.log(out.slice(-1200));
+  // Search the tap stream for F's 64-byte signature as a contiguous run.
+  let foundAt = -1;
+  outer: for (let i = 0; i + SIG.length <= tapBytes.length; i++) {
+    for (let j = 0; j < SIG.length; j++) {
+      if (tapBytes[i + j] !== SIG[j]) continue outer;
+    }
+    foundAt = i;
+    break;
+  }
+  console.log(`[test] tapBytes=${tapBytes.length} fedSigAt=${foundAt}`);
+  const lensOk = [0, 1, 2, 3, 4, 5].every((k) => out.includes(`CAM_FB${k}=38400`));
+  const ok = out.includes('CAM_INIT=0') && lensOk && out.includes('RESULT=PASS') && fed && foundAt >= 0;
+  if (!ok) { console.log('[test] FAILED'); process.exit(1); }
   console.log('[test] PASSED');
 }
 

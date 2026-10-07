@@ -336,6 +336,24 @@ js_log_u32: (val) => {
           this.esp32?._onI2sTxData?.(idx >>> 0, words);
         } catch {}
       },
+      // Camera-frame hook — forwards sensor bytes consumed by I2S RX DMA in
+      // camera mode (chip._onCamFrameData → pollCameraFrame). Same chunk
+      // shape as the TX hook. NEVER throws.
+      js_i2s_cam_data: (idx, ptr, len) => {
+        try {
+          const words = new Uint32Array(this.memBytes().slice(ptr, ptr + len * 4).buffer);
+          this.esp32?._onCamFrameData?.(idx >>> 0, words);
+        } catch {}
+      },
+      // RMT TX capture — forwards completed guest TX item words (+ zero
+      // terminator) to the JS host (chip._onRmtTxData → chip.rmt.pollRmtTx).
+      // Fires only for channels armed via native_rmt_set_tx_hook. NEVER throws.
+      js_rmt_tx_items: (ch, ptr, len) => {
+        try {
+          const words = new Uint32Array(this.memBytes().slice(ptr, ptr + len * 4).buffer);
+          this.esp32?._onRmtTxData?.(ch >>> 0, words);
+        } catch {}
+      },
       // Synchronous GPIO edge responder (esp32-emu.md §11, OneWire P1).
       // Notify on every responder-pin driven change AND release (level 2),
       // with the APB tick for slot timing. Read override answers IN reads

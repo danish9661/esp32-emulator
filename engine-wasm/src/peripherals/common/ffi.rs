@@ -69,6 +69,23 @@ extern "C" {
     pub fn js_i2s_schedule_rx(idx: u32, nanos: u32);
     // TX data consumed by the I2S peripheral (JS onTxData hook, 32-bit words)
     pub fn js_i2s_tx_data(idx: u32, data_ptr: u32, len: u32);
+    // Camera sensor bytes drained by I2S RX DMA in camera mode (JS
+    // onCameraFrame hook, 32-bit DMA elements; <= 8 per call, same chunking
+    // as js_i2s_tx_data). Fires only when armed via
+    // native_i2s_set_cam_hook. The host frames captures by counting
+    // native_i2s_cam_frame_len(idx) elements.
+    pub fn js_i2s_cam_data(idx: u32, data_ptr: u32, len: u32);
+}
+
+// RMT host tap (DHT22-style single-wire sensors) — synchronous,
+// additive-only. The TX capture fires once per completed TX (channel RAM
+// items + terminator word) ONLY for channels armed via
+// native_rmt_set_tx_hook; unarmed channels keep the loopback path
+// bit-for-bit (zero FFI otherwise).
+extern "C" {
+    // Guest→host RMT TX items (32-bit item words in channel-RAM order,
+    // including the zero terminator word; <= 65 words).
+    pub fn js_rmt_tx_items(ch: u32, data_ptr: u32, len: u32);
 }
 
 // RTC bridge — sleep/wakeup semantics cross the JS/WASM boundary because the

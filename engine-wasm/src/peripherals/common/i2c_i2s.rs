@@ -887,6 +887,11 @@ pub struct I2sPeripheral {
     pub irq: u32,
     pub index: u32,
     pub tx_data_hook: bool,
+    /// Host camera-frame hook (OV2640 cells): when set, sensor bytes
+    /// drained by RX DMA in camera mode are also reported to JS
+    /// (js_i2s_cam_data, same <= 8-word chunking as the TX hook). Wiring,
+    /// not state: survives reset; zero FFI cost when unset.
+    pub cam_frame_hook: bool,
     pub int_raw: u32,
     pub int_ena: u32,
     pub dma_out: DmaDescriptorChain,
@@ -918,6 +923,16 @@ pub struct I2sPeripheral {
     /// next capture start — real-sensor finite-frame parity; 0 = unbounded
     /// legacy). In SM_0A00_0B00 each sensor byte becomes one DMA element.
     pub camera_frame_bytes: u32,
+    /// Host-fed sensor bytes (native_i2s_cam_feed): staged frame content
+    /// that replaces the ramp for whole captures, one staged frame at a
+    /// time (cap: one QQVGA RGB565 frame). Short staging stays queued until
+    /// topped up or cleared; cleared on reset (in-flight, not wiring).
+    pub cam_host_buf: [u8; 38400],
+    pub cam_host_len: usize,
+    /// Read cursor + active flag for the in-progress capture (latched at
+    /// capture start; see start_in_dma).
+    pub cam_host_read: usize,
+    pub cam_host_active: bool,
     pub out_eof_des_addr: u32,
     pub in_eof_des_addr: u32,
     pub outlink_dscr: u32,
@@ -932,6 +947,7 @@ impl I2sPeripheral {
             irq,
             index,
             tx_data_hook: false,
+            cam_frame_hook: false,
             int_raw: 0,
             int_ena: 0,
             dma_out: DmaDescriptorChain::new(),
@@ -956,6 +972,10 @@ impl I2sPeripheral {
             // native_i2s_cam_frame_bytes. Harmless for non-camera use: the
             // pattern feed only runs when camera_mode is set.
             camera_frame_bytes: 38400,
+            cam_host_buf: [0u8; 38400],
+            cam_host_len: 0,
+            cam_host_read: 0,
+            cam_host_active: false,
             out_eof_des_addr: 0,
             in_eof_des_addr: 0,
             outlink_dscr: 0,
@@ -1014,6 +1034,32 @@ impl I2sPeripheral {
         self.try_deliver_camera_frame(ctx);
     }
 
+    /// Next virtual-sensor byte: a staged host-fed frame replaces the ramp
+    /// for whole captures (one-shot per capture; latched at capture start).
+    /// Short staging never partially fills a frame — the ramp covers the
+    /// capture and the staging stays queued. Keeps pattern_offset counting
+    /// so EOF/completion accounting is identical in both modes.
+    fn cam_sensor_byte(&mut self) -> u32 {
+        if self.cam_host_active && (self.cam_host_read as u32) < self.camera_frame_bytes {
+            let b = if self.cam_host_read < self.cam_host_len {
+                self.cam_host_buf[self.cam_host_read]
+            } else {
+                0
+            };
+            self.cam_host_read += 1;
+            self.camera_pattern_offset = self.camera_pattern_offset.wrapping_add(1);
+            if (self.cam_host_read as u32) >= self.camera_frame_bytes {
+                self.cam_host_active = false;
+                self.cam_host_len = 0;
+                self.cam_host_read = 0;
+            }
+            return b as u32;
+        }
+        let o = self.camera_pattern_offset;
+        self.camera_pattern_offset = o.wrapping_add(1);
+        (o & 0xFF) as u32
+    }
+
     // JS tryDeliverCameraFrame (lines 626-661), reworked: the original
     // pushed ZERO words from a never-fed queue (dead stub). The virtual
     // OV2640 instead synthesizes the sensor byte ramp (byte[i] = i & 0xFF),
@@ -1035,11 +1081,9 @@ impl I2sPeripheral {
             && (self.camera_frame_bytes == 0
                 || self.camera_pattern_offset < self.camera_frame_bytes as u64)
         {
-            let o = self.camera_pattern_offset;
-            let w = ((o & 0xFF) as u32) << 16;
+            let w = self.cam_sensor_byte() << 16;
             self.rx_buffer[self.rx_buffer_len] = w;
             self.rx_buffer_len += 1;
-            self.camera_pattern_offset = o.wrapping_add(1);
         }
         self.process_rx(ctx);
     }
@@ -1224,6 +1268,17 @@ impl I2sPeripheral {
             self.camera_pattern_offset = 0;
             self.camera_eof_acc = 0;
             self.rx_buffer_len = 0;
+            // Latch the host-fed frame for this capture (one-shot): a full
+            // staged frame replaces the ramp; short staging stays queued
+            // until topped up or cleared (the ramp covers the capture).
+            if self.camera_frame_bytes != 0
+                && (self.cam_host_len as u32) >= self.camera_frame_bytes
+            {
+                self.cam_host_active = true;
+                self.cam_host_read = 0;
+            } else {
+                self.cam_host_active = false;
+            }
         }
         if self.camera_mode && self.rx_active {
             if self.camera_frame_queue_len == 0 {
@@ -1275,6 +1330,28 @@ impl I2sPeripheral {
             crate::peripherals::common::ffi::js_i2s_tx_data(
                 self.index,
                 I2S_TX_SCRATCH.as_ptr() as u32,
+                len as u32,
+            );
+        }
+    }
+
+    // Camera-frame tap — dispatched only when armed
+    // (native_i2s_set_cam_hook). Reports the sensor bytes RX DMA just
+    // consumed, so the host can verify frame contents without firmware
+    // knowledge. Same scratch-chunk shape as the TX hook.
+    fn emit_cam_data(&self, chunk: &[u32]) {
+        if !self.cam_frame_hook {
+            return;
+        }
+        static mut I2S_CAM_SCRATCH: [u32; 8] = [0u32; 8];
+        unsafe {
+            let len = core::cmp::min(chunk.len(), 8);
+            for (i, v) in chunk[..len].iter().enumerate() {
+                I2S_CAM_SCRATCH[i] = *v;
+            }
+            crate::peripherals::common::ffi::js_i2s_cam_data(
+                self.index,
+                I2S_CAM_SCRATCH.as_ptr() as u32,
                 len as u32,
             );
         }
@@ -1344,13 +1421,11 @@ impl I2sPeripheral {
                 && (self.camera_frame_bytes == 0
                     || self.camera_pattern_offset < self.camera_frame_bytes as u64)
             {
-                let o = self.camera_pattern_offset;
                 // SM_0A00_0B00 packing: one sensor byte per DMA element in
-                // sample1 (bits 23:16); see try_deliver_camera_frame.
-                let w = ((o & 0xFF) as u32) << 16;
+                // sample1 (bits 23:16); host-fed or ramp via cam_sensor_byte.
+                let w = self.cam_sensor_byte() << 16;
                 self.rx_buffer[self.rx_buffer_len] = w;
                 self.rx_buffer_len += 1;
-                self.camera_pattern_offset = o.wrapping_add(1);
             }
         }
         let chunk_len = if self.rx_buffer_len >= 8 { 8 } else { self.rx_buffer_len };
@@ -1409,6 +1484,9 @@ impl I2sPeripheral {
                     };
                     self.set_interrupt_i2s(I2C_REG36, ctx);
                 }
+                // Host frame tap: report the sensor bytes RX DMA just
+                // consumed (guest→host direction, like the TX hook).
+                self.emit_cam_data(&cpu_chunk[..idx_val as usize]);
                 if clock_event == 0 {
                     return;
                 }
@@ -1701,6 +1779,11 @@ impl MmioPeripheral for I2sPeripheral {
         self.rx_buffer_len = 0;
         self.camera_mode = false;
         self.camera_frame_queue_len = 0;
+        // Host-fed staging is in-flight (like the DMA FIFOs above), not
+        // wiring: clears. The frame hook flag + frame size survive (config).
+        self.cam_host_len = 0;
+        self.cam_host_read = 0;
+        self.cam_host_active = false;
         self.out_eof_des_addr = 0;
         self.in_eof_des_addr = 0;
         self.outlink_dscr = 0;

@@ -44,6 +44,14 @@ and `test-worker-flash-persist` exercise RTC memory and host flash persistence.
 module preset, `psramFound()` + SPIRAM heap, and a full camera frame
 (compiled with `PSRAM=enabled`, like the real module default).
 
+`tests/test-taps-host.mjs` covers all host taps without the compile server
+(302 checks: tap objects, MMIO-driven engine hooks, worker SAB plumbing).
+Firmware acceptance cells for the taps: `test-worker-rmt-dht` (DHT22
+start-pulse capture + host sensor answer, 55.5% RH / 23.5 °C),
+`test-worker-camera` (real esp-camera init over the OV2640 SCCB model +
+QQVGA ramp frame + frame-tap proof), and `test-worker-camera-fed`
+(host-fed scripted scene found byte-exact in the frame-tap stream).
+
 To run any stock protocol test against the ESP32-CAM preset instead of the
 default board (proves module protocol parity without editing tests):
 

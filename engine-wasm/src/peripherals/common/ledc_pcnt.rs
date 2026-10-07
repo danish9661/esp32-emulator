@@ -499,10 +499,22 @@ impl LedcChannel {
         let scale = (val & 0x3FF) as u32;
         let total_pwm = cycle * num as u64 * (1u64 << scale.min(40));
         let freq = timer.get_output_frequency(ctx);
-        if freq <= 0.0 || total_pwm == 0 {
+        // Plain duty update (IDF ledc_set_duty + ledc_update_duty, used by
+        // both the v1 channel API and the v3 pin API ledcWrite): the driver
+        // always stages INC/NUM=1/CYCLE=1/SCALE=0 filler
+        // (ledc_duty_config) and the DUTY register IS the new duty — HW
+        // latches it in a single step. A genuine stepped fade always
+        // carries SCALE!=0 or CYCLE!=1 or NUM!=1 (the stepped branch of
+        // _ledc_set_fade_with_step requires scale>0 && step_num>0; its
+        // direct-set fallback writes the target with this same 1/1/0
+        // pattern and also latches). Without this, the 1-step filler was
+        // misread as a ramp to start+1 (duty 1 for a 192 write).
+        if freq <= 0.0 || total_pwm == 0 || (num == 1 && cycle == 1 && scale == 0) {
             // Degenerate (plain duty set with START): complete immediately,
-            // preserving the old instant-interrupt behavior.
-            self.current_duty = self.duty;
+            // preserving the old instant-interrupt behavior. DUTY holds the
+            // driver <<4 format (ledc_ll_set_duty_int_part); current_duty is
+            // integer scale (DUTY_RD reads it <<4, get_duty returns it).
+            self.current_duty = self.duty >> 4;
             self.fade_active = false;
             return true;
         }

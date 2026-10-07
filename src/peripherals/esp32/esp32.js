@@ -39,7 +39,7 @@ import { writePartitionTable, parseMacAddress, parseFirmwareOffset } from "../co
 import { applyBoardPreset } from "../../boards/esp32-cam.js";
 import { XtensaCore } from "../../engine/esp-xtensa/xtensa-core.js";
 import { WasmLoader } from "../../engine/esp-xtensa/wasm-loader.js";
-import { I2cTap, SpiTap, OneWireDevice } from "../common/bus-taps.js";
+import { I2cTap, SpiTap, OneWireDevice, RmtTap, Ov2640 } from "../common/bus-taps.js";
 import * as WM from "../../engine/wasm-memory-layout.js";
 
 // Interrupt enum (local copy, matches factory)
@@ -275,6 +275,19 @@ class ESP32 {
     // pollI2sTx(). Bounded (drop-oldest); cleared on reset.
     this._i2sTxQueue = [[], []];
     this._i2sTxListeners = [];
+    // RMT single-wire sensor tap (DHT22): guest TX capture + host RX
+    // inject live on chip.rmt (RmtTap); hook flags sync like the I2C/SPI
+    // registries (wiring survives reset, captures clear).
+    this.rmt = new RmtTap(this);
+    // Camera frame capture queues, idx -> u32[] (OV2640 cells). Staged by
+    // the loader when armed (onCameraFrame subscribe); drained by
+    // pollCameraFrame(). Bounded (drop-oldest); cleared on reset.
+    this._camFrameQueue = [[], []];
+    this._camFrameListeners = [];
+    // OV2640 sensor models attached as SCCB slaves, key `${bus}:${addr}`.
+    // Device memory (regs/resolution) survives reset; transaction state
+    // clears in reset() below.
+    this._ov2640Models = new Map();
     const uartConfig = {
         hasTXState: true,
         toutMultiply: true,
@@ -537,6 +550,9 @@ class ESP32 {
       if (this._gpioChangeQueue) this._gpioChangeQueue.length = 0;
       for (const dev of this.onewire?.values?.() ?? []) dev?._resetFlight?.();
       if (this._i2sTxQueue) { this._i2sTxQueue[0].length = 0; this._i2sTxQueue[1].length = 0; }
+      try { this.rmt?._resetFlight?.(); } catch {}
+      if (this._camFrameQueue) { this._camFrameQueue[0].length = 0; this._camFrameQueue[1].length = 0; }
+      for (const dev of this._ov2640Models?.values?.() ?? []) dev?._resetFlight?.();
     } catch {}
     for (let e of this.cores) e.reset();
     if (this._wasmCores) { for (let wc of this._wasmCores) wc.reset(); }
@@ -593,6 +609,7 @@ class ESP32 {
     try {
       for (const tap of [this.i2c0, this.i2c1]) tap?._syncHooks?.();
       for (const tap of [this.spi0, this.spi1, this.spi2, this.spi3]) tap?._syncHooks?.();
+      try { this.rmt?._syncHooks?.(); } catch {}
       if (this._gpioChangeListeners?.length) {
         this._wasmLoader?.exports?.native_gpio_set_change_hook?.(1);
       }
@@ -600,6 +617,7 @@ class ESP32 {
         try { this._wasmLoader?.exports?.native_gpio_set_responder?.(pin >>> 0, 1); } catch {}
       }
       if (this._i2sTxListeners?.length) this._armI2sTxHook();
+      if (this._camFrameListeners?.length) this._armCamHook();
     } catch {}
   }
 
@@ -760,6 +778,148 @@ class ESP32 {
         if (q.length > 16384) q.shift();
       }
     } catch {}
+  }
+  /**
+   * Feed one I2S RX sample word (pairs combine per rx_chan_mod; lone
+   * singles stage silently — feed twice). Direct-chip twin of the worker
+   * feedI2SRX path (same native export).
+   */
+  feedI2sRxSample(idx, sample) {
+    try { this._wasmLoader?.exports?.native_i2s_push_rx_sample?.(idx >>> 0, sample >>> 0); } catch {}
+  }
+
+  // ---- RMT single-wire sensor tap (DHT22) ----
+  /** FFI sink for js_rmt_tx_items (never throws; delegates to chip.rmt). */
+  _onRmtTxData(ch, words) {
+    try { this.rmt?._onRmtTxData?.(ch >>> 0, words); } catch {}
+  }
+
+  // ---- Camera frame tap (OV2640 cells; sits next to the I2S TX tap) ----
+  /** Arm the camera-frame hook on a controller (wiring; survives reset). */
+  _armCamHook(idx = 0) {
+    try { this._wasmLoader?.exports?.native_i2s_set_cam_hook?.(idx >>> 0, 1); } catch {}
+  }
+  /**
+   * Subscribe to guest→host camera sensor bytes (I2S RX DMA in camera
+   * mode). Returns an unsubscribe fn. Staged per controller idx; drain
+   * with pollCameraFrame (host-driven, never re-entrant). The host frames
+   * captures by counting getCameraFrameBytes(idx) elements. Listener must
+   * not re-enter the engine.
+   */
+  onCameraFrame(idx, cb) {
+    if (typeof idx === 'function') { cb = idx; idx = 0; }
+    idx >>>= 0;
+    if (typeof cb !== 'function' || idx > 1) return () => {};
+    this._camFrameListeners.push({ idx, cb });
+    this._armCamHook(idx);
+    return () => {
+      const i = this._camFrameListeners.findIndex((e) => e.cb === cb && e.idx === idx);
+      if (i >= 0) this._camFrameListeners.splice(i, 1);
+    };
+  }
+  /** Drain staged sensor bytes: pollCameraFrame() → both, pollCameraFrame(idx) → one. */
+  pollCameraFrame(idx = null) {
+    const out = [];
+    const idxs = idx === null ? [0, 1] : [idx >>> 0];
+    for (const i of idxs) {
+      const q = this._camFrameQueue?.[i];
+      if (q?.length) {
+        const words = q.splice(0);
+        out.push({ idx: i, words });
+        for (const { idx: li, cb } of [...this._camFrameListeners]) {
+          if (li !== i) continue;
+          try { cb(i, words); } catch (e) { console.warn(`[CAM-TAP] listener threw: ${e?.message || e}`); }
+        }
+      }
+    }
+    return out;
+  }
+  /** FFI sink for js_i2s_cam_data (never throws; bounded staging). */
+  _onCamFrameData(idx, words) {
+    try {
+      const q = this._camFrameQueue?.[idx >>> 0];
+      if (!q) return;
+      for (const w of words) {
+        q.push(w >>> 0);
+        if (q.length > 65536) q.shift();
+      }
+    } catch {}
+  }
+  /** Virtual-sensor frame size in bytes for a controller (host framing). */
+  setCameraFrameBytes(idx, len) {
+    try { this._wasmLoader?.exports?.native_i2s_cam_frame_bytes?.(idx >>> 0, len >>> 0); } catch {}
+  }
+  /** Read back the configured virtual-sensor frame size (0 when WASM absent). */
+  getCameraFrameBytes(idx) {
+    try { return this._wasmLoader?.exports?.native_i2s_cam_frame_len?.(idx >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+  /**
+   * Feed host-side sensor bytes for upcoming captures (scripted scenes).
+   * Appends (up to one QQVGA RGB565 frame staged); a full staged frame
+   * replaces the ramp for exactly one capture. Empty input clears the
+   * queue. @returns bytes staged this call (0 when WASM absent).
+   */
+  feedCameraFrame(idx, bytes) {
+    try {
+      const ex = this._wasmLoader?.exports;
+      if (!ex?.native_i2s_cam_feed) return 0;
+      const arr = Uint8Array.from(bytes ?? []);
+      if (arr.length === 0) {
+        ex.native_i2s_cam_feed(idx >>> 0, 0, 0);
+        return 0;
+      }
+      const scratch = ex.native_i2s_cam_feed_scratch_ptr?.() >>> 0;
+      if (!scratch) return 0;
+      const mem = new Uint8Array(this._wasmLoader.memoryBuffer);
+      let staged = 0;
+      for (let off = 0; off < arr.length; off += 4096) {
+        const piece = arr.subarray(off, off + 4096);
+        mem.set(piece, scratch);
+        staged += ex.native_i2s_cam_feed(idx >>> 0, scratch, piece.length) >>> 0;
+      }
+      return staged;
+    } catch { return 0; }
+  }
+  /** Staged (unconsumed) host-fed sensor bytes, for host flow control. */
+  cameraFeedLength(idx) {
+    try { return this._wasmLoader?.exports?.native_i2s_cam_host_len?.(idx >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+
+  // ---- OV2640 sensor models (SCCB slaves on the I2C taps) ----
+  /**
+   * Attach an OV2640 sensor model as an SCCB slave on an I2C bus
+   * (default bus 0, addr 0x30). Post-create safe; device memory
+   * (regs/resolution) survives reset, transaction state clears.
+   * Returns the model.
+   */
+  attachOv2640(bus = 0, addr = 0x30, model = null) {
+    bus >>>= 0;
+    addr &= 0x7f;
+    const key = `${bus}:${addr}`;
+    let dev = this._ov2640Models.get(key) ?? null;
+    if (!dev) {
+      dev = model instanceof Ov2640 ? model : new Ov2640();
+      this._ov2640Models.set(key, dev);
+    } else if (model instanceof Ov2640) {
+      this._ov2640Models.set(key, model);
+      dev = model;
+    }
+    const tap = this.i2c?.[bus];
+    if (tap) dev.attachToI2c(tap, addr);
+    return dev;
+  }
+
+  /** Detach an OV2640 sensor model from an I2C bus. */
+  detachOv2640(bus = 0, addr = 0x30) {
+    bus >>>= 0;
+    addr &= 0x7f;
+    const dev = this._ov2640Models.get(`${bus}:${addr}`);
+    if (dev) {
+      try { dev.detachFromI2c(); } catch {}
+      this._ov2640Models.delete(`${bus}:${addr}`);
+    }
   }
 
   // ---- LEDC/PWM readback (esp32-emu.md §7) ----

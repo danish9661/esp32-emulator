@@ -48,6 +48,9 @@ function hashMem(data, maxBytes) {
 const CMD_NONE = 0, CMD_RUN = 1, CMD_RESET = 2, CMD_SEED_MMU = 3, CMD_WRITE_UINT32 = 4, CMD_READ_MEMORY = 5, CMD_GET_PCAP = 6, CMD_GET_WIFI_STATS = 7, CMD_STEP = 8, CMD_DESTROY = 9, CMD_GET_FFI_COUNTS = 10, CMD_READ_MMIO = 11, CMD_UART_RX = 12, CMD_SET_PIN_INPUT = 13, CMD_SET_TOUCH_INPUT = 14, CMD_SET_VOLTAGE = 15, CMD_FEED_I2S_RX = 16, CMD_SEND_TWAI = 17, CMD_PUSH_TWAI = 18, CMD_GET_TWAI_TX = 19, CMD_WATCHPOINT = 20, CMD_PCTRACE = 21, CMD_PRESS_RESET = 22, CMD_PRESS_BOOT = 23, CMD_BT_HCI_POLL = 24, CMD_BT_HCI_PUSH = 25, CMD_BT_HCI_RESP = 26, CMD_BT_HCI_SEND = 27;
 const CMD_I2C_SET_SLAVE = 28, CMD_I2C_TX_PUSH = 29, CMD_I2C_RX_POP = 30, CMD_I2C_POLL = 31, CMD_SPI_INJECT = 32, CMD_SPI_POLL = 33, CMD_GET_GPIO_OUT = 34, CMD_SAMPLE_GPIO_OUT = 35, CMD_POLL_GPIO_CHANGES = 36, CMD_SET_ANALOG_INPUT = 37, CMD_GET_LEDC = 38;
 const CMD_I2S_POLL_TX = 39, CMD_I2S_TX_ARM = 40, CMD_OW_ATTACH = 41, CMD_OW_SET_TEMP = 42, CMD_OW_POLL = 43, CMD_OW_SCRATCH = 44, CMD_WRITE_MMIO = 45;
+const CMD_RMT_TX_ARM = 46, CMD_RMT_POLL_TX = 47, CMD_RMT_RX_INJECT = 48, CMD_RMT_TICK_HZ = 49;
+const CMD_CAM_ARM = 50, CMD_CAM_POLL = 51, CMD_CAM_BYTES = 52, CMD_CAM_SCCB = 53, CMD_CAM_LEN = 54;
+const CMD_CAM_FEED = 55, CMD_CAM_FEED_LEN = 56; // ARG0=idx, ARG1=len + readResp bytes → ARG0=staged; len query → ARG0
 const _RESP_IDLE = 0, RESP_DONE = 1, RESP_ERROR = 2;
 
 const UART_RING_SIZE = 16384;
@@ -438,6 +441,142 @@ function doWriteMmio() {
     );
   } catch {}
 }
+// RMT single-wire sensor tap (DHT22): per-channel TX capture + RX inject.
+function doRmtTxArm() {
+  try {
+    const ch = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+    // Subscribe a no-op capture listener (wiring only; the host drains via
+    // CMD_RMT_POLL_TX). The listener list survives reset like the hook.
+    chip?.rmt?.onRmtTx?.(ch, () => {});
+  } catch {}
+}
+function doRmtPollTx() {
+  const ch = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  let n = 0;
+  if (readResp && chip?.rmt?.pollRmtTx) {
+    try {
+      const groups = chip.rmt.pollRmtTx(ch);
+      const words = [];
+      for (const g of groups) for (const w of g.items) words.push(w >>> 0);
+      const dv = new DataView(readResp.buffer, readResp.byteOffset, readResp.length);
+      n = Math.min(words.length, Math.floor(readResp.length / 4));
+      for (let i = 0; i < n; i++) dv.setUint32(i * 4, words[i], true);
+    } catch {}
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doRmtInject() {
+  const ch = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  const nwords = Math.min(Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0, 64);
+  let staged = 0;
+  if (readResp && chip?.rmt?.injectRmtRx) {
+    try {
+      const dv = new DataView(readResp.buffer, readResp.byteOffset, readResp.length);
+      const words = [];
+      for (let i = 0; i < nwords && (i * 4 + 4) <= readResp.length; i++) {
+        words.push(dv.getUint32(i * 4, true) >>> 0);
+      }
+      staged = chip.rmt.injectRmtRx(ch, words) >>> 0;
+    } catch {}
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG0, staged);
+}
+function doRmtTickHz() {
+  let hz = 0;
+  try { hz = chip?.rmt?.getRmtTickHz?.(Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0) >>> 0 || 0; } catch {}
+  Atomics.store(ctrl, SAB_CMD_ARG0, hz);
+}
+// Camera frame tap (OV2640 cells): arm/poll sensor-byte staging + frame
+// size config + in-worker SCCB sensor attach.
+function doCamArm() {
+  try { chip?._armCamHook?.(Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0); } catch {}
+}
+function doCamPoll() {
+  const idx = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  let n = 0;
+  if (readResp && chip?.pollCameraFrame) {
+    try {
+      const groups = chip.pollCameraFrame(idx);
+      const words = [];
+      for (const g of groups) for (const w of g.words) words.push(w >>> 0);
+      const dv = new DataView(readResp.buffer, readResp.byteOffset, readResp.length);
+      n = Math.min(words.length, Math.floor(readResp.length / 4));
+      for (let i = 0; i < n; i++) dv.setUint32(i * 4, words[i], true);
+    } catch {}
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG1, n);
+}
+function doCamBytes() {
+  try {
+    chip?.setCameraFrameBytes?.(
+      Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0,
+      Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0,
+    );
+  } catch {}
+}
+function doCamLen() {
+  let len = 0;
+  try { len = chip?.getCameraFrameBytes?.(Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0) >>> 0 || 0; } catch {}
+  Atomics.store(ctrl, SAB_CMD_ARG0, len);
+}
+function doCamSccb() {
+  try {
+    chip?.attachOv2640?.(
+      Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0,
+      Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0,
+    );
+  } catch {}
+}
+function doCamFeed() {
+  const idx = Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0;
+  const len = Math.min(Atomics.load(ctrl, SAB_CMD_ARG1) >>> 0, readResp?.length ?? 0);
+  let staged = 0;
+  if (readResp && chip?.feedCameraFrame) {
+    try {
+      staged = chip.feedCameraFrame(idx, readResp.subarray(0, len)) >>> 0;
+    } catch {}
+  }
+  Atomics.store(ctrl, SAB_CMD_ARG0, staged);
+}
+function doCamFeedLen() {
+  let n = 0;
+  try { n = chip?.cameraFeedLength?.(Atomics.load(ctrl, SAB_CMD_ARG0) >>> 0) >>> 0 || 0; } catch {}
+  Atomics.store(ctrl, SAB_CMD_ARG0, n);
+}
+// Shared by processCommand AND the runSimChunk inline servicing below (same
+// body — the MMIO backdoor must answer mid-run, not just when stopped;
+// without the inline half, readMmio deadlocks while RUN=1).
+function doReadMmio() {
+  const hid = Atomics.load(ctrl, SAB_CMD_ARG0);
+  const addr = Atomics.load(ctrl, SAB_CMD_ARG1);
+  const size = Atomics.load(ctrl, SAB_CMD_ARG2);
+  let val = 0;
+  try {
+    const ex = chip?._wasmLoader?.exports;
+    // run176: hid 99 = native_bt_diag bulk snapshot. CAUTION: words 3..7
+    // alias live ctrl slots (STATUS/PC/NANOS) — the caller must snapshot
+    // them BEFORE issuing another command (any command overwrites them).
+    // Words: 0..2 = ARG0/1/2, 3 = RESP, 4 = STATUS, 5 = PC,
+    // 6 = NANOS_LO, 7 = NANOS_HI.
+    if (hid === 99 && ex?.native_bt_diag) {
+      const scratch = (ex.native_bt_diag_scratch?.() >>> 0) || 0;
+      if (scratch) {
+        ex.native_bt_diag(addr >>> 0, scratch);
+        const mem = new Uint32Array(chip._wasmLoader.memoryBuffer);
+        const base = scratch >>> 2;
+        Atomics.store(ctrl, SAB_CMD_ARG0, mem[base] >>> 0);
+        Atomics.store(ctrl, SAB_CMD_ARG1, mem[base + 1] >>> 0);
+        Atomics.store(ctrl, SAB_CMD_ARG2, mem[base + 2] >>> 0);
+        Atomics.store(ctrl, SAB_RESP, mem[base + 3] >>> 0);
+        Atomics.store(ctrl, SAB_STATUS, mem[base + 4] >>> 0);
+        Atomics.store(ctrl, SAB_PC, mem[base + 5] >>> 0);
+        Atomics.store(ctrl, SAB_NANOS_LO, mem[base + 6] >>> 0);
+        Atomics.store(ctrl, SAB_NANOS_HI, mem[base + 7] >>> 0);
+      }
+    } else if (ex?.native_diag_read) val = ex.native_diag_read(hid, addr, size);
+  } catch(_e) { console.warn(`native_diag_read error: ${_e.message}`); }
+  if (hid !== 99) Atomics.store(ctrl, SAB_CMD_ARG0, val);
+}
 
 function finishSim() {
   ctrl[SAB_RUN] = 0;
@@ -756,6 +895,66 @@ async function runSimChunk() {
         Atomics.store(ctrl, SAB_RESP, RESP_DONE);
         Atomics.store(ctrl, SAB_CMD, CMD_NONE);
       }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_READ_MMIO) {
+        try { doReadMmio(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_RMT_TX_ARM) {
+        try { doRmtTxArm(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_RMT_POLL_TX) {
+        try { doRmtPollTx(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_RMT_RX_INJECT) {
+        try { doRmtInject(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_RMT_TICK_HZ) {
+        try { doRmtTickHz(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_CAM_ARM) {
+        try { doCamArm(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_CAM_POLL) {
+        try { doCamPoll(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_CAM_BYTES) {
+        try { doCamBytes(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_CAM_SCCB) {
+        try { doCamSccb(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_CAM_LEN) {
+        try { doCamLen(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_CAM_FEED) {
+        try { doCamFeed(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
+      if (Atomics.load(ctrl, SAB_CMD) === CMD_CAM_FEED_LEN) {
+        try { doCamFeedLen(); } catch {}
+        Atomics.store(ctrl, SAB_RESP, RESP_DONE);
+        Atomics.store(ctrl, SAB_CMD, CMD_NONE);
+      }
       chip.step();
       steps++;
       cycles = chip.cycles;
@@ -925,35 +1124,7 @@ function processCommand(cmd) {
       break;
     }
     case CMD_READ_MMIO: {
-      const hid = Atomics.load(ctrl, SAB_CMD_ARG0);
-      const addr = Atomics.load(ctrl, SAB_CMD_ARG1);
-      const size = Atomics.load(ctrl, SAB_CMD_ARG2);
-      let val = 0;
-      try {
-        const ex = chip?._wasmLoader?.exports;
-        // run176: hid 99 = native_bt_diag bulk snapshot. CAUTION: words 3..7
-        // alias live ctrl slots (STATUS/PC/NANOS) — the caller must snapshot
-        // them BEFORE issuing another command (any command overwrites them).
-        // Words: 0..2 = ARG0/1/2, 3 = RESP, 4 = STATUS, 5 = PC,
-        // 6 = NANOS_LO, 7 = NANOS_HI.
-        if (hid === 99 && ex?.native_bt_diag) {
-          const scratch = (ex.native_bt_diag_scratch?.() >>> 0) || 0;
-          if (scratch) {
-            ex.native_bt_diag(addr >>> 0, scratch);
-            const mem = new Uint32Array(chip._wasmLoader.memoryBuffer);
-            const base = scratch >>> 2;
-            Atomics.store(ctrl, SAB_CMD_ARG0, mem[base] >>> 0);
-            Atomics.store(ctrl, SAB_CMD_ARG1, mem[base + 1] >>> 0);
-            Atomics.store(ctrl, SAB_CMD_ARG2, mem[base + 2] >>> 0);
-            Atomics.store(ctrl, SAB_RESP, mem[base + 3] >>> 0);
-            Atomics.store(ctrl, SAB_STATUS, mem[base + 4] >>> 0);
-            Atomics.store(ctrl, SAB_PC, mem[base + 5] >>> 0);
-            Atomics.store(ctrl, SAB_NANOS_LO, mem[base + 6] >>> 0);
-            Atomics.store(ctrl, SAB_NANOS_HI, mem[base + 7] >>> 0);
-          }
-        } else if (ex?.native_diag_read) val = ex.native_diag_read(hid, addr, size);
-      } catch(_e) { console.warn(`native_diag_read error: ${_e.message}`); }
-      if (hid !== 99) Atomics.store(ctrl, SAB_CMD_ARG0, val);
+      doReadMmio();
       break;
     }
     case CMD_WATCHPOINT: {
@@ -1136,6 +1307,17 @@ function processCommand(cmd) {
     case CMD_OW_POLL: { doOwPoll(); break; }
     case CMD_OW_SCRATCH: { doOwScratch(); break; }
     case CMD_WRITE_MMIO: { doWriteMmio(); break; }
+    case CMD_RMT_TX_ARM: { doRmtTxArm(); break; }
+    case CMD_RMT_POLL_TX: { doRmtPollTx(); break; }
+    case CMD_RMT_RX_INJECT: { doRmtInject(); break; }
+    case CMD_RMT_TICK_HZ: { doRmtTickHz(); break; }
+    case CMD_CAM_ARM: { doCamArm(); break; }
+    case CMD_CAM_POLL: { doCamPoll(); break; }
+    case CMD_CAM_BYTES: { doCamBytes(); break; }
+    case CMD_CAM_SCCB: { doCamSccb(); break; }
+    case CMD_CAM_LEN: { doCamLen(); break; }
+    case CMD_CAM_FEED: { doCamFeed(); break; }
+    case CMD_CAM_FEED_LEN: { doCamFeedLen(); break; }
     // CMD_BT_HCI_RESP: copy the last stashed JSON control line (see the
     // socket 'data' handler) into readResp, report length in ARG1
     // (0 = none pending). Lets the host test consume connect/read results

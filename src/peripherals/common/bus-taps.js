@@ -1,6 +1,7 @@
 // Host peripheral taps (esp32-emu.md §1-4, §9, §11) — JS models for I2C slaves,
-// SPI transfers, I2S TX capture and OneWire slaves, plus the registry sync
-// that arms the Rust FFI hooks.
+// SPI transfers, I2S TX capture, OneWire slaves, RMT single-wire sensors
+// (DHT22) and OV2640 camera sensors, plus the registry sync that arms the
+// Rust FFI hooks.
 //
 // Design (documented contract):
 // - Registration is WIRING (survives chip.reset(), like soldered devices).
@@ -514,5 +515,307 @@ export class OneWireDevice {
     const presence = this.presenceCount;
     this.presenceCount = 0;
     return { log, presence };
+  }
+}
+
+/**
+ * RMT tap — host single-wire sensor models (DHT22 et al).
+ *
+ * Transport only (the sensor model lives host-side): the engine reports
+ * completed guest TX item streams (the start pulse a DHT22 answers) and
+ * the host stages response item streams for RX-armed channels.
+ *
+ * Item word format (ESP32 RMT item = 32 bits, channel-RAM order):
+ *   bits[14:0] duration0 (ticks), [15] level0, [30:16] duration1, [31] level1.
+ * A zero word terminates the stream. Ticks are channel-clock ticks — use
+ * getRmtTickHz(ch) (APB/ref ÷ divider) for µs↔tick conversion (DHT22 slots
+ * are specified in µs: start ≥1ms low, response 80µs+80µs, bit = 50µs low
+ * + 26µs (0) / 70µs (1) high).
+ *
+ * Two cooperating directions (EITHER works):
+ *  A. Capture: onRmtTx(ch, cb) + pollRmtTx(ch?) drains guest→host TX items
+ *     (incl. terminator). Arming is per-channel (native_rmt_set_tx_hook);
+ *     unarmed channels keep the loopback path bit-for-bit (zero FFI).
+ *  B. Inject: injectRmtRx(ch, words[]) stages host→guest RX items. Injected
+ *     while the channel is RX-armed → delivers immediately (RAM +
+ *     MEM_OWNER + RX_END, like loopback); injected early → stays pending
+ *     and delivers on the next RX_EN arm (sensor-answers-start parity).
+ *     Pending = preload: survives reset.
+ */
+export class RmtTap {
+  constructor(chip) {
+    this.chip = chip;
+    /** Per-channel capture queues (ch 0..7 -> u32 item words). Cleared on reset. */
+    this.txQueue = [[], [], [], [], [], [], [], []];
+    /** Per-channel listeners: [{cb}] — wiring survives reset. */
+    this.txListeners = [[], [], [], [], [], [], [], []];
+    /** Pre-WASM inject staging (ch -> u32[]), flushed at _syncHooks. */
+    this._localPending = new Map();
+    this._syncedCh = new Set();
+  }
+
+  get _exports() { return this.chip?._wasmLoader?.exports ?? null; }
+
+  /** Push per-channel hook flags to Rust (no-op before loadWasm). */
+  _syncHooks() {
+    const ex = this._exports;
+    if (!ex) return;
+    try {
+      for (let ch = 0; ch < 8; ch++) {
+        if (this.txListeners[ch].length && !this._syncedCh.has(ch)) {
+          try { ex.native_rmt_set_tx_hook?.(ch, 1); } catch {}
+          this._syncedCh.add(ch);
+        }
+      }
+    } catch {}
+    // Flush pre-WASM inject staging through the real path (failure-atomic:
+    // unstaged tails stay queued for the next sync).
+    for (const [ch, words] of [...this._localPending]) {
+      this._localPending.delete(ch);
+      let staged = 0;
+      try { staged = this._injectLive(ch, words); } catch { staged = 0; }
+      if (staged < words.length) {
+        const prev = this._localPending.get(ch) ?? [];
+        this._localPending.set(ch, words.slice(staged).concat(prev).slice(-64));
+      }
+    }
+  }
+
+  /**
+   * Subscribe to guest→host TX items on a channel. Returns an unsubscribe
+   * fn. Listener MUST NOT re-enter the engine (record-only). cb(ch, items, tickHz).
+   */
+  onRmtTx(ch, cb) {
+    ch >>>= 0;
+    if (ch >= 8 || typeof cb !== 'function') return () => {};
+    this.txListeners[ch].push(cb);
+    this._syncHooks();
+    return () => {
+      const i = this.txListeners[ch].indexOf(cb);
+      if (i >= 0) this.txListeners[ch].splice(i, 1);
+    };
+  }
+
+  /** Drain staged TX items: pollRmtTx() → all channels, pollRmtTx(ch) → one. */
+  pollRmtTx(ch = null) {
+    const out = [];
+    const chs = ch === null ? [0, 1, 2, 3, 4, 5, 6, 7] : [ch >>> 0];
+    for (const c of chs) {
+      if (c >= 8) continue;
+      const q = this.txQueue[c];
+      if (q?.length) {
+        const items = q.splice(0);
+        const tickHz = this.getRmtTickHz(c);
+        out.push({ ch: c, items, tickHz });
+        for (const cb of [...this.txListeners[c]]) {
+          try { cb(c, items, tickHz); } catch (e) { console.warn(`[RMT-TAP] listener threw: ${e?.message || e}`); }
+        }
+      }
+    }
+    return out;
+  }
+
+  /** FFI sink for js_rmt_tx_items (never throws; bounded staging). */
+  _onRmtTxData(ch, words) {
+    try {
+      const q = this.txQueue[ch >>> 0];
+      if (!q) return;
+      for (const w of words) {
+        q.push(w >>> 0);
+        if (q.length > 4096) q.shift();
+      }
+    } catch {}
+  }
+
+  /**
+   * Stage host→guest RX items (raw u32 item words, ≤ 64) for a channel.
+   * @returns words staged.
+   */
+  injectRmtRx(ch, words) {
+    ch >>>= 0;
+    const arr = Array.from(words ?? []).map((w) => w >>> 0).slice(0, 64);
+    if (ch >= 8 || arr.length === 0) return 0;
+    if (!this._exports) {
+      const prev = this._localPending.get(ch) ?? [];
+      this._localPending.set(ch, prev.concat(arr).slice(-64));
+      return arr.length;
+    }
+    this._syncHooks();
+    return this._injectLive(ch, arr);
+  }
+
+  _injectLive(ch, arr) {
+    try {
+      const ex = this._exports;
+      const scratch = ex.native_rmt_rx_scratch_ptr?.() >>> 0;
+      if (!scratch || !ex.native_rmt_rx_inject) return 0;
+      const mem = this.chip._wasmLoader.memoryBuffer;
+      const dv = new DataView(mem);
+      for (let i = 0; i < arr.length; i++) dv.setUint32(scratch + i * 4, arr[i] >>> 0, true);
+      return ex.native_rmt_rx_inject(ch >>> 0, scratch, arr.length) >>> 0;
+    } catch { return 0; }
+  }
+
+  /** Channel tick rate in Hz (0 when WASM absent). */
+  getRmtTickHz(ch) {
+    try { return this._exports?.native_rmt_tick_hz?.(ch >>> 0) >>> 0 || 0; }
+    catch { return 0; }
+  }
+
+  /** Clear captured (in-flight) state (chip.reset(); wiring + preloads survive). */
+  _resetFlight() {
+    for (const q of this.txQueue) q.length = 0;
+  }
+
+  /** Encode one RMT item word from two (duration-ticks, level) halves. */
+  static item(d0, l0, d1, l1) {
+    return (((d1 & 0x7fff) << 16) | ((l1 ? 1 : 0) << 31) | ((d0 & 0x7fff)) | ((l0 ? 1 : 0) << 15)) >>> 0;
+  }
+
+  /** Decode one RMT item word into {d0, l0, d1, l1}. */
+  static splitItem(w) {
+    w >>>= 0;
+    return { d0: w & 0x7fff, l0: (w >>> 15) & 1, d1: (w >>> 16) & 0x7fff, l1: (w >>> 31) & 1 };
+  }
+
+  /** Convert microseconds to channel ticks at hz (rounded, ≥ 1 when us > 0). */
+  static usToTicks(us, hz) {
+    if (!(us > 0) || !(hz > 0)) return 0;
+    return Math.max(1, Math.round((us * hz) / 1e6));
+  }
+}
+
+/**
+ * OV2640 camera sensor model (SCCB control + DVP frame expectation).
+ *
+ * Two halves, matching the engine split:
+ *  - SCCB (control): the sensor is an I2C-compatible slave at 0x30.
+ *    attachToI2c(i2cTap) wires the register-pointer protocol (first write
+ *    byte after START = register address, following bytes = data with
+ *    auto-increment; repeated-START reads serve regs[ptr++]).
+ *    Commit points are STOPs; drainSccbLog() exposes the init sequence
+ *    the firmware programmed for host verification.
+ *  - DVP (pixels): the model does NOT push pixels — the engine's virtual
+ *    sensor emits the deterministic ramp (byte[i] = i & 0xFF, one byte per
+ *    DMA element in SM_0A00_0B00 sample1). expectedFrame() reproduces that
+ *    ramp for host-side frame verification; frameBytes() sizes captures.
+ *
+ * Register file: PID reset values 0x0A=0x26/0x0B=0x42 (what esp-camera
+ * checks); everything else resets 0x00. Device memory survives reset;
+ * transaction pointer state + SCCB log clear in _resetFlight().
+ */
+export class Ov2640 {
+  constructor() {
+    /** 7-bit SCCB address (0x30 write / 0x31 read). */
+    this.addr = 0x30;
+    this.regs = new Uint8Array(256);
+    this.regs[0x0a] = 0x26;
+    this.regs[0x0b] = 0x42;
+    this.width = 160;
+    this.height = 120;
+    this.format = 'RGB565';
+    this._ptr = 0;
+    this._havePtr = false;
+    this._curReg = -1;
+    this._curBytes = [];
+    /** Committed SCCB writes since last drain: [{reg, bytes:[...]}]. */
+    this.sccbLog = [];
+    this._tap = null;
+    this._entry = null;
+  }
+
+  /** Attach to an I2C tap's bus as an SCCB slave (post-create safe). */
+  attachToI2c(i2cTap, addr7 = 0x30) {
+    this.addr = addr7 & 0x7f;
+    this._tap = i2cTap;
+    this._entry = i2cTap.attachSlave(this.addr, {
+      onWrite: (b) => this._sccbWrite(b & 0xff),
+      onRead: () => this._sccbRead(),
+      onStop: (wasRead) => this._sccbStop(!!wasRead),
+    });
+    return this._entry;
+  }
+
+  detachFromI2c() {
+    try { this._tap?.detachSlave?.(this.addr); } catch {}
+    this._tap = null;
+    this._entry = null;
+  }
+
+  _sccbWrite(b) {
+    if (!this._havePtr) {
+      this._ptr = b & 0xff;
+      this._havePtr = true;
+      this._curReg = this._ptr;
+      this._curBytes = [];
+    } else {
+      this.regs[this._ptr] = b & 0xff;
+      this._curBytes.push(b & 0xff);
+      this._ptr = (this._ptr + 1) & 0xff;
+    }
+    return true; // ACK
+  }
+
+  _sccbRead() {
+    const b = this.regs[this._ptr] & 0xff;
+    this._ptr = (this._ptr + 1) & 0xff;
+    return b;
+  }
+
+  _sccbStop() {
+    // Commit data-bearing writes (pure pointer writes select, not program).
+    if (this._havePtr && this._curBytes.length) {
+      this.sccbLog.push({ reg: this._curReg & 0xff, bytes: this._curBytes.splice(0) });
+      if (this.sccbLog.length > 1024) this.sccbLog.splice(0, this.sccbLog.length - 1024);
+    }
+    this._havePtr = false;
+    this._curReg = -1;
+    this._curBytes = [];
+  }
+
+  /** Drain committed SCCB register writes for init-sequence verification. */
+  drainSccbLog() {
+    return this.sccbLog.splice(0);
+  }
+
+  /** Set the capture resolution (sensor window the cell asserts). */
+  setResolution(w, h) {
+    this.width = w >>> 0;
+    this.height = h >>> 0;
+  }
+
+  /** Set the pixel format ('RGB565' | 'YUV422' | 'GRAYSCALE'). */
+  setFormat(f) {
+    if (f !== 'RGB565' && f !== 'YUV422' && f !== 'GRAYSCALE') {
+      throw new Error(`Ov2640: unsupported format '${f}' (use RGB565, YUV422, GRAYSCALE)`);
+    }
+    this.format = f;
+  }
+
+  /** Expected frame size in sensor bytes (one byte per DMA element). */
+  frameBytes() {
+    if (this.format === 'GRAYSCALE') return this.width * this.height;
+    return this.width * this.height * 2; // RGB565 / YUV422
+  }
+
+  /**
+   * Expected frame bytes: the deterministic virtual-sensor ramp
+   * (byte[i] = i & 0xFF) — engine parity (i2c_i2s.rs camera feed), so a
+   * firmware cell can assert fb contents byte-exact.
+   */
+  expectedFrame() {
+    const n = this.frameBytes();
+    const out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) out[i] = i & 0xff;
+    return out;
+  }
+
+  /** Clear transaction state + SCCB log (chip.reset(); regs/resolution survive). */
+  _resetFlight() {
+    this._ptr = 0;
+    this._havePtr = false;
+    this._curReg = -1;
+    this._curBytes = [];
+    this.sccbLog.length = 0;
   }
 }

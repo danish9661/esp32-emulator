@@ -73,6 +73,17 @@ const CMD_OW_SET_TEMP = 42; // ARG0=pin, ARG1=millidegrees C (two's complement u
 const CMD_OW_POLL = 43; // ARG0=pin → ARG1=entry-count + readResp u32 (type<<24|payload)
 const CMD_OW_SCRATCH = 44; // ARG0=pin, ARG1=len + readResp bytes (preload scratchpad)
 const CMD_WRITE_MMIO = 45; // ARG0=hid, ARG1=addr, ARG2=val (32-bit native backdoor write)
+const CMD_RMT_TX_ARM = 46; // ARG0=ch (arm guest→host TX capture)
+const CMD_RMT_POLL_TX = 47; // ARG0=ch → ARG1=word-count + readResp u32 LE item words
+const CMD_RMT_RX_INJECT = 48; // ARG0=ch, ARG1=word-count + readResp u32 LE item words → ARG0=staged
+const CMD_RMT_TICK_HZ = 49; // ARG0=ch → ARG0=tick Hz
+const CMD_CAM_ARM = 50; // ARG0=idx (arm camera-frame staging)
+const CMD_CAM_POLL = 51; // ARG0=idx → ARG1=word-count + readResp u32 LE sensor words
+const CMD_CAM_BYTES = 52; // ARG0=idx, ARG1=len (virtual-sensor frame size in bytes)
+const CMD_CAM_SCCB = 53; // ARG0=bus, ARG1=addr7 (attach in-worker OV2640 SCCB model)
+const CMD_CAM_LEN = 54; // ARG0=idx → ARG0=frame bytes (virtual-sensor frame size)
+const CMD_CAM_FEED = 55; // ARG0=idx, ARG1=len + readResp bytes (host→sensor feed) → ARG0=staged
+const CMD_CAM_FEED_LEN = 56; // ARG0=idx → ARG0=staged (unconsumed) feed bytes
 
 const RESP_IDLE = 0;
 const _RESP_DONE = 1;
@@ -682,6 +693,156 @@ class SimulatorWorker {
     Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_WRITE_MMIO);
     Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
     while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /** Arm RMT guest→host TX capture on a channel (sticky wiring). */
+  async armRmtTx(ch) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, ch >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_RMT_TX_ARM);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /**
+   * Drain staged RMT TX item words for a channel (guest→host, incl. the
+   * zero terminator word).
+   * @returns {Promise<number[]>} u32 item words in channel-RAM order.
+   */
+  async pollRmtTx(ch = 0) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, ch >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_RMT_POLL_TX);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    const dv = new DataView(this.readResp.buffer, this.readResp.byteOffset, Math.min(n * 4, this.readResp.length));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(dv.getUint32(i * 4, true) >>> 0);
+    return out;
+  }
+
+  /**
+   * Stage host→guest RMT RX items (raw u32 item words, ≤ 64). Delivers
+   * immediately when the channel is RX-armed, else pends for the next
+   * RX_EN arm.
+   * @returns {Promise<number>} words staged.
+   */
+  async injectRmtRx(ch, words) {
+    this._checkReady();
+    const arr = Array.from(words ?? []).map((w) => w >>> 0).slice(0, 64);
+    const dv = new DataView(this.readResp.buffer, this.readResp.byteOffset, this.readResp.length);
+    for (let i = 0; i < arr.length; i++) dv.setUint32(i * 4, arr[i], true);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, ch >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, arr.length);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_RMT_RX_INJECT);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    return Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG0) >>> 0;
+  }
+
+  /** RMT channel tick rate in Hz (for host-model µs↔tick conversion). */
+  async getRmtTickHz(ch) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, ch >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_RMT_TICK_HZ);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    return Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG0) >>> 0;
+  }
+
+  /** Arm the camera-frame hook on a controller (sticky wiring). */
+  async armCamera(idx = 0) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, idx >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_CAM_ARM);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /**
+   * Drain staged camera sensor bytes for a controller (guest→host).
+   * @returns {Promise<number[]>} u32 DMA elements (one sensor byte each).
+   */
+  async pollCameraFrame(idx = 0) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, idx >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_CAM_POLL);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    const n = Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG1);
+    const dv = new DataView(this.readResp.buffer, this.readResp.byteOffset, Math.min(n * 4, this.readResp.length));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(dv.getUint32(i * 4, true) >>> 0);
+    return out;
+  }
+
+  /** Set the virtual-sensor frame size in bytes for a controller. */
+  async setCameraFrameBytes(idx, len) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, idx >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, len >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_CAM_BYTES);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /** Attach an in-worker OV2640 SCCB sensor model on an I2C bus. */
+  async attachCameraSccb(bus = 0, addr = 0x30) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, bus >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, addr & 0x7f);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_CAM_SCCB);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+  }
+
+  /** Virtual-sensor frame size in bytes for a controller. */
+  async getCameraFrameBytes(idx = 0) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, idx >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_CAM_LEN);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    return Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG0) >>> 0;
+  }
+
+  /**
+   * Feed host-side sensor bytes for upcoming captures (scripted scenes).
+   * A full staged frame replaces the ramp for exactly one capture.
+   * @returns {Promise<number>} bytes staged.
+   */
+  async feedCameraFrame(idx, bytes) {
+    this._checkReady();
+    const arr = Uint8Array.from(bytes ?? []).slice(0, 38400);
+    this.readResp.set(arr, 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, idx >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG1, arr.length);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_CAM_FEED);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    return Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG0) >>> 0;
+  }
+
+  /** Staged (unconsumed) host-fed sensor bytes, for flow control. */
+  async cameraFeedLength(idx = 0) {
+    this._checkReady();
+    Atomics.store(this.ctrl, SAB_SLOT_CMD_ARG0, idx >>> 0);
+    Atomics.store(this.ctrl, SAB_SLOT_RESP, RESP_IDLE);
+    Atomics.store(this.ctrl, SAB_SLOT_CMD, CMD_CAM_FEED_LEN);
+    Atomics.notify(this.ctrl, SAB_SLOT_CMD, 1);
+    while (Atomics.load(this.ctrl, SAB_SLOT_RESP) === RESP_IDLE) {} // eslint-disable-line no-empty
+    return Atomics.load(this.ctrl, SAB_SLOT_CMD_ARG0) >>> 0;
   }
 
   /**

@@ -46,6 +46,10 @@ const RMT_CHANNEL_REGISTER_TX_LIM: u32 = 2;
 
 const RMT_EVENT_BASE: u32 = 200;
 
+/// Host TX-capture scratch (guest→host item words for js_rmt_tx_items;
+/// <= 64 channel-RAM words + the zero terminator).
+static mut RMT_TX_SCRATCH: [u32; 65] = [0u32; 65];
+
 const UART_REG1: u32 = 0;
 const UART_REG2: u32 = 512;
 const UART_REG3: u32 = 1024;
@@ -92,12 +96,21 @@ pub struct RmtChannel {
     // bit 1); a TX completion on any other channel streams its items into
     // this channel's RAM and raises RX_END (single-chip loopback parity
     // with the SPI/I2C virtual buses).
-    rx_enabled: u32,
+    pub rx_enabled: u32,
     idle_output_enable: u32,
     idle_level: u32,
     event_id: usize,
     clock_divider: u32,
     clock_parent_is_ref: u32,
+    /// Host TX-capture hook (DHT22-style single-wire sensors): when set,
+    /// transmit_done reports the channel-RAM item words to JS. Wiring, not
+    /// state: survives reset (never cleared); zero FFI cost when unset.
+    pub tx_hook: u32,
+    /// Host RX-inject staging (raw 32-bit item words, guest tick domain).
+    /// Preload, not state: survives reset; delivered on the next RX_EN arm,
+    /// or immediately when injected while armed.
+    pub rx_pending: [u32; 64],
+    pub rx_pending_len: u32,
 }
 
 impl RmtChannel {
@@ -125,12 +138,15 @@ impl RmtChannel {
             event_id: usize::MAX,
             clock_divider: 1,
             clock_parent_is_ref: 0,
+            tx_hook: 0,
+            rx_pending: [0u32; 64],
+            rx_pending_len: 0,
         };
         ch.reset();
         ch
     }
 
-    fn clock_freq_hz(&self, ctx: &CpuContext) -> u64 {
+    pub fn clock_freq_hz(&self, ctx: &CpuContext) -> u64 {
         if self.clock_parent_is_ref != 0 {
             let parent_freq = ctx.clocks.ref_tick.frequency as u64;
             if self.clock_divider == 0 { parent_freq } else { parent_freq / self.clock_divider as u64 }
@@ -170,6 +186,23 @@ impl RmtChannel {
         // channel before raising TX_END (single ISR services both).
         let (idx, start, nbytes) = (self.index, self.mem_start, self.tx_offset);
         unsafe { (*self.rmt).deliver_loopback(ctx, idx, start, nbytes) };
+        // Host TX-capture tap: report the transmitted channel-RAM words
+        // (items + zero terminator) to the JS capture queue. Fires ONLY
+        // when armed via native_rmt_set_tx_hook (zero FFI otherwise).
+        if self.tx_hook != 0 {
+            let nwords = core::cmp::min(self.tx_offset / 4 + 1, 65) as usize;
+            unsafe {
+                for i in 0..nwords {
+                    RMT_TX_SCRATCH[i] =
+                        (*self.rmt).read_ram((self.mem_start + (i as u32) * 4) & !3);
+                }
+                crate::peripherals::common::ffi::js_rmt_tx_items(
+                    self.index,
+                    RMT_TX_SCRATCH.as_ptr() as u32,
+                    nwords as u32,
+                );
+            }
+        }
         ctx.gpio_matrix.set_output(self.config.matrix_out, self.idle_output_enable != 0, self.idle_level != 0);
         if self.continuous != 0 {
             self.tx_offset = 0;
@@ -204,6 +237,16 @@ impl RmtChannel {
         // CONF1 bit 1 = RX_EN (rmt_reg.h RMT_RX_EN_CHn): arm/disarm the
         // virtual-wire receiver.
         self.rx_enabled = if cpu_val & 2 != 0 { 1 } else { 0 };
+        // Host RX-inject staging (DHT22-style sensors): a pending host
+        // frame delivers on the arming edge, like a sensor answering after
+        // seeing the start pulse.
+        if self.rx_enabled != 0 && self.rx_pending_len != 0 {
+            let n = core::cmp::min(self.rx_pending_len as usize, 64);
+            let mut buf = [0u32; 64];
+            buf[..n].copy_from_slice(&self.rx_pending[..n]);
+            self.rx_pending_len = 0;
+            unsafe { (*self.rmt).deliver_host_rx(ctx, self.index as usize, &buf[..n]) };
+        }
         if cpu_val & LED_REG28 != 0 {
             self.clock_parent_is_ref = 0;
         } else {
@@ -258,6 +301,8 @@ impl RmtChannel {
         self.tx_offset = 0;
         self.rx_enabled = 0;
         self.tx_enabled = 0;
+        // Host tap wiring + preloads survive (soldered devices): tx_hook
+        // stays armed, staged rx_pending stays queued for the next arm.
     }
 
     pub fn transmit_next(&mut self, ctx: &mut CpuContext) {
@@ -453,6 +498,38 @@ impl RmtPeripheral {
             let irq = if self.v2 != 0 { LED_REG40 + j as u32 } else { LED_REG40 + 3 * j as u32 + 1 };
             self.set_interrupt(ctx, irq);
         }
+    }
+
+    // Host RX-inject delivery (DHT22-style sensors): copy host-staged item
+    // words into channel j's RAM and complete the reception (MEM_OWNER to
+    // SW, WADDR status, RX_END) — the same completion the loopback path
+    // produces, so the guest RX ISR needs no special-casing. One-shot per
+    // arming (rx_enabled clears, the driver re-arms per capture).
+    pub fn deliver_host_rx(&mut self, ctx: &mut CpuContext, j: usize, words: &[u32]) {
+        if j >= self.channel_count as usize {
+            return;
+        }
+        let (dst_start, dst_size) = (self.channels[j].mem_start, self.channels[j].mem_size);
+        let nwords = core::cmp::min(words.len(), (dst_size / 4) as usize);
+        for (w, v) in words[..nwords].iter().enumerate() {
+            let base = self.config.ram_start;
+            let size = self.config.ram_size;
+            self.base.write_register(base + ((dst_start + (w as u32) * 4) % size), *v);
+        }
+        self.channels[j].rx_enabled = 0;
+        self.channels[j].rx_offset = 0;
+        // MEM_OWNER (CONF1 bit 5) flips to SW on RX_END, like hardware.
+        let conf1 = self.channels[j].config.conf1;
+        if conf1 >= 0 {
+            let v = self.base.read_register(conf1 as u32);
+            self.base.write_register(conf1 as u32, v | 32);
+        }
+        // CHnSTATUS MEM_WADDR_EX[9:0]: absolute received word address —
+        // the RX ISR derives the byte length as (waddr - ch*64) * 4.
+        let waddr = dst_start / 4 + nwords as u32;
+        self.base.write_register(0x60 + 4 * j as u32, waddr & 0x3FF);
+        let irq = if self.v2 != 0 { LED_REG40 + j as u32 } else { LED_REG40 + 3 * j as u32 + 1 };
+        self.set_interrupt(ctx, irq);
     }
 
     fn find_channel(&self, offset: u32) -> Option<(u32, u32)> {
