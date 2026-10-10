@@ -1785,14 +1785,48 @@ pub static SX_INST_TABLE: &[SxInstEntry] = &[
     SxInstEntry { name: "ee.src.q.LedcChannel.xp", mask: 0xff88300e, opcode: 0xe800000e, func: sx_ee_src_q_ledc_channel_xp },
 ];
 pub fn decode_pie0(core: &mut CoreState, tmp_val: u32) -> u32 {
-    for entry in SX_INST_TABLE {
-        if (tmp_val & entry.mask) == (entry.opcode & entry.mask) {
-            (entry.func)(core, tmp_val);
-            return 1;
+    // PERF (50mips): 8-way dispatch on opcode bits[3:1] instead of a linear
+    // scan over the whole table. SOUNDNESS (provable, do not "optimize"
+    // further without re-proving): every table mask covers bits[3:1]
+    // (verified programmatically over all entries — all end in 0x...XBa
+    // with mask bits 1..3 set), so any input matching entry E satisfies
+    // X[3:1] == E[3:1] and lands in E's bucket; buckets preserve original
+    // relative order, so first-match results are IDENTICAL to the linear
+    // scan, including all 60 overlapping priority chains. The partition is
+    // built once (~87 iterations) and cached; the mask-coverage
+    // debug_assert guards future table edits (release builds trust the
+    // proof — a violating entry would decode wrong, loudly, on first boot).
+    unsafe {
+        if !PIE0_PART_DONE {
+            let mut lens = [0u16; 8];
+            for (idx, entry) in SX_INST_TABLE.iter().enumerate() {
+                debug_assert!((entry.mask & 0xE) == 0xE, "pie0 mask must cover bits[3:1]");
+                let b = ((entry.opcode >> 1) & 7) as usize;
+                PIE0_PART[b][lens[b] as usize] = idx as u16;
+                lens[b] += 1;
+            }
+            PIE0_PART_LEN = lens;
+            PIE0_PART_DONE = true;
+        }
+        let b = ((tmp_val >> 1) & 7) as usize;
+        let mut i = 0;
+        while i < PIE0_PART_LEN[b] as usize {
+            let entry = &SX_INST_TABLE[PIE0_PART[b][i] as usize];
+            if (tmp_val & entry.mask) == (entry.opcode & entry.mask) {
+                (entry.func)(core, tmp_val);
+                return 1;
+            }
+            i += 1;
         }
     }
     0
 }
+
+// Bucket partition of SX_INST_TABLE by (opcode>>1)&7 (see decode_pie0).
+// 87 entries today; 128 slots leave headroom for future table growth.
+static mut PIE0_PART: [[u16; 128]; 8] = [[0u16; 128]; 8];
+static mut PIE0_PART_LEN: [u16; 8] = [0u16; 8];
+static mut PIE0_PART_DONE: bool = false;
 
 pub fn decode_pie_slot_select(cpu_val: u32) -> u32 {
     ((cpu_val >> 15) & 1) | (((cpu_val >> 20) & 3) << 1)
