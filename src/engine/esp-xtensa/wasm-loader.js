@@ -301,6 +301,8 @@ js_log_u32: (val) => {
         // Keep the linear-memory flash mirror in sync (Rust flash fast-path)
         const m = this.esp32?._flashMirror;
         if (m && off < m.length) m[off] = val;
+        // 50mips milestone B: mirror write changes fetched code -> bump JIT guard generation.
+        try { this.exports?.native_code_gen_bump?.(); } catch {}
       },
       // Virtual SD card block storage (JS parity with js_spi_flash_* byte
       // bridges). Rust passes a linear-memory scratch ptr (512B).

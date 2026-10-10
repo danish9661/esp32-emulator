@@ -60,13 +60,17 @@ pub extern "C" fn native_breakpoints_armed(n: u32) {
 //   reference the previous boot's code).
 // Overhead while armed: ~2 increments + branches per fetched instruction
 // (toggle via native_trace_enable for A/B).
-static mut TRACE_HOT: [u32; 1024] = [0u32; 1024];
+static mut TRACE_HOT: [[u32; 1024]; 2] = [[0u32; 1024]; 2];
 static mut TRACE_THRESH: u32 = 20000;
 static mut TRACE_ENABLE: u32 = 1;
-static mut TRACE_STATE: u32 = 0; // 0 idle, 1 recording
-static mut TRACE_LEN: u32 = 0;
-static mut TRACE_BUF: [u32; 192] = [0u32; 192]; // 64 x (pc, op, w)
-static mut TRACE_RING: [u32; 16 * 194] = [0u32; 16 * 194]; // 16 x (start, len, 64x3)
+static mut TRACE_STATE: [u32; 2] = [0; 2]; // 0 idle, 1 recording
+static mut TRACE_LEN: [u32; 2] = [0; 2];
+static mut TRACE_BUF: [[u32; 192]; 2] = [[0u32; 192]; 2]; // per core: 64 x (pc, op, w)
+// Ring slots are per-core-coherent: 16 x (core, start, len, 64x3).
+// (run316 lesson: a shared buffer interleaves both cores' fetch streams —
+// pcs jump -188/+68 between entries and no entry run is a real dynamic
+// path. The recorder must be per-core; the ring carries the core tag.)
+static mut TRACE_RING: [u32; 16 * 195] = [0u32; 16 * 195];
 static mut TRACE_RING_N: u32 = 0;
 static mut TRACE_RING_HEAD: u32 = 0;
 
@@ -88,14 +92,14 @@ pub extern "C" fn native_trace_len() -> u32 {
 
 /// Linear scratch address holding the ring: [ntraces, (start,len,e0..)..].
 /// Read `native_trace_scratch_len()` u32 words from it via memoryBuffer.
-static mut TRACE_SCRATCH: [u32; 1 + 16 * 194] = [0u32; 1 + 16 * 194];
+static mut TRACE_SCRATCH: [u32; 1 + 16 * 195] = [0u32; 1 + 16 * 195];
 
 #[no_mangle]
 pub extern "C" fn native_trace_scratch_ptr() -> u32 {
     unsafe {
         TRACE_SCRATCH[0] = TRACE_RING_N;
         let mut i = 0;
-        while i < 16 * 194 {
+        while i < 16 * 195 {
             TRACE_SCRATCH[1 + i] = TRACE_RING[i];
             i += 1;
         }
@@ -105,7 +109,7 @@ pub extern "C" fn native_trace_scratch_ptr() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn native_trace_scratch_len() -> u32 {
-    1 + 16 * 194
+    1 + 16 * 195
 }
 
 /// Fetch hook: hotness + linear capture. Called with the fetched opcode;
@@ -113,59 +117,62 @@ pub extern "C" fn native_trace_scratch_len() -> u32 {
 /// `mmio_op` must be true when the fetch came from an MMIO/fallback page.
 /// Trigger records its OWN op as entry 0 (no off-by-one: the hot pc leads
 /// its own trace, keeping loop alignment exact).
+/// `core_idx` selects the per-core buffer (see the TRACE_RING note).
 #[inline(always)]
-fn trace_fetch(pc: u32, op: u32, w: u32, mmio_op: bool) {
+fn trace_fetch(pc: u32, op: u32, w: u32, mmio_op: bool, core_idx: usize) {
+    let c = core_idx & 1;
     unsafe {
         if TRACE_ENABLE == 0 {
             return;
         }
-        if TRACE_STATE == 0 {
+        if TRACE_STATE[c] == 0 {
             let h = ((pc >> 2) & 1023) as usize;
-            TRACE_HOT[h] = TRACE_HOT[h].wrapping_add(1);
-            if TRACE_HOT[h] >= TRACE_THRESH && !mmio_op {
-                TRACE_STATE = 1;
-                TRACE_BUF[0] = pc;
-                TRACE_BUF[1] = op;
-                TRACE_BUF[2] = w;
-                TRACE_LEN = 1;
+            TRACE_HOT[c][h] = TRACE_HOT[c][h].wrapping_add(1);
+            if TRACE_HOT[c][h] >= TRACE_THRESH && !mmio_op {
+                TRACE_STATE[c] = 1;
+                TRACE_BUF[c][0] = pc;
+                TRACE_BUF[c][1] = op;
+                TRACE_BUF[c][2] = w;
+                TRACE_LEN[c] = 1;
             }
         } else if mmio_op {
-            close_trace();
-        } else if TRACE_LEN as usize >= 64 {
-            close_trace();
+            close_trace(c);
+        } else if TRACE_LEN[c] as usize >= 64 {
+            close_trace(c);
             // The current op belongs to the NEXT run, which starts only on
             // a fresh hot trigger (keeps runs loop-aligned).
         } else {
-            let o = (TRACE_LEN as usize) * 3;
-            TRACE_BUF[o] = pc;
-            TRACE_BUF[o + 1] = op;
-            TRACE_BUF[o + 2] = w;
-            TRACE_LEN += 1;
+            let o = (TRACE_LEN[c] as usize) * 3;
+            TRACE_BUF[c][o] = pc;
+            TRACE_BUF[c][o + 1] = op;
+            TRACE_BUF[c][o + 2] = w;
+            TRACE_LEN[c] += 1;
         }
     }
 }
 
-fn close_trace() {
+fn close_trace(c: usize) {
     unsafe {
-        if TRACE_LEN == 0 {
-            TRACE_STATE = 0;
+        if TRACE_LEN[c] == 0 {
+            TRACE_STATE[c] = 0;
             return;
         }
         let slot = (TRACE_RING_HEAD % 16) as usize;
-        let base = slot * 194;
-        TRACE_RING[base] = TRACE_BUF[0];
-        TRACE_RING[base + 1] = TRACE_LEN;
+        let base = slot * 195;
+        TRACE_RING[base] = c as u32;
+        TRACE_RING[base + 1] = TRACE_BUF[c][0];
+        TRACE_RING[base + 2] = TRACE_LEN[c];
         let mut i = 0;
-        while i < (TRACE_LEN as usize) * 3 {
-            TRACE_RING[base + 2 + i] = TRACE_BUF[i];
+        while i < (TRACE_LEN[c] as usize) * 3 {
+            TRACE_RING[base + 3 + i] = TRACE_BUF[c][i];
             i += 1;
         }
         TRACE_RING_HEAD += 1;
         if TRACE_RING_N < 16 {
             TRACE_RING_N += 1;
         }
-        TRACE_STATE = 0;
-        TRACE_LEN = 0;
+        TRACE_STATE[c] = 0;
+        TRACE_LEN[c] = 0;
     }
 }
 
@@ -173,9 +180,9 @@ fn close_trace() {
 /// under identical pcs; stale ring entries would lie in dumps).
 pub(crate) fn trace_reset_all() {
     unsafe {
-        TRACE_HOT = [0u32; 1024];
-        TRACE_STATE = 0;
-        TRACE_LEN = 0;
+        TRACE_HOT = [[0u32; 1024]; 2];
+        TRACE_STATE = [0; 2];
+        TRACE_LEN = [0; 2];
         TRACE_RING_N = 0;
         TRACE_RING_HEAD = 0;
     }
@@ -184,6 +191,56 @@ pub(crate) fn trace_reset_all() {
 #[no_mangle]
 pub extern "C" fn native_rec_reset() {
     trace_reset_all();
+    code_gen_reset();
+}
+
+/// 50mips milestone B: JIT entry-guard generation (bumped on every
+/// code-affecting store; see memory.rs CODE_GEN).
+#[no_mangle]
+pub extern "C" fn native_code_gen() -> u32 {
+    code_gen_get()
+}
+
+/// Bump from JS-side code-affecting stores (flash-mirror sync in the
+/// js_spi_flash_set_byte handler — the mirror write is invisible to Rust).
+#[no_mangle]
+pub extern "C" fn native_code_gen_bump() {
+    code_gen_bump();
+}
+
+/// Diag probe for the milestone-B guard's window_check JS port: calls the
+/// REAL window_check with live spec state. Side-effect-free exactly when
+/// it returns 0 (all mutations sit behind the early false returns).
+#[no_mangle]
+pub extern "C" fn native_window_check_probe(core_idx: u32, cpu_val: u32, tmp_val: u32, idx_val: u32) -> u32 {
+    let core = get_core(core_idx);
+    if core.window_check(cpu_val, tmp_val, idx_val) {
+        1
+    } else {
+        0
+    }
+}
+
+/// 50mips milestone C: l32r call-out for JIT traces. Exact r_handler48
+/// datapath minus window_check (covered by the entry guard). Returns the
+/// loaded value; the emitted code stores it to the dest phys reg.
+#[no_mangle]
+pub extern "C" fn native_jit_l32r(core_idx: u32, op: u32, next_pc: u32) -> u32 {
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 65535;
+    let addr = ((next_pc >> 2).wrapping_add(0xffff0000 | idx_val)) << 2;
+    read_uint32(core, addr)
+}
+
+/// 50mips milestone C: ssai call-out for JIT traces. Exact _handler42
+/// body (no window_check in the original — vacuous).
+#[no_mangle]
+pub extern "C" fn native_jit_ssai(core_idx: u32, op: u32) {
+    use super::constants::EXC_CAUSE;
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 15;
+    core.special_registers[EXC_CAUSE] = (((op >> 4) & 1) << 4) | idx_val;
+    core.sar_m32_pending = 0;
 }
 // run152 bisect gate (RETIRED run153 with the run151 intercept; the gate
 // and shadow now stand by for future CAS forensics, default OFF).
@@ -1511,6 +1568,7 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
         width,
         core.opcode_page_type != PTE_TYPE_RAM as i32
             && core.opcode_page_type != PTE_TYPE_FLASH as i32,
+        core.index as usize,
     );
 
     core.last_opcode = opcode;

@@ -15,6 +15,32 @@ extern "C" {
 static mut FLASH_OFF: u32 = 0;
 static mut MMU_REGION_ID: u32 = MMU_TABLE_REGION_ID;
 
+// 50mips Phase 2 (milestone B): code-generation counter for JIT entry
+// guards. Bumped on EVERY store that can change fetched code (both RAM
+// branches below + GDB flash-override writes). Soundness direction is
+// bump-more: a missed bump executes a stale trace (wrong); an extra bump
+// only forces re-record (perf). MMU remaps need no separate hook — the
+// table lives in RAM, so remap writes bump through the same branches.
+// Reset in native_rec_reset (traces are cleared there too).
+static mut CODE_GEN: u32 = 0;
+
+#[inline(always)]
+pub fn code_gen_bump() {
+    unsafe {
+        CODE_GEN = CODE_GEN.wrapping_add(1);
+    }
+}
+
+pub fn code_gen_get() -> u32 {
+    unsafe { CODE_GEN }
+}
+
+pub fn code_gen_reset() {
+    unsafe {
+        CODE_GEN = 0;
+    }
+}
+
 // DMA descriptor/buffer access for native peripherals (JS parity:
 // this.cpu.mapAddress(addr, coreIdx) — the page-cached JS map path used
 // by the JS DmaDescriptorChain in i2c-i2s.js). core 0, like the JS
@@ -65,6 +91,7 @@ fn dma_write(addr: u32, val: u32, size: u32) {
     let (typ, data) = page_table_entry(addr >> PAGE_SHIFT);
     if typ == PTE_TYPE_RAM {
         let a = ram_addr(data, addr);
+        code_gen_bump();
         unsafe {
             match size {
                 8 => mem_write8(a, val as u8),
@@ -75,6 +102,7 @@ fn dma_write(addr: u32, val: u32, size: u32) {
     } else if typ == PTE_TYPE_FLASH {
         unsafe {
             if js_flash_write_override() != 0 {
+                code_gen_bump();
                 map_write(0, addr, val, size);
             }
         }
@@ -378,6 +406,7 @@ pub fn write_page_table(core: &mut CoreState, addr: u32, val: u32, size: u32) {
     }
     if core.data_page_type as u32 == PTE_TYPE_RAM {
         let a = ram_addr(core.data_page_data as u32, addr);
+        code_gen_bump();
         unsafe {
             match size {
                 8 => mem_write8(a, val as u8),
@@ -399,6 +428,7 @@ pub fn write_page_table(core: &mut CoreState, addr: u32, val: u32, size: u32) {
         // ReadonlyMemory.override flag set by gdb-session.js M commands.
         unsafe {
             if js_flash_write_override() != 0 {
+                code_gen_bump();
                 map_write(core.index, addr, val, size);
             }
         }

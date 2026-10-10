@@ -682,6 +682,9 @@ impl SpiPeripheral {
         unsafe {
             if self.flash_buffer != core::ptr::null_mut() {
                 if idx < self.flash_buffer_len as usize {
+                    // 50mips milestone B: guest flash programming changes
+                    // fetched code -> bump the JIT guard generation.
+                    crate::xtensa::memory::code_gen_bump();
                     *self.flash_buffer.add(idx) = val;
                 }
             } else {
