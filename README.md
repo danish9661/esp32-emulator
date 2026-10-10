@@ -380,6 +380,17 @@ different path) and batching `inst_count` stores per `core_run` call
   is the default here). Diag scripts: `tests/tmp-speed.mjs` (end-to-end
   table), `tests/tmp-speed2.mjs` (batch/pump sweeps).
 
+### Ceiling note (Oct 2026)
+
+Two decode-cache designs were built on the `50mips` branch, proven
+bit-exact (200M-iteration ACC oracle), measured interleaved A/B, and
+reverted (−20% reread-validated, −14% generation-validated: the probe costs
+more than the already-optimized dispatch it skips). Remaining
+accuracy-safe ideas (cold outlining, superoperators, fetch TLB) stack to
+roughly ×1.45 (≈43 MIPS); 50+ needs JIT/threads/native, all declined on
+accuracy, determinism, or platform grounds. Standing throughput ≈30 MIPS
+raw / ≈26 SAB-on; the branch history holds the full evidence trail.
+
 Idle/yielding firmware is dominated by idle fast-forward + native peripheral
 FFI and sees little wall-clock change. All worker tests pass with zero
 JS fallback traffic (0 `map_read`/`map_write` FFI calls).
