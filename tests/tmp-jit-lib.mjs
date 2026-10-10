@@ -5,8 +5,8 @@ function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7
 const OP = {
   end: 0x0b, if_: 0x04, else_: 0x05, return_: 0x0f, call: 0x10,
   local_get: 0x20, local_set: 0x21,
-  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x48,
-  i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76,
+  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x48, i32_and: 0x71, i32_or: 0x72, local_tee: 0x22,
+  i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76, i32_shr_s: 0x75,
   i32_load: 0x28, i32_store: 0x36,
 };
 const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
@@ -30,11 +30,38 @@ export function classify(op) {
     const idx = f12, clk = f8, sim = ((((op >> 4) & 7) << 4) | idx);
     return { k: 'moviN', t: clk, imm: ((sim & 96) === 96 ? (sim | 0xffffff80) : sim) >>> 0 };
   }
-  if (lo === 1) return { k: 'l32r' }; // r_handler48 (fields at emit)
+  if (lo === 1) return { k: 'l32r', t: (op >> 4) & 15 }; // r_handler48 dest=(>>4)&15
   if (lo === 7 && (op & 57344) === 32768 && (op & 4096) === 4096) // bne n_handler46
-    return { k: 'bne', r: f8, s: f4, imm: (op >> 16) & 255 };
+    return { k: 'br', b: 'bne', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 57344) === 8192 && (op & 4096) === 4096) // bltu n_handler42
-    return { k: 'bltu', r: f8, s: f4, imm: (op >> 16) & 255 };
+    return { k: 'br', b: 'bltu', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 7 && (op & 57344) === 0 && (op & 4096) === 4096) { // beq n_handler30
+    const r = f8, ss = f4;
+    return { k: 'br', b: 'beq', r, s: ss, imm: sext8((op >> 16) & 255) };
+  }
+  if (lo === 6 && (op & 48) === 16 && (op & 192) === 64) { // bnez n_handler48 (12-bit offset)
+    const imm12 = (op >> 12) & 4095, se = (imm12 & 2048) ? (imm12 | 0xfffff000) : imm12;
+    return { k: 'br', b: 'bnez', r: (op >> 8) & 15, s: -1, imm: se };
+  }
+  if (lo === 6 && (op & 48) === 16 && (op & 192) === 0) { // beqz n_handler32 (12-bit offset)
+    const imm12 = (op >> 12) & 4095, se = (imm12 & 2048) ? (imm12 | 0xfffff000) : imm12;
+    return { k: 'br', b: 'beqz', r: (op >> 8) & 15, s: -1, imm: se };
+  }
+  if (lo === 6 && (op & 48) === 48 && (op & 192) === 0) return { k: 'callEnd' }; // r_handler24 RETW: trace boundary
+  if (lo === 12 && (op & 128) && (op & 64)) { // bnez.n n_handler49 (taken iff !=0, small unsigned offset)
+    const sim = ((((op >> 4) & 3) << 4) | ((op >> 12) & 15)) >>> 0;
+    return { k: 'br', b: 'bnezn', r: (op >> 8) & 15, s: -1, imm: sim };
+  }
+  if (lo === 13 && (op & 61440) === 61440 && (op & 240) === 16) return { k: 'callEnd' }; // retw.n a_handler62
+  if (lo === 2 && (op & 61440) === 0) { // l8ui r_handler41
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (op >> 16) & 255;
+    return { k: 'l8ui', t, s: ss, off };
+  }
+  if (lo === 12 && (op & 128) && !(op & 64)) { // beqz.n n_handler33 (small unsigned offset)
+    const sim = ((((op >> 4) & 3) << 4) | ((op >> 12) & 15)) >>> 0;
+    return { k: 'br', b: 'beqz', r: f8, s: -1, imm: sim };
+  }
+
   if (lo === 2 && (op & 61440) === 40960) { // movi a_handler12
     const idx = (op >> 16) & 255, clk = f8, dst = f4, raw = (clk << 8) | idx;
     return { k: 'movi', t: dst, imm: ((raw & 2048) ? (raw | 0xfffff000) : raw) >>> 0 };
@@ -65,6 +92,22 @@ export function classify(op) {
       return { k: 'unknown', op };
     }
     if (e === 0 && f === 0x400000 && (op & 1110016) === 16384) return { k: 'ssai' }; // _handler42 (no window call)
+    if (e === 0 && f === 65536) { // slli _handler31
+      const sh = 32 - ((((op >> 20) & 1) << 4) | ((op >> 4) & 15));
+      return { k: 'slli', t: (op >> 12) & 15, s: (op >> 8) & 15, sh };
+    }
+    if (e === 0 && f === 2162688) { // srai _handler36
+      const wa = ((((op >> 20) & 1) << 4) | ((op >> 8) & 15)) >>> 0;
+      return { k: 'srai', t: (op >> 12) & 15, s: (op >> 4) & 15, sh: wa };
+    }
+    if (e === 0 && f === 0xA00000 && b20 === 0) return { k: 'addx2', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // n_handler15
+    if (e === 0 && f === 0 && (op & 1048576) === 0 && (op & 61440) === 8192) { // NOP family (bare return)
+      const sub = op & 4080;
+      if (sub === 0 || sub === 16 || sub === 32 || sub === 48 || sub === 192 || sub === 208 || sub === 240)
+        return { k: 'nop' };
+    }
+    if (e === 0 && (op & 0xE10000) === 0 && (op & 1048576) === 0 && (op & 61440) === 0 && (op & 240) === 224)
+      return { k: 'callEnd' }; // r_handler6 RET: trace boundary
   }
   return { k: 'unknown', op };
 }
@@ -96,17 +139,18 @@ export function buildTraceModule(T, ctx) {
   }
   const branches = [];
   kinds.forEach((cc, i) => {
-    if (cc.k === 'bne' || cc.k === 'bltu') {
-      const target = (T[i].pc + sext8(cc.imm) + 4) >>> 0;
+    if (cc.k === 'br') {
+      const target = (T[i].pc + cc.imm + 4) >>> 0;
       const takenRec = T[i].next !== ((T[i].pc + T[i].w) >>> 0);
       if (takenRec && T[i].next !== target) throw new Error(`branch target mismatch at ${i}`);
-      branches.push({ idx: i, pc: T[i].pc, w: T[i].w, kind: cc.k, r: cc.r, s: cc.s, target, takenRec });
+      branches.push({ idx: i, pc: T[i].pc, w: T[i].w, kind: cc.k, b: cc.b, r: cc.r, s: cc.s, target, takenRec });
     }
   });
   const P = (reg) => CBASE + 16 + ((((wb << 2) + reg) & 63)) * 4;
   const SPEC3 = CBASE + 336 + 3 * 4, LOOPC = CBASE + 336 + 2 * 4;
   const B = [];
   const cc2 = (v) => B.push(OP.i32_const, ...sleb(v | 0));
+  const c = cc2;
   const ld = (a) => { cc2(a); B.push(OP.i32_load, 0x02, 0x00); };
   let bj = 0;
   const loopOn = recLoop[2] !== 0;
@@ -138,7 +182,9 @@ export function buildTraceModule(T, ctx) {
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
     }
     else if (k.k === 's32in') { // _handler21: MW32(ar[s]+off, ar[t]); addr 0 traps -> side exit
-      ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40, OP.else_);
+      // NOTE: exit goes in the THEN (eqz=1 means addr==0); an exit in ELSE
+      // would fire on every nonzero address (inverted once, caught by micro).
+      ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1); B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
     }
@@ -149,6 +195,17 @@ export function buildTraceModule(T, ctx) {
     else if (k.k === 'or') { c(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(0x72, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'sub') { c(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_sub, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'rsrcc') { c(P(k.t)); c(CBASE + 336 + 234 * 4); B.push(OP.i32_load, 0x02, 0x00, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'l8ui') { // r_handler41: dst = MR8(ar[s]+off)
+      c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x00, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'nop') { /* no state change; pc advances by w */ }
+    else if (k.k === 'slli') { c(P(k.t)); ld(P(k.s)); c(k.sh); B.push(OP.i32_shl, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'srai') {
+      c(P(k.t)); ld(P(k.s)); c(k.sh); B.push(OP.i32_shr_s, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'addx2') {
+      c(P(k.t)); ld(P(k.r)); c(2); B.push(OP.i32_shl); ld(P(k.s)); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00);
+    }
     else if (k.k === 'l32r') { if (e.next === null) throw new Error('l32r as last trace op (no next pc)'); cc2(P(k.t)); cc2(CORE); cc2(e.op); cc2(e.next); B.push(OP.call, 0x06, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'ssai') {
       if (sarOff == null) { cc2(CORE); cc2(e.op); B.push(OP.call, 0x07); }
@@ -160,9 +217,12 @@ export function buildTraceModule(T, ctx) {
         cc2(CBASE + sarOff); cc2(0); B.push(OP.i32_store, 0x02, 0x00);
       }
     }
-    else if (k.k === 'bne' || k.k === 'bltu') {
+    else if (k.k === 'br') {
       const br = branches[bj++];
-      ld(P(br.r)); ld(P(br.s)); B.push(k.k === 'bne' ? OP.i32_ne : OP.i32_lt_u);
+      if (br.b === 'bne' || br.b === 'bltu' || br.b === 'beq') {
+        ld(P(br.r)); ld(P(br.s));
+        B.push(br.b === 'bne' ? OP.i32_ne : br.b === 'bltu' ? OP.i32_lt_u : OP.i32_eq);
+      } else { ld(P(br.r)); B.push(OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') B.push(OP.i32_eqz); }
       cc2(br.takenRec ? 1 : 0); B.push(OP.i32_eq);
       B.push(OP.if_, 0x40, OP.else_); cc2(100 + branches.indexOf(br)); B.push(OP.return_); B.push(OP.end);
     }
@@ -192,6 +252,7 @@ export function buildTraceModule(T, ctx) {
   const codeBody = [0x01, 0x01, 0x7f, ...B, OP.end];
   const codeContent = [0x01, ...uleb(codeBody.length), ...codeBody];
   const codeSec = [0x0a, ...uleb(codeContent.length), ...codeContent];
+  for (const v of B) if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error('bad emitted byte ' + v);
   const mod = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, ...typeSec, ...impSec, ...funcSec, ...expSec, ...codeSec]);
   return { mod, branches, endPC, len: T.length };
 }

@@ -5,7 +5,7 @@ import { ESP32 } from '../src/index.js';
 import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { buildTraceModule, instantiateTrace, findLoopSlices } from './tmp-jit-lib.mjs';
+import { buildTraceModule, instantiateTrace, findLoopSlices, classify } from './tmp-jit-lib.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const ROM = readFileSync(resolve(__dirname, 'rom/esp32-v3-rom.bin'));

@@ -989,17 +989,17 @@ async function runSimChunk() {
       if (jitDrv) {
         try {
           if (idleView0[0] === 0) {
-            jitKA = jitDrv.tryCore(0);
+            jitKA = jitDrv.chainCore(0);
             if (jitKA === 0) jitCompileKick(jitDrv, 0);
           }
           if (idleView1[0] === 0) {
-            jitKB = jitDrv.tryCore(1);
+            jitKB = jitDrv.chainCore(1);
             if (jitKB === 0) jitCompileKick(jitDrv, 1);
           }
           if ((steps & 262143) === 0) console.log('[JIT]', JSON.stringify(jitDrv.stats));
         } catch {}
       }
-      chip.step(512 - (jitKA > jitKB ? jitKA : jitKB));
+      chip.step(Math.max(0, 512 - (jitKA > jitKB ? jitKA : jitKB)));
       steps++;
       cycles = chip.cycles;
       // Fire due ClockTree events (ccompare / beacon / wifi-tx) on the JS
@@ -1455,6 +1455,9 @@ function applyBasicSetup(chip, config, flash, rom) {
   let mac = null;
   if (config.macAddress) mac = parseMacAddress(config.macAddress);
   if (chip.reset) chip.reset();
+  // 50mips JIT tier kill switch (per-chip, for same-run A/B): config
+  // jitEnabled:false disables the driver; default follows JIT env.
+  chip._jitEnabled = config.jitEnabled !== undefined ? !!config.jitEnabled : chip._jitEnabled;
   // ── Re-apply post-reset (reset wipes MMU, GPIO, UART, core state) ──
   if (chip.mmuTablePro && config.mmuPages) {
     for (let p = 0; p < config.mmuPages; p++) chip.mmuTablePro[p] = p;

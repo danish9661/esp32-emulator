@@ -10,7 +10,7 @@
 // equivalence across the worker battery is the standing gate.
 // Kill switch: enabled=false (or JIT=0) disables everything; the
 // interpreter covers all code paths by construction.
-import { classify, buildTraceModule, instantiateTrace } from './jit-trace-emit.js';
+import { classify, buildTraceModule, instantiateTrace, findLoopSlices } from './jit-trace-emit.js';
 
 export class JitDriver {
   constructor(chip, loader, opts = {}) {
@@ -22,7 +22,7 @@ export class JitDriver {
     this.uncompilable = new Set();
     this.maxEntries = opts.maxEntries || 128;
     this.minLen = opts.minLen || 24;
-    this.stats = { hits: 0, completed: 0, exits: 0, misses: 0, compiles: 0, evictions: 0, gGen: 0, gPend: 0, gSpec: 0, invalidated: 0, findNull: 0, buildFail: 0, instFail: 0, firstErr: '', badOps: {} };
+    this.stats = { hits: 0, completed: 0, exits: 0, misses: 0, compiles: 0, evictions: 0, gGen: 0, gPend: 0, gSpec: 0, invalidated: 0, findNull: 0, buildFail: 0, instFail: 0, firstErr: '', badOps: {}, exitSum: 0, exitN: 0, compLen: 0, pcExit: {}, pcComp: {} };
     const L = loader;
     // Memory never grows (maximum == initial), so the buffer is stable;
     // still re-check identity defensively (loader documents detach risk).
@@ -79,6 +79,59 @@ export class JitDriver {
     return ok;
   }
 
+  // Chain loop-closed traces within one step (up to maxTraces): after a
+  // completion pc usually returns to a cached start, so keep executing
+  // without re-guarding. Sound: only JIT ran since the entry guard, and JIT
+  // never mutates guard words (spec72/73/230, LOOP triple, code regions,
+  // pending) — stores target data pages, loads are read-only. Any exit or
+  // miss breaks to the interpreter batch, which continues from the exact
+  // parked pc. Returns total ops executed.
+  chainCore(core, maxTraces = 8) {
+    let total = 0;    for (let n = 0; n < maxTraces; n++) {
+      let pc;
+      try { pc = this.pcOf(core); } catch { break; }
+      const key = core + ':' + pc;
+      const e = this.cache.get(key);
+      if (!e) {
+        if (n === 0) this.stats.misses++;
+        break;
+      }
+      if (n === 0) {
+        let ok = false;
+        try { ok = this.guardPass(e, key); } catch { break; }
+        if (!ok) break;
+      }
+      let code;
+      try { code = e.runFn() | 0; } catch { break; }
+      this.stats.hits++;
+      if (code === 0) {
+        this.stats.completed++;
+        try {
+          this.setPc(core, e.endPC);
+          this.addInst(core, e.len);
+        } catch { break; }
+        total += e.len;
+        if (total >= 512) break; // keep per-step totals near batch scale
+        continue;
+      }
+      const br = e.branches[code - 100];
+      if (!br) break;
+      this.stats.exits++;
+      this.stats.exitSum += br.idx; this.stats.exitN++;
+      try {
+        const px = '0x' + e.startPc.toString(16);
+        this.stats.pcExit[px] = (this.stats.pcExit[px] || 0) + 1;
+      } catch {}
+      try {
+        this.addInst(core, br.idx);
+        this.setPc(core, br.pc);
+      } catch { break; }
+      total += br.idx;
+      break;
+    }
+    return total;
+  }
+
   // Try one JIT trace execution for core. Returns ops executed (0 = no hit).
   // Never throws: any failure falls back to the interpreter (returns 0 with
   // pc untouched... note partial prefix stays executed on exits — exact).
@@ -97,6 +150,11 @@ export class JitDriver {
       this.stats.hits++;
       if (code === 0) {
         this.stats.completed++;
+        this.stats.compLen = e.len;
+        try {
+          const px = '0x' + e.startPc.toString(16);
+          this.stats.pcComp[px] = (this.stats.pcComp[px] || 0) + 1;
+        } catch {}
         try {
           this.setPc(core, e.endPC);
           this.addInst(core, e.len);
@@ -106,13 +164,16 @@ export class JitDriver {
       const br = e.branches[code - 100];
       if (!br) return 0;
       this.stats.exits++;
+      this.stats.exitSum += br.idx; this.stats.exitN++;
+      // Prefix executed (br.idx ops); pc parks AT the missed branch/op and
+      // the step's interpreter batch executes it and everything after.
+      // (Never single-step the suffix: one FFI per op is ~50x batch cost
+      // and advancing both cores per single-step double-counts.)
       try {
         this.addInst(core, br.idx);
         this.setPc(core, br.pc);
       } catch { return 0; }
-      // One interpreter step executes the missed branch from its pc.
-      try { this.ex.core_run(1); } catch { return 0; }
-      return br.idx + 1;
+      return br.idx;
     }
     this.stats.misses++;
     return 0;
@@ -155,8 +216,25 @@ export class JitDriver {
       const TE = T.slice(0, T.length - 1);
       TE.forEach((e, i) => { e.next = (i + 1 < TE.length) ? TE[i + 1].pc : endPC; });
       const sp = this.spec(core);
+      // Prefer a loop-closed slice in the completable band (24..64 ops):
+      // the bench shows 200+ op windows never validate (phase flips) while
+      // ~56-op closed slices go 3/3 clean. Falls back to the full window.
+      let use = TE, useEnd = endPC;
+      try {
+        const cands = findLoopSlices(TE);
+        for (const cand of cands) {
+          const L = cand.end - cand.start;
+          if (L >= this.minLen && L <= 64) {
+            const S = TE.slice(cand.start, cand.end);
+            use = S;
+            useEnd = S[0].pc;
+            break;
+          }
+        }
+      } catch {}
+      use.forEach((e, i) => { e.next = (i + 1 < use.length) ? use[i + 1].pc : useEnd; });
       return {
-        TE, endPC,
+        TE: use, endPC: useEnd,
         rmin, rmax, rgens,
         s72: sp.w72, s73: sp.w73, s230: sp.w230,
         loop: [sp.l0, sp.l1, sp.l2],
@@ -212,7 +290,7 @@ export class JitDriver {
     }
     this.cache.set(key, {
       runFn, endPC: built.endPC !== null && built.endPC !== undefined ? built.endPC : found.endPC,
-      len: built.len, branches: built.branches,
+      len: built.len, branches: built.branches, startPc: pc,
       core, rmin: found.rmin, rmax: found.rmax, rgens: found.rgens,
       s72: found.s72, s73: found.s73, s230: found.s230,
       l0: found.loop[0], l1: found.loop[1], l2: found.loop[2],
