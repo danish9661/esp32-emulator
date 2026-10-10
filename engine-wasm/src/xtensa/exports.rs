@@ -42,6 +42,149 @@ static mut BP_ARMED: u32 = 0;
 pub extern "C" fn native_breakpoints_armed(n: u32) {
     unsafe { BP_ARMED = n; }
 }
+
+// 50mips Phase 2: hot-trace recorder (profiling side of the trace JIT).
+// Records linear instruction runs for later WASM emission. Design:
+// - HOT[1024] counters keyed by (pc>>2)&1023; crossing THRESH starts a
+//   recording at that pc (default 20000, tunable; boot noise never crosses).
+// - While recording, every fetched op appends (pc, opcode, width); the run
+//   closes at 64 ops, at an MMIO/fallback-page op (kept WITHOUT it — the
+//   partial straight line is still valid), or at a taken-backward... note:
+//   direction is unknown at fetch time, so branches/calls simply CLOSE the
+//   run (the emitter adds direction guards + side exits later).
+// - 16-slot ring; the spin loop dominates it. Interrupts/exceptions return
+//   before fetch, so recorded runs are side-effect-ordinary by construction
+//   (MMIO *reads* are fine to replay — same order, current device values;
+//   MMIO *writes* never enter: the run closes first).
+// - Cleared on engine reset alongside the decode machinery (stale traces
+//   reference the previous boot's code).
+// Overhead while armed: ~2 increments + branches per fetched instruction
+// (toggle via native_trace_enable for A/B).
+static mut TRACE_HOT: [u32; 1024] = [0u32; 1024];
+static mut TRACE_THRESH: u32 = 20000;
+static mut TRACE_ENABLE: u32 = 1;
+static mut TRACE_STATE: u32 = 0; // 0 idle, 1 recording
+static mut TRACE_LEN: u32 = 0;
+static mut TRACE_BUF: [u32; 192] = [0u32; 192]; // 64 x (pc, op, w)
+static mut TRACE_RING: [u32; 16 * 194] = [0u32; 16 * 194]; // 16 x (start, len, 64x3)
+static mut TRACE_RING_N: u32 = 0;
+static mut TRACE_RING_HEAD: u32 = 0;
+
+#[no_mangle]
+pub extern "C" fn native_trace_enable(on: u32) {
+    unsafe { TRACE_ENABLE = on; }
+}
+
+#[no_mangle]
+pub extern "C" fn native_trace_threshold(n: u32) {
+    unsafe { TRACE_THRESH = n; }
+}
+
+/// Completed-trace count (ring holds the last 16).
+#[no_mangle]
+pub extern "C" fn native_trace_len() -> u32 {
+    unsafe { TRACE_RING_N }
+}
+
+/// Linear scratch address holding the ring: [ntraces, (start,len,e0..)..].
+/// Read `native_trace_scratch_len()` u32 words from it via memoryBuffer.
+static mut TRACE_SCRATCH: [u32; 1 + 16 * 194] = [0u32; 1 + 16 * 194];
+
+#[no_mangle]
+pub extern "C" fn native_trace_scratch_ptr() -> u32 {
+    unsafe {
+        TRACE_SCRATCH[0] = TRACE_RING_N;
+        let mut i = 0;
+        while i < 16 * 194 {
+            TRACE_SCRATCH[1 + i] = TRACE_RING[i];
+            i += 1;
+        }
+        TRACE_SCRATCH.as_ptr() as u32
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn native_trace_scratch_len() -> u32 {
+    1 + 16 * 194
+}
+
+/// Fetch hook: hotness + linear capture. Called with the fetched opcode;
+///
+/// `mmio_op` must be true when the fetch came from an MMIO/fallback page.
+/// Trigger records its OWN op as entry 0 (no off-by-one: the hot pc leads
+/// its own trace, keeping loop alignment exact).
+#[inline(always)]
+fn trace_fetch(pc: u32, op: u32, w: u32, mmio_op: bool) {
+    unsafe {
+        if TRACE_ENABLE == 0 {
+            return;
+        }
+        if TRACE_STATE == 0 {
+            let h = ((pc >> 2) & 1023) as usize;
+            TRACE_HOT[h] = TRACE_HOT[h].wrapping_add(1);
+            if TRACE_HOT[h] >= TRACE_THRESH && !mmio_op {
+                TRACE_STATE = 1;
+                TRACE_BUF[0] = pc;
+                TRACE_BUF[1] = op;
+                TRACE_BUF[2] = w;
+                TRACE_LEN = 1;
+            }
+        } else if mmio_op {
+            close_trace();
+        } else if TRACE_LEN as usize >= 64 {
+            close_trace();
+            // The current op belongs to the NEXT run, which starts only on
+            // a fresh hot trigger (keeps runs loop-aligned).
+        } else {
+            let o = (TRACE_LEN as usize) * 3;
+            TRACE_BUF[o] = pc;
+            TRACE_BUF[o + 1] = op;
+            TRACE_BUF[o + 2] = w;
+            TRACE_LEN += 1;
+        }
+    }
+}
+
+fn close_trace() {
+    unsafe {
+        if TRACE_LEN == 0 {
+            TRACE_STATE = 0;
+            return;
+        }
+        let slot = (TRACE_RING_HEAD % 16) as usize;
+        let base = slot * 194;
+        TRACE_RING[base] = TRACE_BUF[0];
+        TRACE_RING[base + 1] = TRACE_LEN;
+        let mut i = 0;
+        while i < (TRACE_LEN as usize) * 3 {
+            TRACE_RING[base + 2 + i] = TRACE_BUF[i];
+            i += 1;
+        }
+        TRACE_RING_HEAD += 1;
+        if TRACE_RING_N < 16 {
+            TRACE_RING_N += 1;
+        }
+        TRACE_STATE = 0;
+        TRACE_LEN = 0;
+    }
+}
+
+/// Clear hotness + traces (chip reset — a reboot may load different code
+/// under identical pcs; stale ring entries would lie in dumps).
+pub(crate) fn trace_reset_all() {
+    unsafe {
+        TRACE_HOT = [0u32; 1024];
+        TRACE_STATE = 0;
+        TRACE_LEN = 0;
+        TRACE_RING_N = 0;
+        TRACE_RING_HEAD = 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn native_rec_reset() {
+    trace_reset_all();
+}
 // run152 bisect gate (RETIRED run153 with the run151 intercept; the gate
 // and shadow now stand by for future CAS forensics, default OFF).
 pub static mut S32C1I_ENABLE: u32 = 0;
@@ -1360,6 +1503,15 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
         let extra_byte = read_opcode_u8(core, pc + 2);
         opcode |= (extra_byte as u32) << 16;
     }
+
+    // 50mips trace recorder (profiling side of the trace JIT).
+    trace_fetch(
+        pc,
+        opcode,
+        width,
+        core.opcode_page_type != PTE_TYPE_RAM as i32
+            && core.opcode_page_type != PTE_TYPE_FLASH as i32,
+    );
 
     core.last_opcode = opcode;
     core.debug_opcode = opcode;
