@@ -1,15 +1,17 @@
 // Shared JIT-trace emitter (milestone C). Pure JS: classify + emit.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
-function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
-function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
-const OP = {
-  end: 0x0b, if_: 0x04, else_: 0x05, return_: 0x0f, call: 0x10,
+export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
+export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
+export const OP = {
+  end: 0x0b, if_: 0x04, else_: 0x05, return_: 0x0f, call: 0x10, br: 0x0c, br_if: 0x0d,
+  loop: 0x03, block: 0x02,
   local_get: 0x20, local_set: 0x21,
   i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x48, i32_and: 0x71, i32_or: 0x72, local_tee: 0x22,
   i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76, i32_shr_s: 0x75,
   i32_load: 0x28, i32_store: 0x36,
+  global_get: 0x23, global_set: 0x24, unreachable_: 0x00, nop_: 0x01, drop: 0x1a,
 };
-const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
+export const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
 
 // ---- op classification (handler-verified) ----
 export function classify(op) {
@@ -112,8 +114,9 @@ export function classify(op) {
   return { k: 'unknown', op };
 }
 
-export function buildTraceModule(T, ctx) {
-  const { CORE, CBASE, wb, recLoop, sarOff } = ctx;
+export function prepareTrace(T, ctx) {
+  // Boundary truncation + classification + branch resolution.
+  // Returns { TE, endPC, kinds, branches }.
   // callEnd (r_handler2 CALL family): trace boundary. Emit the prefix only;
   // endPC is the call's own pc; the interpreter executes it on continuation.
   // (A call at index 0 leaves nothing to emit -> unemittable, correctly.)
@@ -146,6 +149,18 @@ export function buildTraceModule(T, ctx) {
       branches.push({ idx: i, pc: T[i].pc, w: T[i].w, kind: cc.k, b: cc.b, r: cc.r, s: cc.s, target, takenRec });
     }
   });
+  return { TE: T, endPC, kinds, branches };
+}
+
+export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
+  // Emits the straight-line op bodies. Branch handling depends on hooks:
+  // null (trace mode) = direction-checked side exits via return codes;
+  // { onBranch(br, takenPc, fallPc) } (page mode) = custom emission that
+  // must consume the taken-flag and route both targets (in-page threading
+  // or exits) WITHOUT returning, unless it returns an exit code itself.
+  // Returns { body, locals } (locals = number of i32 locals used: 1).
+  const { CORE, CBASE, wb, recLoop, sarOff } = ctx;
+  const T = TE;
   const P = (reg) => CBASE + 16 + ((((wb << 2) + reg) & 63)) * 4;
   const SPEC3 = CBASE + 336 + 3 * 4, LOOPC = CBASE + 336 + 2 * 4;
   const B = [];
@@ -219,6 +234,7 @@ export function buildTraceModule(T, ctx) {
     }
     else if (k.k === 'br') {
       const br = branches[bj++];
+      if (hooks && hooks.onBranch) { hooks.onBranch(B, { cc2, ld, P, OP, sleb }, br, e); return; }
       if (br.b === 'bne' || br.b === 'bltu' || br.b === 'beq') {
         ld(P(br.r)); ld(P(br.s));
         B.push(br.b === 'bne' ? OP.i32_ne : br.b === 'bltu' ? OP.i32_lt_u : OP.i32_eq);
@@ -228,7 +244,17 @@ export function buildTraceModule(T, ctx) {
     }
     afterLoop();
   });
-  cc2(0);
+  if (!hooks || !hooks.noTail) cc2(0);
+  for (const v of B) if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error('bad emitted byte ' + v);
+  return { body: B, locals: 1, branches };
+}
+
+export function buildTraceModule(T, ctx) {
+  const prep = prepareTrace(T, ctx);
+  const em = emitOpsBody(prep.TE, prep.kinds, prep.branches, ctx, null);
+  const B = em.body;
+  const branches = em.branches;
+  const endPC = prep.endPC;
   const encStr = (s) => [s.length, ...[...s].map((ch) => ch.charCodeAt(0))];
   const typePay = [0x05,
     0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // t0: (i32,i32)->i32 mr8/16/32
@@ -254,7 +280,7 @@ export function buildTraceModule(T, ctx) {
   const codeSec = [0x0a, ...uleb(codeContent.length), ...codeContent];
   for (const v of B) if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error('bad emitted byte ' + v);
   const mod = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, ...typeSec, ...impSec, ...funcSec, ...expSec, ...codeSec]);
-  return { mod, branches, endPC, len: T.length };
+  return { mod, branches, endPC, len: prep.TE.length };
 }
 export async function instantiateTrace(mod, L, ex) {
   const inst = await WebAssembly.instantiate(mod, {
@@ -276,6 +302,54 @@ export async function instantiateTrace(mod, L, ex) {
 // Shortest repeats are inner counted loops (back-edges flip when counts
 // exhaust); longer periods are more likely direction-stable, but nothing
 // beats live validation, so callers try candidates in this order.
+export function assemblePageModule(body, { locals = 3, exitGlobal = true } = {}) {
+  // Module with the standard 8 mem/call-out imports + shared memory, one
+  // global $exitpc (mut i32, exported as 'exitpc'), one export run()->i32.
+  const encStr = (s) => [s.length, ...[...s].map((ch) => ch.charCodeAt(0))];
+  const typePay = [0x05,
+    0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+    0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f,
+    0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x00,
+    0x60, 0x02, 0x7f, 0x7f, 0x00,
+    0x60, 0x00, 0x01, 0x7f];
+  const typeSec = [0x01, ...uleb(typePay.length), ...typePay];
+  const impR = (nm) => [...encStr('env'), ...encStr(nm), 0x00, 0x00];
+  const impW = (nm) => [...encStr('env'), ...encStr(nm), 0x00, 0x02];
+  const impPay = [0x09,
+    ...impR('mr8'), ...impR('mr16'), ...impR('mr32'),
+    ...impW('mw8'), ...impW('mw16'), ...impW('mw32'),
+    ...[...encStr('env'), ...encStr('jit_l32r'), 0x00, 0x01],
+    ...[...encStr('env'), ...encStr('jit_ssai'), 0x00, 0x03],
+    ...[...encStr('env'), ...encStr('mem'), 0x02, 0x03, ...uleb(1), ...uleb(65536)]];
+  const impSec = [0x02, ...uleb(impPay.length), ...impPay];
+  const funcSec = [0x03, ...uleb(2), 0x01, 0x04];
+  const globSec = [0x06, ...uleb(6), 0x01, 0x7f, 0x01, OP.i32_const, ...sleb(0), OP.end];
+  const expPay = [0x02, ...encStr('run'), 0x00, 0x08, ...encStr('exitpc'), 0x03, 0x00];
+  const expSec = [0x07, ...uleb(expPay.length), ...expPay];
+  const codeBody = [0x01, locals, 0x7f, ...body, OP.end];
+  const codeContent = [0x01, ...uleb(codeBody.length), ...codeBody];
+  const codeSec = [0x0a, ...uleb(codeContent.length), ...codeContent];
+  return new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    ...typeSec, ...impSec, ...funcSec, ...globSec, ...expSec, ...codeSec]);
+}
+
+export async function instantiatePageModule(mod, L, ex) {
+  const inst = await WebAssembly.instantiate(mod, {
+    env: {
+      mem: L.memory,
+      mr8: (core, addr) => ex.core_read_uint8(core, addr),
+      mr16: (core, addr) => ex.core_read_uint16(core, addr),
+      mr32: (core, addr) => ex.core_read_uint32(core, addr),
+      mw8: (core, addr, val) => ex.core_write_uint8(core, addr, val),
+      mw16: (core, addr, val) => ex.core_write_uint16(core, addr, val),
+      mw32: (core, addr, val) => ex.core_write_uint32(core, addr, val),
+      jit_l32r: (core, op, nextpc) => ex.native_jit_l32r(core, op, nextpc),
+      jit_ssai: (core, op) => ex.native_jit_ssai(core, op),
+    },
+  });
+  return { run: inst.instance.exports.run, exitpc: inst.instance.exports.exitpc };
+}
+
 export function findLoopSlices(T) {
   const first = new Map();
   const out = [];
@@ -291,4 +365,93 @@ export function findLoopSlices(T) {
 export function findLoopSlice(T) {
   const all = findLoopSlices(T);
   return all.length ? all[0] : null;
+}
+
+export async function buildPage(Sc, ctx) {
+  const { CORE, CBASE, L, ex, yieldOps } = ctx;
+  const INSTW = CBASE + 2608;
+  const B = [];
+  const cc = (v) => B.push(OP.i32_const, ...sleb(v | 0));
+  // entry: pc = START, yield = YIELD_OPS
+  cc(Sc[0].pc); B.push(OP.local_set, 0x01);
+  cc(yieldOps || 19200); B.push(OP.local_set, 0x02);
+  const pagePcs = new Set(Sc.map((e) => e.pc >>> 0));
+  const inPage = (pc) => pagePcs.has(pc >>> 0);
+  const xfer = (targetPc) => {
+    // transfer to targetPc: thread inside page, else exit(1) with exitpc set
+    if (inPage(targetPc)) { cc(targetPc); B.push(OP.local_set, 0x01, OP.br, 0x01); }
+    else {
+      cc(targetPc); B.push(OP.global_set, 0x00);
+      cc(1); B.push(OP.return_);
+    }
+  };
+  const instAdd = (n) => {
+    cc(INSTW); cc(INSTW);
+    B.push(OP.i32_load, 0x02, 0x00);
+    cc(n); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00);
+  };
+  B.push(OP.loop, 0x40);
+  // yield decrement per dispatch; every return parks pc in exitpc
+  B.push(OP.local_get, 0x02, OP.i32_const, ...sleb(-1), OP.i32_add, OP.local_set, 0x02);
+  B.push(OP.local_get, 0x02, OP.i32_eqz, OP.if_, 0x40);
+  B.push(OP.local_get, 0x01, OP.global_set, 0x00, OP.i32_const, ...sleb(2), OP.return_, OP.end);
+  // superblock groups (split after every branch), recorded order
+  const prep = prepareTrace(Sc.map((e) => ({ ...e })), ctx);
+  const groups = [];
+  {
+    let g = [0];
+    for (let i = 1; i < prep.TE.length; i++) {
+      const pk = prep.kinds[i - 1].k;
+      if (pk === 'br') { groups.push(g); g = [i]; }
+      else if (prep.TE[i].pc !== prep.TE[i - 1].pc + prep.TE[i - 1].w) { groups.push(g); g = [i]; }
+      else g.push(i);
+    }
+    groups.push(g);
+  }
+  for (const g of groups) {
+    const startPc = prep.TE[g[0]].pc;
+    B.push(OP.i32_const, ...sleb(startPc), OP.local_get, 0x01, OP.i32_eq, OP.if_, 0x40);
+    const subT = g.map((i) => prep.TE[i]);
+    const subK = g.map((i) => prep.kinds[i]);
+    const subB = prep.branches.filter((br) => subT.some((e) => e.pc === br.pc));
+    const glen = subT.length;
+    const hooks = {
+      noTail: true,
+      onBranch(BB, H, br, e) {
+        const takenPc = br.target >>> 0, fallPc = (e.pc + e.w) >>> 0;
+        if (br.b === 'bne' || br.b === 'bltu' || br.b === 'beq') {
+          H.ld(H.P(br.r)); H.ld(H.P(br.s));
+          BB.push(br.b === 'bne' ? H.OP.i32_ne : br.b === 'bltu' ? H.OP.i32_lt_u : H.OP.i32_eq);
+        } else { H.ld(H.P(br.r)); BB.push(H.OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') BB.push(H.OP.i32_eqz); }
+        BB.push(H.OP.if_, 0x40);
+        // taken path: inst-add then transfer
+        BB.push(H.OP.i32_const, ...H.sleb(INSTW), H.OP.i32_const, ...H.sleb(INSTW));
+        BB.push(H.OP.i32_load, 0x02, 0x00, H.OP.i32_const, ...H.sleb(glen), H.OP.i32_add, H.OP.i32_store, 0x02, 0x00);
+        if (inPage(takenPc)) { BB.push(H.OP.i32_const, ...H.sleb(takenPc), H.OP.local_set, 0x01, H.OP.br, 0x02); }
+        else { BB.push(H.OP.i32_const, ...H.sleb(takenPc), H.OP.global_set, 0x00, H.OP.i32_const, ...H.sleb(1), H.OP.return_); }
+        BB.push(H.OP.else_);
+        BB.push(H.OP.i32_const, ...H.sleb(INSTW), H.OP.i32_const, ...H.sleb(INSTW));
+        BB.push(H.OP.i32_load, 0x02, 0x00, H.OP.i32_const, ...H.sleb(glen), H.OP.i32_add, H.OP.i32_store, 0x02, 0x00);
+        if (inPage(fallPc)) { BB.push(H.OP.i32_const, ...H.sleb(fallPc), H.OP.local_set, 0x01, H.OP.br, 0x02); }
+        else { BB.push(H.OP.i32_const, ...H.sleb(fallPc), H.OP.global_set, 0x00, H.OP.i32_const, ...H.sleb(1), H.OP.return_); }
+        BB.push(H.OP.end);
+      },
+    };
+    const em = emitOpsBody(subT, subK, subB, ctx, hooks);
+    B.push(...em.body);
+    // straight transfer at group end (last op not a branch by construction)
+    const lastE = subT[subT.length - 1];
+    instAdd(subT.length);
+    const nx = lastE.next;
+    if (inPage(nx)) { cc(nx); B.push(OP.local_set, 0x01, OP.br, 0x01); }
+    else { cc(nx); B.push(OP.global_set, 0x00, OP.i32_const, ...sleb(1), OP.return_); }
+    B.push(OP.end); // if pc==start
+  }
+  B.push(OP.local_get, 0x01, OP.global_set, 0x00, OP.i32_const, ...sleb(4), OP.return_); // dispatch miss
+  B.push(OP.end); // loop $L
+  B.push(OP.unreachable_); // structurally unreachable: all paths return or loop
+  // (assemblePageModule/instantiatePageModule are module-local below)
+  const mod = assemblePageModule(B, { locals: 3 });
+  const { run, exitpc } = await instantiatePageModule(mod, L, ex);
+  return { run, exitpc, groups: groups.length, ops: prep.TE.length };
 }

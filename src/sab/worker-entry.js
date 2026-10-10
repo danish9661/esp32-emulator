@@ -629,6 +629,7 @@ async function runSimChunk() {
   // traces; the interpreter covers everything when disabled/absent.
   let jitDrv = null;
   let jitKA = 0, jitKB = 0;
+  let profE = 0n, profS = 0n, profP = 0n, profN = 0;
   try {
     if (chip._jitEnabled !== false && wasmExp?.core_run && chip._wasmLoader && idleView0 && idleView1) {
       if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader); } catch {} }
@@ -985,6 +986,8 @@ async function runSimChunk() {
       // Runs BEFORE the interpreter batch: covered ops retire here, the
       // batch below shrinks by the max so per-core totals stay exact.
       // Hoisted: single null-check per step when absent/disabled.
+      let _pa = 0n;
+      if (process.env.STEPROF) _pa = process.hrtime.bigint();
       jitKA = 0; jitKB = 0;
       if (jitDrv) {
         try {
@@ -1002,9 +1005,13 @@ async function runSimChunk() {
       chip.step(Math.max(0, 512 - (jitKA > jitKB ? jitKA : jitKB)));
       steps++;
       cycles = chip.cycles;
+      if (process.env.STEPROF) { profE += process.hrtime.bigint() - _pa; }
+
       // Fire due ClockTree events (ccompare / beacon / wifi-tx) on the JS
       // clock tree. Pumped at the per-step (1024-instruction) cadence so the
       // JS clock stays out of the execution hot path.
+      let _pb = 0n;
+      if (process.env.STEPROF) _pb = process.hrtime.bigint();
       if (fireDue) { try { fireDue(); } catch(_) {} }
       // Inline coresIdle: 4 direct typed-array reads (bypasses getter chains).
       const isIdle = idleView0 && idleView1
@@ -1022,6 +1029,13 @@ async function runSimChunk() {
         if (pumpEvents) { try { pumpEvents(); } catch(_) {} }
       }
       if ((cycles & 524287) === 0) writeSABState();
+      if (process.env.STEPROF) {
+        profP += process.hrtime.bigint() - _pb;
+        if (++profN === 4000) {
+          console.log(`[STEPROF] exec+hooks=${(Number(profE) / 1000 / profN).toFixed(1)}us/step post=${(Number(profP) / 1000 / profN).toFixed(1)}us/step`);
+          profE = 0n; profP = 0n; profN = 0;
+        }
+      }
       if (!Atomics.load(ctrl, SAB_RUN)) break;
       // Yield to the event loop every 512 steps so socket I/O callbacks
       // (BT HCI proxy TCP, gateway WebSocket) can fire mid-chunk. A chunk
