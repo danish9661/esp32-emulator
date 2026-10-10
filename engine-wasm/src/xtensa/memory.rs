@@ -75,6 +75,8 @@ fn dma_write(addr: u32, val: u32, size: u32) {
     } else if typ == PTE_TYPE_FLASH {
         unsafe {
             if js_flash_write_override() != 0 {
+                // 50mips: JS-opaque mirror update — global flash signal.
+                crate::xtensa::memory::mmu_gen_bump();
                 map_write(0, addr, val, size);
             }
         }
@@ -137,15 +139,93 @@ unsafe fn mem_read16(addr: u32) -> u16 {
 unsafe fn mem_read32(addr: u32) -> u32 {
     (addr as *const u32).read_unaligned()
 }
+
+// 50mips decode-cache generation machinery (writer side; the probe that
+// reads it lands separately). Every guest-visible store bumps its 4KB
+// page's generation, so a decode cache can validate entries WITHOUT
+// re-reading bytes (cheaper than the reread design, which measured -20%):
+//   - mem_write8/16/32: ALL RAM stores funnel here (guest stores via
+//     write_page_table, DMA/peripheral writes, GDB core_write_*).
+//   - MMU table mirror writes flow through the same funnel (DPORT window
+//     is PTE_TYPE_RAM); a global MMU_GEN additionally covers remaps, since
+//     a remap changes backing without touching the code page.
+//   - Flash mirror writes funnel through flash_set_byte / the GDB-override
+//     branches (explicit bumps; the mirror is JS-updated only through
+//     Rust-initiated paths).
+// Code/data page sharing is what would cause false invalidation, and it
+// does not occur (IRAM code vs DRAM data live on different pages;
+// bootloader/OTA write code pages only pre-execution or explicitly).
+// Reset: cleared alongside the decode cache by native_dc_reset (same
+// commit as the probe) — a reboot may reload different bytes under
+// identical counters, so both must clear together.
+// 64KB for the full 64MB linear space (index aliases above 64MB — safe
+// direction: extra invalidation only).
+static mut CODE_GEN: [u32; 16384] = [0u32; 16384];
+static mut MMU_GEN: u32 = 0;
+static mut MMU_LO: u32 = 0;
+static mut MMU_HI: u32 = 0;
+
+/// Bump the generation of the 4KB page containing linear address `a`,
+/// plus the global MMU generation when `a` falls in the MMU table mirror.
+/// Called on EVERY RAM store path (cheap: one store + two compares).
+#[inline(always)]
+pub(crate) fn gen_bump(a: u32) {
+    unsafe {
+        CODE_GEN[((a >> 12) & 16383) as usize] =
+            CODE_GEN[((a >> 12) & 16383) as usize].wrapping_add(1);
+        if MMU_LO == 0 {
+            // Lazy-once mirror bounds (region table is static after init).
+            let (_, wasm_off) = region_info(MMU_REGION_ID);
+            let base = RAM_DATA_OFFSET + wasm_off;
+            MMU_LO = base;
+            MMU_HI = base + 45056;
+        }
+        if a >= MMU_LO && a < MMU_HI {
+            MMU_GEN = MMU_GEN.wrapping_add(1);
+        }
+    }
+}
+
+/// Bump the generation of the flash-mirror page holding flash `offset`.
+/// Covers native-buffer writes AND the JS-fallback path (both funnel
+/// through flash_set_byte, which knows the offset either way).
+#[inline(always)]
+pub(crate) fn flash_gen_bump(offset: u32) {
+    if offset < 0x400000 {
+        gen_bump(unsafe { FLASH_OFF + offset });
+    }
+}
+
+/// Global flash-change signal for paths that update the mirror opaquely
+/// (GDB-override map_write: JS-side bytes, Rust only sees the VMA call).
+/// Rare/human-paced — a global bump is free.
+#[inline(always)]
+pub(crate) fn mmu_gen_bump() {
+    unsafe { MMU_GEN = MMU_GEN.wrapping_add(1); }
+}
+
+#[inline(always)]
+pub(crate) fn gen_read(a: u32) -> u32 {
+    unsafe { CODE_GEN[((a >> 12) & 16383) as usize] }
+}
+
+#[inline(always)]
+pub(crate) fn mmu_gen_read() -> u32 {
+    unsafe { MMU_GEN }
+}
+
 unsafe fn mem_write8(addr: u32, val: u8) {
+    gen_bump(addr);
     *(addr as *mut u8) = val;
 }
 unsafe fn mem_write16(addr: u32, val: u16) {
+    gen_bump(addr);
     let p = addr as *mut u8;
     p.write(val as u8);
     p.add(1).write((val >> 8) as u8);
 }
 unsafe fn mem_write32(addr: u32, val: u32) {
+    gen_bump(addr);
     (addr as *mut u32).write_unaligned(val);
 }
 
@@ -399,6 +479,8 @@ pub fn write_page_table(core: &mut CoreState, addr: u32, val: u32, size: u32) {
         // ReadonlyMemory.override flag set by gdb-session.js M commands.
         unsafe {
             if js_flash_write_override() != 0 {
+                // 50mips: JS-opaque mirror update — global flash signal.
+                crate::xtensa::memory::mmu_gen_bump();
                 map_write(core.index, addr, val, size);
             }
         }

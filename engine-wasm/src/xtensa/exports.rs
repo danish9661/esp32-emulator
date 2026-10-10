@@ -42,6 +42,7 @@ static mut BP_ARMED: u32 = 0;
 pub extern "C" fn native_breakpoints_armed(n: u32) {
     unsafe { BP_ARMED = n; }
 }
+
 // run152 bisect gate (RETIRED run153 with the run151 intercept; the gate
 // and shadow now stand by for future CAS forensics, default OFF).
 pub static mut S32C1I_ENABLE: u32 = 0;
