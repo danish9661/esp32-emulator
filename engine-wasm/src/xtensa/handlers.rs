@@ -123,6 +123,7 @@ pub fn n_handler12(core: &mut CoreState, tmp_val: u32) {
         core.set_ar(idx_val, core.ar(clock_event).wrapping_add(if sim != 0 { sim } else { 0xffffffff }));
     }
 }
+#[inline(always)]
 pub fn n_handler13(core: &mut CoreState, tmp_val: u32) {
     let idx_val = (tmp_val >> 16) & 255;
     let clock_event = (tmp_val >> 8) & 15;
@@ -378,6 +379,7 @@ pub fn n_handler41(core: &mut CoreState, tmp_val: u32) {
         }
     }
 }
+#[inline(always)]
 pub fn n_handler42(core: &mut CoreState, tmp_val: u32) {
     let idx_val = (tmp_val >> 16) & 255;
     let clock_event = (tmp_val >> 8) & 15;
@@ -417,6 +419,7 @@ pub fn n_handler45(core: &mut CoreState, tmp_val: u32) {
         }
     }
 }
+#[inline(always)]
 pub fn n_handler46(core: &mut CoreState, tmp_val: u32) {
     let idx_val = (tmp_val >> 16) & 255;
     let clock_event = (tmp_val >> 8) & 15;
@@ -946,6 +949,7 @@ pub fn a_handler11(core: &mut CoreState, tmp_val: u32) {
         }
     }
 }
+#[inline(always)]
 pub fn a_handler12(core: &mut CoreState, tmp_val: u32) {
     let idx_val = (tmp_val >> 16) & 255;
     let clock_event = (tmp_val >> 8) & 15;
@@ -1661,6 +1665,7 @@ pub fn a_handler36(core: &mut CoreState, tmp_val: u32) {
     let mem_val = read_uint32(core, rt);
     write_special_register(core, INTERRUPT_STATE as u32 + sim, mem_val);
 }
+#[inline(always)]
 pub fn a_handler37(core: &mut CoreState, tmp_val: u32) {
     let idx_val = (tmp_val >> 12) & 15;
     let clock_event = (tmp_val >> 8) & 15;
@@ -2233,6 +2238,7 @@ pub fn _handler36(core: &mut CoreState, tmp_val: u32) {
         core.set_ar(clock_event, (core.ar(rr) as i32 >> wa) as u32);
     }
 }
+#[inline(always)]
 pub fn _handler37(core: &mut CoreState, tmp_val: u32) {
     let idx_val = (tmp_val >> 12) & 15;
     let clock_event = (tmp_val >> 8) & 15;
