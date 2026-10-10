@@ -1371,7 +1371,7 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
         core.next_pc = core.pc;
         core.idle = 1;
         core.pc = core.next_pc;
-        return 0;
+        return 1; // executed (legacy inst_count parity)
     }
 
     // run151/run152 REVERTED (run153): the engine ALREADY emulates the CAS
@@ -1399,7 +1399,7 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
             core.set_ar(at, core.ps_intlevel());
             core.set_ps_intlevel(level);
             core.pc = core.next_pc;
-            return 0;
+            return 1; // executed (legacy inst_count parity)
         }
     }
 
@@ -1423,7 +1423,7 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
             let hi = (opcode >> 16) & 255;
             if (4 == lo || (0 == lo && (22 == hi || 23 == hi))) && decode_pie31(core, opcode) != 0 {
                 core.pc = core.next_pc;
-                return 0;
+                return 1; // executed (legacy inst_count parity)
             }
         }
         c_handler7(core, opcode);

@@ -150,14 +150,20 @@ impl CoreState {
         self.special_registers[LBEG_REGISTER] = val as u32;
     }
 
-    // AR register access (windowed)
+    // AR register access (windowed). PERF (50mips): masked unchecked access
+    // instead of modulo + bounds-checked indexing. EXACT for all inputs:
+    // PHYSICAL_REG_COUNT == 64 == 2^6, so (x % 64) == (x & 63) for every
+    // u32 x (no negative values exist at this type), and idx < 64 always
+    // holds after masking — the unchecked access cannot go out of bounds.
     pub fn ar(&self, reg: u32) -> u32 {
         let base = self.special_registers[MEM_FAULT_INFO] << 2;
-        self.physical_registers[((base + reg) % PHYSICAL_REG_COUNT) as usize]
+        let idx = (base.wrapping_add(reg)) & 63;
+        unsafe { *self.physical_registers.as_ptr().add(idx as usize) }
     }
     pub fn set_ar(&mut self, reg: u32, val: u32) {
         let base = self.special_registers[MEM_FAULT_INFO] << 2;
-        self.physical_registers[((base + reg) % PHYSICAL_REG_COUNT) as usize] = val;
+        let idx = (base.wrapping_add(reg)) & 63;
+        unsafe { *self.physical_registers.as_mut_ptr().add(idx as usize) = val; }
     }
 
     // BR register access
