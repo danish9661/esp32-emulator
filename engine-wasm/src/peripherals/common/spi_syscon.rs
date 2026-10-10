@@ -684,7 +684,7 @@ impl SpiPeripheral {
                 if idx < self.flash_buffer_len as usize {
                     // 50mips milestone B: guest flash programming changes
                     // fetched code -> bump the JIT guard generation.
-                    crate::xtensa::memory::code_gen_bump();
+                    crate::xtensa::memory::code_gen_bump_flash();
                     *self.flash_buffer.add(idx) = val;
                 }
             } else {

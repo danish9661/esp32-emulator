@@ -1009,7 +1009,10 @@ class ESP32 {
         : (_debugLog && console.log("Invalid memory access", addr.toString(16)),
           this.invalidMem);
   }
-  step() {
+  // count = interpreter iterations this step (50mips JIT: the driver
+  // executes k ops via traces, then steps 512-k here so each core still
+  // retires the same total; cycles cadence is unchanged by design).
+  step(count = 512) {
     if (this._wasmCores) {
       // Cache exports reference to avoid repeated optional-chain per step.
       let exp = this._stepExp;
@@ -1018,7 +1021,7 @@ class ESP32 {
         this._stepExp = exp;
       }
       if (exp?.core_run) {
-        exp.core_run(512);
+        exp.core_run(count);
         this.cycles += 512;
       } else {
         this._wasmCores[0].runInstruction();

@@ -14,7 +14,7 @@ import { classify, buildTraceModule, instantiateTrace } from './tmp-jit-lib.mjs'
 
 const ROM = readFileSync(resolve(__dirname, 'rom/esp32-v3-rom.bin'));
 const WASM = readFileSync(resolve(__dirname, '../src/engine/esp-xtensa/esp_engine_wasm.wasm'));
-const FWBIN = resolve(__dirname, 'tmp-speed-fw.bin');
+const FWBIN = process.env.FW_BIN || resolve(__dirname, 'tmp-speed-fw.bin');
 if (!existsSync(FWBIN)) throw new Error('no cached firmware');
 const bin = readFileSync(FWBIN);
 const flash = new Uint8Array(4 * 1024 * 1024);
@@ -107,14 +107,17 @@ TE.forEach((e, i) => { e.next = (i + 1 < TE.length) ? TE[i + 1].pc : END_PC_REAL
 const wb2 = live[72] >>> 0;
 const sarOff = (typeof ex.native_sar_pending_off === 'function') ? (ex.native_sar_pending_off() >>> 0) : null;
 console.log('[run] sarOff=' + sarOff);
-const { mod, branches } = buildTraceModule(TE, { CORE, CBASE, wb: wb2, recLoop, sarOff });
+const built = buildTraceModule(TE, { CORE, CBASE, wb: wb2, recLoop, sarOff });
+const { mod, branches } = built;
+const TELEN = built.len;
+console.log('[run] emitted ops=' + TELEN + ' endPC=0x' + built.endPC.toString(16));
 console.log('[run] module bytes=' + mod.length);
 const runFn = await instantiateTrace(mod, L, ex);
 const wb = wb2;
 
 // ---- driver ----
-const LEN = TE.length;
-const END_PC = END_PC_REAL;
+const LEN = TELEN;
+const END_PC = built.endPC;
 if (END_PC === null) throw new Error('trace has no end pc');
 function guard() {
   if ((wc.PC >>> 0) !== TE[0].pc) return 'pc';

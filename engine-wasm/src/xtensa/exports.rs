@@ -65,6 +65,8 @@ static mut TRACE_THRESH: u32 = 20000;
 static mut TRACE_ENABLE: u32 = 1;
 static mut TRACE_STATE: [u32; 2] = [0; 2]; // 0 idle, 1 recording
 static mut TRACE_LEN: [u32; 2] = [0; 2];
+static mut TRACE_RMIN: [u32; 2] = [64; 2];
+static mut TRACE_RMAX: [u32; 2] = [0; 2];
 static mut TRACE_BUF: [[u32; 768]; 2] = [[0u32; 768]; 2]; // per core: 256 x (pc, op, w)
 // Ring slots are per-core-coherent: 16 x (core, start, len, 256x3).
 // (run316 lesson: a shared buffer interleaves both cores' fetch streams —
@@ -134,6 +136,9 @@ fn trace_fetch(pc: u32, op: u32, w: u32, mmio_op: bool, core_idx: usize) {
                 TRACE_BUF[c][1] = op;
                 TRACE_BUF[c][2] = w;
                 TRACE_LEN[c] = 1;
+                let pr = super::memory::region_of(pc);
+                TRACE_RMIN[c] = pr as u32;
+                TRACE_RMAX[c] = pr as u32;
             }
         } else if mmio_op {
             close_trace(c);
@@ -147,6 +152,9 @@ fn trace_fetch(pc: u32, op: u32, w: u32, mmio_op: bool, core_idx: usize) {
             TRACE_BUF[c][o + 1] = op;
             TRACE_BUF[c][o + 2] = w;
             TRACE_LEN[c] += 1;
+            let pr = super::memory::region_of(pc) as u32;
+            if pr < TRACE_RMIN[c] { TRACE_RMIN[c] = pr; }
+            if pr > TRACE_RMAX[c] { TRACE_RMAX[c] = pr; }
         }
     }
 }
@@ -161,7 +169,7 @@ fn close_trace(c: usize) {
         let base = slot * 771;
         TRACE_RING[base] = c as u32;
         TRACE_RING[base + 1] = TRACE_BUF[c][0];
-        TRACE_RING[base + 2] = TRACE_LEN[c];
+        TRACE_RING[base + 2] = TRACE_LEN[c] | (TRACE_RMIN[c] << 16) | (TRACE_RMAX[c] << 24);
         let mut i = 0;
         while i < (TRACE_LEN[c] as usize) * 3 {
             TRACE_RING[base + 3 + i] = TRACE_BUF[c][i];
@@ -183,6 +191,8 @@ pub(crate) fn trace_reset_all() {
         TRACE_HOT = [[0u32; 1024]; 2];
         TRACE_STATE = [0; 2];
         TRACE_LEN = [0; 2];
+        TRACE_RMIN = [64; 2];
+        TRACE_RMAX = [0; 2];
         TRACE_RING_N = 0;
         TRACE_RING_HEAD = 0;
     }
@@ -205,7 +215,13 @@ pub extern "C" fn native_code_gen() -> u32 {
 /// js_spi_flash_set_byte handler — the mirror write is invisible to Rust).
 #[no_mangle]
 pub extern "C" fn native_code_gen_bump() {
-    code_gen_bump();
+    code_gen_bump_flash();
+}
+
+/// 50mips (run317): per-region generation read for JIT entry guards.
+#[no_mangle]
+pub extern "C" fn native_code_gen_region(r: u32) -> u32 {
+    code_gen_get_region(r)
 }
 
 /// Diag probe for the milestone-B guard's window_check JS port: calls the

@@ -1,5 +1,8 @@
-// Shared JIT-trace emitter (milestone C). Pure JS: classify + emit.
-// Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
+// JIT trace emitter (production, 50mips Phase 2). Pure JS: classify + emit
+// a recorded linear trace to a WASM module over shared engine memory.
+// Routing verified exhaustively: full 24-bit narrow-op fuzz vs the real
+// c_handler7 tree, 0 misroutes (tests/tmp-jit-lib.mjs is the dev copy).
+// Kill switch: callers simply never call (interpreter covers everything).
 function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
 const OP = {

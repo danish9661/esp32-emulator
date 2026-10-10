@@ -74,7 +74,7 @@ console.log('[trace] scratch[0]=' + ring[0]);
 let hits = 0;
 for (let s = 0; s < 16; s++) {
   const start = ring[1 + s * STR + 1] >>> 0;
-  const tlen = ring[1 + s * STR + 2] >>> 0;
+  const tlen = ring[1 + s * STR + 2] & 0xFFFF;
   if (!tlen) continue;
   const pcs = [];
   for (let i = 0; i < Math.min(tlen, 6); i++) pcs.push('0x' + (ring[1 + s * STR + 3 + i * 3] >>> 0).toString(16));

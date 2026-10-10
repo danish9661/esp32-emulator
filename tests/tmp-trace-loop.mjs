@@ -10,7 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const ROM = readFileSync(resolve(__dirname, 'rom/esp32-v3-rom.bin'));
 const WASM = readFileSync(resolve(__dirname, '../src/engine/esp-xtensa/esp_engine_wasm.wasm'));
-const FWBIN = resolve(__dirname, 'tmp-speed-fw.bin');
+const FWBIN = process.env.FW_BIN || resolve(__dirname, 'tmp-speed-fw.bin');
 if (!existsSync(FWBIN)) throw new Error('no cached firmware');
 const bin = readFileSync(FWBIN);
 const flash = new Uint8Array(4 * 1024 * 1024);
@@ -108,7 +108,7 @@ async function enterTop(top) {
   }
   return false;
 }
-let S = null, runFn = null, branches = null, slice = null;
+let S = null, runFn = null, branches = null, slice = null, builtLen = 0;
 for (const cand of slices) {
   const Sc = T.slice(cand.start, cand.end).map((e) => ({ ...e }));
   Sc.forEach((e, i) => { e.next = (i + 1 < Sc.length) ? Sc[i + 1].pc : Sc[0].pc; });
@@ -126,19 +126,21 @@ for (const cand of slices) {
     const S0 = memU32().slice(CBASE, CBASE + 4096);
     const code = fn() | 0;
     if (code !== 0) { memU32().set(S0, CBASE); bad++; continue; }
-    memU32()[INSTW] = (memU32()[INSTW] + Sc.length) >>> 0;
+    memU32()[INSTW] = (memU32()[INSTW] + built.len) >>> 0;
     const jit1 = memU32().slice(CBASE, CBASE + 4096);
     memU32().set(S0, CBASE);
-    for (let i = 0; i < Sc.length; i++) ex.core_run(1);
+    for (let i = 0; i < built.len; i++) ex.core_run(1);
     if ((ex.native_code_gen() >>> 0) !== genS) continue;
+    if (built.len !== Sc.length) { ok++; continue; } // call-truncated: prefix proven, not a closed loop
+    if ((wc.PC >>> 0) !== Sc[0].pc) continue; // not loop-closed: prefix proven only
     const ref1 = memU32().slice(CBASE, CBASE + 4096);
     let eq = true;
     for (let i = 0; i < 1024; i++) if (jit1[i] !== ref1[i]) { eq = false; break; }
     if (!eq) { bad++; memU32().set(S0, CBASE); continue; }
     ok++;
   }
-  console.log(`[loop] candidate [${cand.start},${cand.end}) len=${Sc.length}: ${ok}/3 clean`);
-  if (ok >= 3) { S = Sc; runFn = fn; branches = built.branches; slice = cand; break; }
+  console.log(`[loop] candidate [${cand.start},${cand.end}) len=${Sc.length} emitlen=${built.len}: ${ok}/3 clean`);
+  if (ok >= 3 && built.len === Sc.length) { S = Sc; runFn = fn; branches = built.branches; slice = cand; builtLen = built.len; break; }
 }
 if (!S) { console.log('[loop] FAILED (no direction-stable slice)'); process.exit(1); }
 console.log(`[loop] using slice [${slice.start},${slice.end}) len=${S.length} branches=${branches.length}`);
@@ -164,7 +166,7 @@ for (let i = 0; i < N; i++) {
   const c = runFn();
   const dt = process.hrtime.bigint() - t;
   if (c !== 0) { jitFlips++; } else { jitClean++; jitAcc += dt; }
-  for (let j = 0; j < S.length; j++) ex.core_run(1); // natural advance (untimed)
+  for (let j = 0; j < builtLen; j++) ex.core_run(1); // natural advance (untimed)
 }
 if (jitClean < 100) throw new Error('too few clean iterations: ' + jitClean);
 const jitNsPerIter = Number(jitAcc) / jitClean;

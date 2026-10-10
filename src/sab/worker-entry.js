@@ -1,5 +1,6 @@
 import { ESP32 } from "../peripherals/esp32/esp32.js";
 import { parseMacAddress, writePartitionTable } from "../peripherals/common/partition-table.js";
+import { JitDriver } from "./jit-driver.js";
 
 
 // ===== Engine selection =====
@@ -590,6 +591,21 @@ function syncClockState(exp) {
   e.native_set_clock_state(Number(chip.cycles ?? 0) >>> 0);
 }
 
+// 50mips JIT tier: fire-and-forget trace compile for a cache-miss pc.
+// Deduped by cache/uncompilable/inflight; failures (unemittable ops,
+// busy recorder) resolve to interpreter coverage. Never throws.
+function jitCompileKick(jd, core) {
+  try {
+    const pc = jd.pcOf(core);
+    const k = core + ':' + pc;
+    if (jd.cache.has(k) || jd.uncompilable.has(k)) return;
+    const inflight = jd._inflight || (jd._inflight = new Set());
+    if (inflight.has(k)) return;
+    inflight.add(k);
+    jd.compile(core, pc).catch(() => {}).finally(() => { try { inflight.delete(k); } catch {} });
+  } catch {}
+}
+
 async function runSimChunk() {
   if (!chip || !ctrl || !Atomics.load(ctrl, SAB_RUN)) {
     finishSim();
@@ -609,6 +625,16 @@ async function runSimChunk() {
   const idleView1     = wCores?.[1]?._idleView || null;
   const pendingView0  = wCores?.[0]?._pendingIntView || null;
   const pendingView1  = wCores?.[1]?._pendingIntView || null;
+  // 50mips JIT tier setup (loop-invariant): the driver owns compiled
+  // traces; the interpreter covers everything when disabled/absent.
+  let jitDrv = null;
+  let jitKA = 0, jitKB = 0;
+  try {
+    if (chip._jitEnabled !== false && wasmExp?.core_run && chip._wasmLoader && idleView0 && idleView1) {
+      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader); } catch {} }
+      jitDrv = chip._jitDriver || null;
+    }
+  } catch {}
 
   // Sync clock once before entering the loop.
   syncClockState(wasmExp);
@@ -955,7 +981,25 @@ async function runSimChunk() {
         Atomics.store(ctrl, SAB_RESP, RESP_DONE);
         Atomics.store(ctrl, SAB_CMD, CMD_NONE);
       }
-      chip.step();
+      // 50mips JIT tier (kill switch: chip._jitEnabled=false or JIT=0 env).
+      // Runs BEFORE the interpreter batch: covered ops retire here, the
+      // batch below shrinks by the max so per-core totals stay exact.
+      // Hoisted: single null-check per step when absent/disabled.
+      jitKA = 0; jitKB = 0;
+      if (jitDrv) {
+        try {
+          if (idleView0[0] === 0) {
+            jitKA = jitDrv.tryCore(0);
+            if (jitKA === 0) jitCompileKick(jitDrv, 0);
+          }
+          if (idleView1[0] === 0) {
+            jitKB = jitDrv.tryCore(1);
+            if (jitKB === 0) jitCompileKick(jitDrv, 1);
+          }
+          if ((steps & 262143) === 0) console.log('[JIT]', JSON.stringify(jitDrv.stats));
+        } catch {}
+      }
+      chip.step(512 - (jitKA > jitKB ? jitKA : jitKB));
       steps++;
       cycles = chip.cycles;
       // Fire due ClockTree events (ccompare / beacon / wifi-tx) on the JS
