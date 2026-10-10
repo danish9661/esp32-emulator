@@ -69,28 +69,29 @@ const ptr = ex.native_trace_scratch_ptr() >>> 0;
 const len = ex.native_trace_scratch_len() >>> 0;
 const mem = new Uint32Array(chip._wasmLoader.memoryBuffer);
 const ring = mem.slice(ptr >>> 2, (ptr >>> 2) + len);
+const STR = (ring.length - 1) / 16;
 console.log('[trace] scratch[0]=' + ring[0]);
 let hits = 0;
 for (let s = 0; s < 16; s++) {
-  const start = ring[1 + s * 195 + 1] >>> 0;
-  const tlen = ring[1 + s * 195 + 2] >>> 0;
+  const start = ring[1 + s * STR + 1] >>> 0;
+  const tlen = ring[1 + s * STR + 2] >>> 0;
   if (!tlen) continue;
   const pcs = [];
-  for (let i = 0; i < Math.min(tlen, 6); i++) pcs.push('0x' + (ring[1 + s * 195 + 3 + i * 3] >>> 0).toString(16));
-  const core = ring[1 + s * 195] >>> 0;
+  for (let i = 0; i < Math.min(tlen, 6); i++) pcs.push('0x' + (ring[1 + s * STR + 3 + i * 3] >>> 0).toString(16));
+  const core = ring[1 + s * STR] >>> 0;
   console.log(`[trace] slot${s}: core=${core} start=0x${start.toString(16)} len=${tlen} pcs=${pcs.join(' ')}${tlen > 6 ? ' ...' : ''}`);
   if (process.env.OPS && s < 2) {
     const ops = [];
-    for (let i = 0; i < tlen; i++) ops.push('0x' + (ring[1 + s * 195 + 3 + i * 3] >>> 0).toString(16) + ':0x' + (ring[1 + s * 195 + 3 + i * 3 + 1] >>> 0).toString(16) + ':w' + (ring[1 + s * 195 + 3 + i * 3 + 2] >>> 0));
+    for (let i = 0; i < tlen; i++) ops.push('0x' + (ring[1 + s * STR + 3 + i * 3] >>> 0).toString(16) + ':0x' + (ring[1 + s * STR + 3 + i * 3 + 1] >>> 0).toString(16) + ':w' + (ring[1 + s * STR + 3 + i * 3 + 2] >>> 0));
     console.log('[ops] slot' + s + ' ' + ops.join(' '));
   }
   if (start >= 0x400d1600 && start <= 0x400d1660 && tlen >= 8) {
     // every pc in range + sane widths + nonzero ops?
     let ok = true;
     for (let i = 0; i < tlen; i++) {
-      const p = ring[1 + s * 195 + 3 + i * 3] >>> 0;
-      const o = ring[1 + s * 195 + 3 + i * 3 + 1] >>> 0;
-      const w = ring[1 + s * 195 + 3 + i * 3 + 2] >>> 0;
+      const p = ring[1 + s * STR + 3 + i * 3] >>> 0;
+      const o = ring[1 + s * STR + 3 + i * 3 + 1] >>> 0;
+      const w = ring[1 + s * STR + 3 + i * 3 + 2] >>> 0;
       if (p < 0x400d1000 || p > 0x400d2000 || !o || (w !== 2 && w !== 3 && w !== 4)) { ok = false; break; }
     }
     if (ok) { hits++; console.log(`[trace] slot${s} COVERS spin loop`); }

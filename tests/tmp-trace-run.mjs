@@ -76,10 +76,11 @@ ex.native_trace_threshold(5000);
 for (let i = 0; i < 600; i++) step();
 const n = ex.native_trace_len() >>> 0;
 const ptr = ex.native_trace_scratch_ptr() >>> 0;
-const ring = memU32().slice(ptr >>> 2, (ptr >>> 2) + (1 + 16 * 195));
+const ring = memU32().slice(ptr >>> 2, (ptr >>> 2) + (ex.native_trace_scratch_len() >>> 0));
+const STR = (ring.length - 1) / 16;
 let best = -1, bestLen = 0;
 for (let s = 0; s < 16; s++) {
-  const cc = ring[1 + s * 195] >>> 0, st = ring[1 + s * 195 + 1] >>> 0, ln = ring[1 + s * 195 + 2] >>> 0;
+  const cc = ring[1 + s * STR] >>> 0, st = ring[1 + s * STR + 1] >>> 0, ln = ring[1 + s * STR + 2] >>> 0;
   if (cc === CORE && ln > bestLen && st >= 0x400d1000 && st <= 0x400d2000) { best = s; bestLen = ln; }
 }
 if (best < 0) throw new Error('no spin trace');
@@ -87,9 +88,9 @@ if (best < 0) throw new Error('no spin trace');
 const T = [];
 for (let i = 0; i < bestLen; i++) {
   T.push({
-    pc: ring[1 + best * 195 + 3 + i * 3] >>> 0,
-    op: ring[1 + best * 195 + 3 + i * 3 + 1] >>> 0,
-    w: ring[1 + best * 195 + 3 + i * 3 + 2] >>> 0,
+    pc: ring[1 + best * STR + 3 + i * 3] >>> 0,
+    op: ring[1 + best * STR + 3 + i * 3 + 1] >>> 0,
+    w: ring[1 + best * STR + 3 + i * 3 + 2] >>> 0,
   });
 }
 for (let i = 0; i < T.length; i++) T[i].next = (i + 1 < T.length) ? T[i + 1].pc : null;
@@ -104,7 +105,9 @@ const TE = T.slice(0, T.length - 1);
 TE.forEach((e, i) => { e.next = (i + 1 < TE.length) ? TE[i + 1].pc : END_PC_REAL; });
 // ---- emit via shared lib (classify + branches + loop-decrements inside) ----
 const wb2 = live[72] >>> 0;
-const { mod, branches } = buildTraceModule(TE, { CORE, CBASE, wb: wb2, recLoop });
+const sarOff = (typeof ex.native_sar_pending_off === 'function') ? (ex.native_sar_pending_off() >>> 0) : null;
+console.log('[run] sarOff=' + sarOff);
+const { mod, branches } = buildTraceModule(TE, { CORE, CBASE, wb: wb2, recLoop, sarOff });
 console.log('[run] module bytes=' + mod.length);
 const runFn = await instantiateTrace(mod, L, ex);
 const wb = wb2;

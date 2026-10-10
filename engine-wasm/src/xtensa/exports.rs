@@ -65,12 +65,12 @@ static mut TRACE_THRESH: u32 = 20000;
 static mut TRACE_ENABLE: u32 = 1;
 static mut TRACE_STATE: [u32; 2] = [0; 2]; // 0 idle, 1 recording
 static mut TRACE_LEN: [u32; 2] = [0; 2];
-static mut TRACE_BUF: [[u32; 192]; 2] = [[0u32; 192]; 2]; // per core: 64 x (pc, op, w)
-// Ring slots are per-core-coherent: 16 x (core, start, len, 64x3).
+static mut TRACE_BUF: [[u32; 768]; 2] = [[0u32; 768]; 2]; // per core: 256 x (pc, op, w)
+// Ring slots are per-core-coherent: 16 x (core, start, len, 256x3).
 // (run316 lesson: a shared buffer interleaves both cores' fetch streams —
 // pcs jump -188/+68 between entries and no entry run is a real dynamic
 // path. The recorder must be per-core; the ring carries the core tag.)
-static mut TRACE_RING: [u32; 16 * 195] = [0u32; 16 * 195];
+static mut TRACE_RING: [u32; 16 * 771] = [0u32; 16 * 771];
 static mut TRACE_RING_N: u32 = 0;
 static mut TRACE_RING_HEAD: u32 = 0;
 
@@ -92,14 +92,14 @@ pub extern "C" fn native_trace_len() -> u32 {
 
 /// Linear scratch address holding the ring: [ntraces, (start,len,e0..)..].
 /// Read `native_trace_scratch_len()` u32 words from it via memoryBuffer.
-static mut TRACE_SCRATCH: [u32; 1 + 16 * 195] = [0u32; 1 + 16 * 195];
+static mut TRACE_SCRATCH: [u32; 1 + 16 * 771] = [0u32; 1 + 16 * 771];
 
 #[no_mangle]
 pub extern "C" fn native_trace_scratch_ptr() -> u32 {
     unsafe {
         TRACE_SCRATCH[0] = TRACE_RING_N;
         let mut i = 0;
-        while i < 16 * 195 {
+        while i < 16 * 771 {
             TRACE_SCRATCH[1 + i] = TRACE_RING[i];
             i += 1;
         }
@@ -109,7 +109,7 @@ pub extern "C" fn native_trace_scratch_ptr() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn native_trace_scratch_len() -> u32 {
-    1 + 16 * 195
+    1 + 16 * 771
 }
 
 /// Fetch hook: hotness + linear capture. Called with the fetched opcode;
@@ -137,7 +137,7 @@ fn trace_fetch(pc: u32, op: u32, w: u32, mmio_op: bool, core_idx: usize) {
             }
         } else if mmio_op {
             close_trace(c);
-        } else if TRACE_LEN[c] as usize >= 64 {
+        } else if TRACE_LEN[c] as usize >= 256 {
             close_trace(c);
             // The current op belongs to the NEXT run, which starts only on
             // a fresh hot trigger (keeps runs loop-aligned).
@@ -158,7 +158,7 @@ fn close_trace(c: usize) {
             return;
         }
         let slot = (TRACE_RING_HEAD % 16) as usize;
-        let base = slot * 195;
+        let base = slot * 771;
         TRACE_RING[base] = c as u32;
         TRACE_RING[base + 1] = TRACE_BUF[c][0];
         TRACE_RING[base + 2] = TRACE_LEN[c];
@@ -241,6 +241,17 @@ pub extern "C" fn native_jit_ssai(core_idx: u32, op: u32) {
     let idx_val = (op >> 8) & 15;
     core.special_registers[EXC_CAUSE] = (((op >> 4) & 1) << 4) | idx_val;
     core.sar_m32_pending = 0;
+}
+
+/// Byte offset of sar_m32_pending from its core-state base (for JIT
+/// emission of ssai without layout guesses — the field order before
+/// `enabled` is not independently pinned like the loader offsets are).
+#[no_mangle]
+pub extern "C" fn native_sar_pending_off() -> u32 {
+    let core = get_core(0) as *mut CoreState as usize;
+    let base = core;
+    let field = unsafe { &(* (core as *mut CoreState)).sar_m32_pending } as *const u32 as usize;
+    (field - base) as u32
 }
 // run152 bisect gate (RETIRED run153 with the run151 intercept; the gate
 // and shadow now stand by for future CAS forensics, default OFF).

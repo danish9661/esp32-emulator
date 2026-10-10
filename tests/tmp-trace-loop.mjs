@@ -72,19 +72,20 @@ ex.native_trace_threshold(5000);
 for (let i = 0; i < 600; i++) step();
 const n = ex.native_trace_len() >>> 0;
 const ptr = ex.native_trace_scratch_ptr() >>> 0;
-const ring = memU32().slice(ptr >>> 2, (ptr >>> 2) + (1 + 16 * 195));
+const ring = memU32().slice(ptr >>> 2, (ptr >>> 2) + (ex.native_trace_scratch_len() >>> 0));
+const STR = (ring.length - 1) / 16;
 let best = -1, bestLen = 0;
 for (let s = 0; s < 16; s++) {
-  const cc = ring[1 + s * 195] >>> 0, st = ring[1 + s * 195 + 1] >>> 0, ln = ring[1 + s * 195 + 2] >>> 0;
+  const cc = ring[1 + s * STR] >>> 0, st = ring[1 + s * STR + 1] >>> 0, ln = ring[1 + s * STR + 2] >>> 0;
   if (cc === CORE && ln > bestLen && st >= 0x400d1000 && st <= 0x400d2000) { best = s; bestLen = ln; }
 }
 if (best < 0) throw new Error('no spin trace');
 const T = [];
 for (let i = 0; i < bestLen; i++) {
   T.push({
-    pc: ring[1 + best * 195 + 3 + i * 3] >>> 0,
-    op: ring[1 + best * 195 + 3 + i * 3 + 1] >>> 0,
-    w: ring[1 + best * 195 + 3 + i * 3 + 2] >>> 0,
+    pc: ring[1 + best * STR + 3 + i * 3] >>> 0,
+    op: ring[1 + best * STR + 3 + i * 3 + 1] >>> 0,
+    w: ring[1 + best * STR + 3 + i * 3 + 2] >>> 0,
   });
 }
 for (let i = 0; i < T.length; i++) T[i].next = (i + 1 < T.length) ? T[i + 1].pc : null;
@@ -95,6 +96,8 @@ const slices = findLoopSlices(T);
 if (!slices.length) throw new Error('no loop-closed slice in trace');
 console.log('[loop] candidates: ' + slices.map((c) => `[${c.start},${c.end})`).join(' '));
 const wb = live[72] >>> 0;
+const sarOff = (typeof ex.native_sar_pending_off === 'function') ? (ex.native_sar_pending_off() >>> 0) : null;
+console.log('[loop] sarOff=' + sarOff);
 // Cyclic entry: step the interpreter until pc reaches a candidate top, so
 // regs are the loop's OWN live values (restoring foreign regs flips
 // data-dependent branches). First candidate validating 3/3 clean wins.
@@ -110,7 +113,7 @@ for (const cand of slices) {
   const Sc = T.slice(cand.start, cand.end).map((e) => ({ ...e }));
   Sc.forEach((e, i) => { e.next = (i + 1 < Sc.length) ? Sc[i + 1].pc : Sc[0].pc; });
   let built = null;
-  try { built = buildTraceModule(Sc, { CORE, CBASE, wb, recLoop }); }
+  try { built = buildTraceModule(Sc, { CORE, CBASE, wb, recLoop, sarOff }); }
   catch (e) { console.log(`[loop] candidate [${cand.start},${cand.end}): unemittable (${e.message})`); continue; }
   const fn = await instantiateTrace(built.mod, L, ex);
   if (!(await enterTop(Sc[0].pc))) { console.log(`[loop] candidate [${cand.start},${cand.end}): top never reached`); continue; }

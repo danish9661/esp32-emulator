@@ -32,7 +32,7 @@ export function classify(op) {
 }
 
 export function buildTraceModule(T, ctx) {
-  const { CORE, CBASE, wb, recLoop } = ctx;
+  const { CORE, CBASE, wb, recLoop, sarOff } = ctx;
   const kinds = T.map((e) => classify(e.op));
   kinds.forEach((cc, i) => { if (cc.k === 'unknown') throw new Error('unemittable op 0x' + T[i].op.toString(16) + ' at ' + i); });
   for (const e of T) {
@@ -81,7 +81,16 @@ export function buildTraceModule(T, ctx) {
       B.push(OP.end, OP.end);
     }
     else if (k.k === 'l32r') { if (e.next === null) throw new Error('l32r as last trace op (no next pc)'); cc2(P(k.t)); cc2(CORE); cc2(e.op); cc2(e.next); B.push(OP.call, 0x00, OP.i32_store, 0x02, 0x00); }
-    else if (k.k === 'ssai') { cc2(CORE); cc2(e.op); B.push(OP.call, 0x01); }
+    else if (k.k === 'ssai') {
+      if (sarOff == null) { cc2(CORE); cc2(e.op); B.push(OP.call, 0x01); }
+      else {
+        // inline _handler42 (window-check-free): EXC_CAUSE word + pending=0.
+        // sarOff is Rust-measured (native_sar_pending_off), never guessed.
+        const sarVal = ((((e.op >> 4) & 1) << 4) | ((e.op >> 8) & 15)) >>> 0;
+        cc2(CBASE + 336 + 12); cc2(sarVal); B.push(OP.i32_store, 0x02, 0x00);
+        cc2(CBASE + sarOff); cc2(0); B.push(OP.i32_store, 0x02, 0x00);
+      }
+    }
     else if (k.k === 'bne' || k.k === 'bltu') {
       const br = branches[bj++];
       ld(P(br.r)); ld(P(br.s)); B.push(k.k === 'bne' ? OP.i32_ne : OP.i32_lt_u);

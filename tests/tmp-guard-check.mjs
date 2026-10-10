@@ -107,11 +107,12 @@ for (let i = 0; i < 600; i++) step();
 const n = ex.native_trace_len() >>> 0;
 console.log('[guard] traces=' + n + ' CORE=' + CORE);
 const ptr = ex.native_trace_scratch_ptr() >>> 0;
-const ring = memU32().slice(ptr >>> 2, (ptr >>> 2) + (1 + 16 * 195));
+const ring = memU32().slice(ptr >>> 2, (ptr >>> 2) + (ex.native_trace_scratch_len() >>> 0));
+const STR = (ring.length - 1) / 16;
 // pick the longest trace rooted in the spin area
 let best = -1, bestLen = 0;
 for (let s = 0; s < 16; s++) {
-  const cc = ring[1 + s * 195] >>> 0, st = ring[1 + s * 195 + 1] >>> 0, ln = ring[1 + s * 195 + 2] >>> 0;
+  const cc = ring[1 + s * STR] >>> 0, st = ring[1 + s * STR + 1] >>> 0, ln = ring[1 + s * STR + 2] >>> 0;
   if (cc === CORE && ln > bestLen && st >= 0x400d1000 && st <= 0x400d2000) { best = s; bestLen = ln; }
 }
 if (best < 0) throw new Error('no spin trace');
@@ -122,7 +123,7 @@ console.log('[guard] spec72=' + live[72] + ' spec73=0x' + live[73].toString(16) 
 let checked = 0, skipped = 0;
 const specBefore = live.join(',');
 for (let i = 0; i < bestLen; i++) {
-  const op = ring[1 + best * 195 + 3 + i * 3 + 1] >>> 0;
+  const op = ring[1 + best * STR + 3 + i * 3 + 1] >>> 0;
   const args = windowArgs(op);
   if (args === null) { skipped++; continue; }
   if (typeof args === 'string') throw new Error('no derivation for ' + args);
