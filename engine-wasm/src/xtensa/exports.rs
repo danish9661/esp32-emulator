@@ -1,7 +1,7 @@
 use super::constants::*;
 use super::state::{CoreState, sab_ticks, sab_cycles};
 use super::memory::*;
-use super::handlers::c_handler7;
+use super::handlers::{c_handler7, DecodeFn};
 use super::vecinst::{decode_pie0, decode_pie31};
 
 extern "C" {
@@ -41,6 +41,101 @@ static mut BP_ARMED: u32 = 0;
 #[no_mangle]
 pub extern "C" fn native_breakpoints_armed(n: u32) {
     unsafe { BP_ARMED = n; }
+}
+
+// 50mips generation-validated decode cache. An entry is valid ONLY when
+// (pc, width, pie) match AND both covering page generations AND the global
+// MMU generation match their recorded values. Soundness (each clause kills
+// a staleness class):
+// - byte writes anywhere in either covering page bump its generation
+//   (ALL guest/DMA/GDB stores funnel through mem_write8/16/32; flash
+//   program paths through flash_set_byte; GDB-override map_write takes
+//   the global MMU_GEN hammer) — covers SMC, loader writes, OTA bytes.
+// - MMU remaps change backing without touching code bytes — covered by
+//   MMU_GEN (bumped on any store into the table mirror range).
+// - pie/mode changes ride in the tag; LOOP redirects are honored, not
+//   overwritten (see probe); WAITI never records (once per idle episode);
+//   RSIL records via the exec_rsil pseudo-fn (pure function of opcode).
+// - RAM/FLASH pages only (MMIO-code rereads could double-consume device
+//   side effects; the JS map fallback is never hot).
+// - BT census compare still runs on hits (live proxy diag); bt_shim_step
+//   runs before the probe exactly as today (stateful BT machinery).
+// - Diag gates (BP/TRACE/DEFER) must be cold; first sight of any pc always
+//   misses (nothing cached) so one-shot traces still fire.
+#[derive(Clone, Copy)]
+struct DcEntry {
+    pc: u32,
+    g1: u32,
+    g2: u32,
+    mgen: u32,
+    pie: u32,
+    w: u32,
+    func: Option<DecodeFn>,
+}
+const DC_EMPTY: DcEntry = DcEntry { pc: 0xFFFF_FFFF, g1: 0, g2: 0, mgen: 0, pie: 0, w: 0, func: None };
+static mut DC: [[DcEntry; 512]; 2] = [[DC_EMPTY; 512]; 2];
+
+#[inline(always)]
+fn dc_slot(pc: u32, pie: u32) -> usize {
+    ((pc ^ (pc >> 9) ^ (pie << 7)) & 511) as usize
+}
+
+/// Probe: Some(handler) when tag + both page generations + MMU generation
+/// all match, else None (slow path — byte-identical to pre-cache engine).
+#[inline(always)]
+fn dc_hit(core: &CoreState, pc: u32, w: u32, pie: u32) -> Option<DecodeFn> {
+    let base = match code_page_linear(core, pc) {
+        Some(b) => b,
+        None => return None,
+    };
+    let tail = match code_page_linear(core, pc + w - 1) {
+        Some(b) => b,
+        None => return None,
+    };
+    let g1 = gen_read(base);
+    let g2 = if tail == base { g1 } else { gen_read(tail) };
+    let mgen = mmu_gen_read();
+    let e = unsafe { DC[(core.index & 1) as usize][dc_slot(pc, pie)] };
+    if e.pc != pc || e.w != w || e.pie != pie || e.g1 != g1 || e.g2 != g2 || e.mgen != mgen {
+        return None;
+    }
+    e.func
+}
+
+#[inline(always)]
+fn dc_record(idx: u32, pc: u32, w: u32, pie: u32, f: DecodeFn, g1: u32, g2: u32, mgen: u32) {
+    let slot = dc_slot(pc, pie);
+    unsafe {
+        DC[(idx & 1) as usize][slot] = DcEntry { pc, g1, g2, mgen, pie, w, func: Some(f) };
+    }
+}
+
+/// Clear the decode cache (chip reset — must clear together with the
+/// generation arrays in gen_reset_all; called via native_dc_reset).
+pub(crate) fn dc_reset_all() {
+    unsafe {
+        DC = [[DC_EMPTY; 512]; 2];
+    }
+}
+
+/// Snapshot the generation tag for (pc, w): None when either covering
+/// page is uncacheable (MMIO/fallback/invalid mapping).
+#[inline(always)]
+fn dc_tag(core: &CoreState, pc: u32, w: u32) -> Option<(u32, u32, u32)> {
+    let base = code_page_linear(core, pc)?;
+    let tail = code_page_linear(core, pc + w - 1)?;
+    let g1 = gen_read(base);
+    let g2 = if tail == base { g1 } else { gen_read(tail) };
+    Some((g1, g2, mmu_gen_read()))
+}
+
+// RSIL extracted as a plain function so the cache can record it like a
+// table hit (body identical to the former inline arm).
+fn exec_rsil(core: &mut CoreState, tmp_val: u32) {
+    let level = ((tmp_val >> 8) & 0xF) as u32;
+    let at = ((tmp_val >> 4) & 0xF) as u32;
+    core.set_ar(at, core.ps_intlevel());
+    core.set_ps_intlevel(level);
 }
 
 // run152 bisect gate (RETIRED run153 with the run151 intercept; the gate
@@ -1395,25 +1490,62 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
     // wedges without this intercept. Always on.
     if width == 3 {
         if (opcode & 0xFFFF0F) == 0x0060C0 {
-            let level = ((opcode >> 8) & 0xF) as u32;
-            let at = ((opcode >> 4) & 0xF) as u32;
-            core.set_ar(at, core.ps_intlevel());
-            core.set_ps_intlevel(level);
+            if let Some((g1, g2, mgen)) = dc_tag(core, pc, width) {
+                dc_record(core.index, pc, width, core.pie_enabled, exec_rsil, g1, g2, mgen);
+            }
+            exec_rsil(core, opcode);
             core.pc = core.next_pc;
             return 1; // executed (legacy inst_count parity)
         }
     }
 
+    // Hardware-loop redirect MUST run before the probe (it mutates next_pc
+    // and count): the probe honors a fired redirect instead of overwriting
+    // it. Skipping the probe only while a loop is *active* would also be
+    // correct but needlessly uncacheable for loop bodies; honoring the
+    // redirect keeps both exactness and hits.
+    let mut loop_redirected = false;
     if core.special_registers[LOOP_COUNT] != 0
         && core.next_pc == core.special_registers[LOOP_END]
     {
         core.special_registers[LOOP_COUNT] = core.special_registers[LOOP_COUNT].wrapping_sub(1);
         core.next_pc = core.special_registers[LOOP_BEGIN];
+        loop_redirected = true;
+    }
+
+    // Decode-cache probe (all gates must hold; else the slow path below,
+    // which is byte-identical to the pre-cache engine).
+    if unsafe { BP_ARMED } == 0
+        && unsafe { PC_TRACE_LEFT } == 0
+        && unsafe { DEFER_PC } == 0
+    {
+        if let Some(f) = dc_hit(core, pc, width, core.pie_enabled) {
+            // BT census parity (fires on the memcpy site exactly as slow).
+            if core.pc == 0x40177e6b {
+                unsafe { crate::native_mmio::bt_hci_census_hit(); }
+                crate::native_mmio::bt_hci_sniff_memcpy(core);
+            }
+            core.last_opcode = opcode;
+            core.debug_opcode = opcode;
+            if !loop_redirected {
+                core.next_pc = core.pc + width;
+            }
+            f(core, opcode);
+            core.pc = core.next_pc;
+            check_ccompare(core);
+            return 1;
+        }
     }
 
     if is_wide {
         if core.pie_enabled != 0 {
-            decode_pie0(core, opcode);
+            if let Some(f) = decode_pie0(core, opcode) {
+                if let Some((g1, g2, mgen)) = dc_tag(core, pc, width) {
+                    dc_record(core.index, pc, width, core.pie_enabled, f, g1, g2, mgen);
+                }
+                f(core, opcode);
+            }
+            // Miss (None): fall through EXACTLY as before (DEFER block → tail).
         } else {
             unsafe { on_unknown_inst(core.index, core.pc, opcode); }
             core.exception(TRAP_ILLEGAL_INSTRUCTION);
@@ -1422,12 +1554,25 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
         if core.pie_enabled != 0 {
             let lo = opcode & 15;
             let hi = (opcode >> 16) & 255;
-            if (4 == lo || (0 == lo && (22 == hi || 23 == hi))) && decode_pie31(core, opcode) != 0 {
-                core.pc = core.next_pc;
-                return 1; // executed (legacy inst_count parity)
+            if 4 == lo || (0 == lo && (22 == hi || 23 == hi)) {
+                if let Some(f) = decode_pie31(core, opcode) {
+                    if let Some((g1, g2, mgen)) = dc_tag(core, pc, width) {
+                        dc_record(core.index, pc, width, core.pie_enabled, f, g1, g2, mgen);
+                    }
+                    f(core, opcode);
+                    core.pc = core.next_pc;
+                    return 1; // executed (legacy inst_count parity)
+                }
             }
         }
-        c_handler7(core, opcode);
+        if let Some(f) = c_handler7(core, opcode) {
+            if let Some((g1, g2, mgen)) = dc_tag(core, pc, width) {
+                dc_record(core.index, pc, width, core.pie_enabled, f, g1, g2, mgen);
+            }
+            f(core, opcode);
+        }
+        // Miss (None): fall through EXACTLY as before (exception already
+        // raised inside c_handler7; DEFER block → tail).
     }
 
     if unsafe { core.pc == DEFER_PC } {

@@ -214,6 +214,18 @@ pub(crate) fn mmu_gen_read() -> u32 {
     unsafe { MMU_GEN }
 }
 
+/// Reset decode-cache generations (chip reset — a reboot may reload
+/// different code bytes under identical counters, so all of it clears
+/// together with the decode cache itself; see native_dc_reset).
+pub(crate) fn gen_reset_all() {
+    unsafe {
+        CODE_GEN = [0u32; 16384];
+        MMU_GEN = 0;
+        MMU_LO = 0;
+        MMU_HI = 0;
+    }
+}
+
 unsafe fn mem_write8(addr: u32, val: u8) {
     gen_bump(addr);
     *(addr as *mut u8) = val;
@@ -278,6 +290,25 @@ fn flash_linear(core: &CoreState, addr: u32, mmu_idx: u32) -> u32 {
         return u32::MAX;
     }
     unsafe { FLASH_OFF + (entry << 16) + (addr & 0xFFFF) }
+}
+
+/// 50mips: linear base address of the 4KB page backing guest `pc` under the
+/// core's CURRENT opcode page (RAM or FLASH only; None otherwise). Mirrors
+/// the fetch path's addressing EXACTLY (same page cache fields, same
+/// mmu_entry call for flash) so the generation tag covers precisely the
+/// bytes fetch would read — never more, never less.
+pub(crate) fn code_page_linear(core: &CoreState, pc: u32) -> Option<u32> {
+    if core.opcode_page_type == PTE_TYPE_RAM as i32 {
+        Some(ram_addr(core.opcode_page_data as u32, pc & !4095))
+    } else if core.opcode_page_type == PTE_TYPE_FLASH as i32 {
+        let entry = mmu_entry(core, core.opcode_page_data as u32);
+        if entry & MMU_ENTRY_INVALID != 0 {
+            return None;
+        }
+        Some(unsafe { FLASH_OFF + (entry << 16) } + (pc & 0xFFFF) & !4095)
+    } else {
+        None
+    }
 }
 
 fn flash_read(core: &CoreState, addr: u32, mmu_idx: u32, size: u32) -> u32 {

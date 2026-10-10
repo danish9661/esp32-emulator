@@ -12292,6 +12292,17 @@ pub extern "C" fn native_rmt_reset() {
     }
 }
 
+/// Decode-cache + generation reset (called on every chip.reset() — a reboot
+/// may reload different code bytes under identical counters, so the decode
+/// cache and all generation arrays clear together, atomically).
+#[no_mangle]
+pub extern "C" fn native_dc_reset() {
+    unsafe {
+        crate::xtensa::memory::gen_reset_all();
+        crate::xtensa::exports::dc_reset_all();
+    }
+}
+
 // ---- Host RMT tap (DHT22-style single-wire sensors) ----
 // Guest TX capture + host RX inject. Additive-only: with no hook armed and
 // no pending inject, the TX/loopback path is bit-for-bit unchanged (the
