@@ -21,6 +21,7 @@ export class JitDriver {
     this.cache = new Map(); // `${core}:${pc}` -> entry
     this.uncompilable = new Set();
     this.maxEntries = opts.maxEntries || 128;
+    this._cooldown = new Map();
     this.minLen = opts.minLen || 24;
     this.stats = { hits: 0, completed: 0, exits: 0, misses: 0, compiles: 0, evictions: 0, gGen: 0, gPend: 0, gSpec: 0, invalidated: 0, findNull: 0, buildFail: 0, instFail: 0, firstErr: '', badOps: {}, exitSum: 0, exitN: 0, compLen: 0, pcExit: {}, pcComp: {} };
     const L = loader;
@@ -118,6 +119,15 @@ export class JitDriver {
       if (!br) break;
       this.stats.exits++;
       this.stats.exitSum += br.idx; this.stats.exitN++;
+      e.exitCount = (e.exitCount || 0) + 1;
+      // Poison-trace eviction: entries that only ever exit (compiled from
+      // an anomalous phase/recording) are pure overhead — drop them so a
+      // fresh phase trace can take the slot. Completions reset the count.
+      if (e.exitCount >= 64 && (e.compCount || 0) === 0) {
+        try { this.cache.delete(key); } catch {}
+        try { this._cooldown.set(key, Date.now() + 30000); } catch {}
+        this.stats.evictedPoison = (this.stats.evictedPoison || 0) + 1;
+      }
       try {
         const px = '0x' + e.startPc.toString(16);
         this.stats.pcExit[px] = (this.stats.pcExit[px] || 0) + 1;
@@ -151,6 +161,7 @@ export class JitDriver {
       if (code === 0) {
         this.stats.completed++;
         this.stats.compLen = e.len;
+        e.compCount = (e.compCount || 0) + 1;
         try {
           const px = '0x' + e.startPc.toString(16);
           this.stats.pcComp[px] = (this.stats.pcComp[px] || 0) + 1;
@@ -249,6 +260,9 @@ export class JitDriver {
   async compile(core, pc) {
     const key = core + ':' + pc;
     if (this.cache.has(key) || this.uncompilable.has(key)) return this.cache.has(key);
+    // Cooldown for poison-evicted pcs (avoids immediate recompile churn).
+    const cool = this._cooldown && this._cooldown.get(key);
+    if (cool && Date.now() < cool) return false;
     const found = this.findTrace(core, pc);
     if (!found) { this.stats.findNull++; return false; }
     let built;
@@ -288,6 +302,7 @@ export class JitDriver {
         this.stats.evictions++;
       }
     }
+    if (this._cooldown) { try { this._cooldown.delete(key); } catch {} }
     this.cache.set(key, {
       runFn, endPC: built.endPC !== null && built.endPC !== undefined ? built.endPC : found.endPC,
       len: built.len, branches: built.branches, startPc: pc,
