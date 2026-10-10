@@ -333,6 +333,53 @@ table in `webdemo/docs.html` (`webdemo/mips.js`, regenerated with
 `node tools/measure-mips.mjs`). The browser console prints the live retired
 figure after every run.
 
+### Current throughput (dual-core busy firmware, Oct 2026)
+
+Identical CPU-bound firmware on both cores (100M dependent-`imul`
+iterations per core, retired counts from the SAB-backed `inst_count` views):
+
+| Path | Wall (2814M retired inst) | Throughput |
+|---|---|---|
+| Raw main-thread, no SAB (engine ceiling) | 93s | **30.2 MIPS** |
+| 1 worker, SAB on (production) | 107s | **26.3 MIPS** |
+| 2 workers (2 threads) | 106s | **26.5/chip, 52.9 total** |
+| 4 workers (4 threads) | 117s | **24.0/chip, 95.9 total** |
+
+Steady-state compute windows read ~29–31 MIPS. SAB cost is ~13%: the engine
+never leaves the worker thread; the SABs are control rings only.
+
+### Threading model (why both cores share one thread)
+
+One worker thread steps both cores with a single FFI call (`core_run(512)`
+interleaves them 1:1). Per-core threads are not supported and not planned:
+each worker instantiates its own WASM module (no shared engine instance
+exists), and splitting one chip's cores across threads would make
+instruction interleaving wall-clock dependent — destroying the determinism
+every diag diff, race repro, and calibration in this repo relies on. The
+FFI boundary itself is already free (batch-size and pump-cadence sweeps
+measure +6%-at-noise and exactly zero), so there is no prize on that side
+either. Measured wins banked instead: gating the per-instruction
+`has_breakpoint` FFI behind a WASM-side flag (**+9%** steady-state; the
+callback is unimplemented in-repo, GDB uses memory watchpoints on a
+different path) and batching `inst_count` stores per `core_run` call
+(exact at every FFI boundary).
+
+### Measuring honestly
+
+- Count **retired instructions** (`inst_count` sum), never `chip.cycles`
+  (step budget + idle fast-forward read ~100× too high).
+- A raw main-thread boot needs the worker's pump sequence mirrored or it
+  wedges twice: first on unpumped timer/UART events (PC `0x4000fca9`, empty
+  UART), then parked pre-tick (both cores in `waiti`, zero retired
+  instructions). Mirror `runSimChunk`: `chip.step()` → JS-clock
+  `fireDueEvents()` → idle-advance or clock-sync + `native_pump_events`.
+  `chip.step()`'s SAB tick writes are load-bearing too (Rust `sab_ticks()`
+  feeds CCOUNT — skipping them freezes the scheduler tick).
+- Compare **same-run ratios**, not cross-day absolutes (DVFS governor,
+  contention, and reboot state move every number on the table; `powersave`
+  is the default here). Diag scripts: `tests/tmp-speed.mjs` (end-to-end
+  table), `tests/tmp-speed2.mjs` (batch/pump sweeps).
+
 Idle/yielding firmware is dominated by idle fast-forward + native peripheral
 FFI and sees little wall-clock change. All worker tests pass with zero
 JS fallback traffic (0 `map_read`/`map_write` FFI calls).

@@ -34,6 +34,9 @@ orders of magnitude are representative.
 | `test-wasm-standalone` (1M steps) | sub-second (~0 s wall) | WASM-only, no FFI stalls |
 | `test-real-firmware` | 332 M cycles in 1.0 s | Full peripheral firmware, WASM engine |
 | `MultiSimulator` scaling | 16.5 M steps/s (1 node) → 54.5 M total (4 nodes, ~3.3×) | Per-node linear speedup |
+| Dual-core busy firmware (Oct 2026) | 30.2 MIPS raw / 26.3 SAB-on; 52.9 (2 workers) / 95.9 (4 workers) total | Retired `inst_count`, end-to-end incl. boot |
+| Per-instruction breakpoint FFI gate | +9% steady-state | WASM-side flag; callback unimplemented in-repo, zero behavior change |
+| `inst_count` batching | delta unmeasured (box never quiet) | Exact at every FFI boundary; GDB single-step path adds directly |
 
 **Why it's fast:**
 - **Flash fast-path** (PTE_TYPE_FLASH): opcode/data fetches from the flash

@@ -600,6 +600,16 @@ js_log_u32: (val) => {
     if (this.exports.native_peripheral_init) {
       this.exports.native_peripheral_init();
     }
+    // PERF: arm the WASM-side exec-breakpoint gate only when a hasBreakpoint
+    // callback exists (nothing in-repo implements it — GDB uses memory
+    // writeWatchPoints). Without this, every retired instruction pays a JS
+    // FFI round-trip to receive constant 0. Late assigners must call
+    // exports.native_breakpoints_armed(1) themselves.
+    try {
+      if (typeof this._callbacks?.hasBreakpoint === 'function') {
+        this.exports.native_breakpoints_armed?.(1);
+      }
+    } catch {}
     if (this.exports.native_flash_init) {
       this.exports.native_flash_init(WM.FLASH_DATA_OFFSET, WM.MMU_TABLE_REGION_ID);
     }

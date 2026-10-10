@@ -83,6 +83,16 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
 - `chip.reset()` zeroes `chip.cycles`; tap in-flight state clears while
   wiring/preloads/listeners survive. Covered by `tests/test-taps-host.mjs`
   (302 checks, no compile server needed).
+- Perf (all accuracy-neutral, measured same-run): per-instruction
+  `has_breakpoint` FFI gated behind a WASM-side flag (**+9%** steady-state;
+  the callback is unimplemented in-repo, GDB uses memory watchpoints;
+  loader auto-arms at load, `native_breakpoints_armed` for late assigners)
+  and `inst_count` batched per `core_run` call (exact at every FFI boundary;
+  GDB single-step path adds directly; delta unmeasured — box never quiet).
+  Threading verdict: one worker thread per chip is the design (per-core
+  threads would kill determinism); batch-size (+6%-at-noise) and
+  pump-cadence (zero) sweeps show the JS boundary is already free.
+  See README “Performance” for the current table + methodology.
 
 ### Fixed
 - `GpioPin::reset` now clears the derived `output_enable_value` latch

@@ -28,6 +28,20 @@ extern "C" {
 // Public wrappers for JS logging (used by sha_peripheral.rs)
 pub static mut PC_TRACE_LEFT: u32 = 0;
 pub static mut PC_TRACE_CORE: u32 = 2;
+
+// Exec-breakpoint arming (PERF): the has_breakpoint FFI import fires on
+// EVERY retired instruction. Nothing in-repo implements the hasBreakpoint
+// callback (GDB only uses memory writeWatchPoints), so without this gate
+// every instruction pays a full JS round-trip to receive a constant 0.
+// The loader arms it once at load when a callback exists; late assigners
+// call native_breakpoints_armed(1) (documented, typed in index.d.ts? no —
+// native export, see wasm-loader). Default OFF = zero behavior change.
+static mut BP_ARMED: u32 = 0;
+
+#[no_mangle]
+pub extern "C" fn native_breakpoints_armed(n: u32) {
+    unsafe { BP_ARMED = n; }
+}
 // run152 bisect gate (RETIRED run153 with the run151 intercept; the gate
 // and shadow now stand by for future CAS forensics, default OFF).
 pub static mut S32C1I_ENABLE: u32 = 0;
@@ -311,7 +325,11 @@ pub extern "C" fn core_reset(core_idx: u32) {
 pub extern "C" fn core_step(core_idx: u32) -> u32 {
     let core = get_core(core_idx);
     core.sync_ccount();
-    run_instruction(core)
+    // Single-step path (GDB/debug/slow path): count directly — no batch to
+    // amortize over, and this path is never hot.
+    let r = run_instruction(core);
+    core.inst_count = core.inst_count.wrapping_add(r);
+    r
 }
 
 /// Batched instruction runner. Executes up to `max_steps` *iterations* with a
@@ -341,6 +359,10 @@ pub extern "C" fn core_run(max_steps: u32) -> u32 {
             crate::native_mmio::bt_hci_run_proof();
         }
     }
+    // Per-batch retired-instruction accumulators (flushed to the SAB-backed
+    // inst_count once per core_run call — see run_instruction's contract).
+    let mut c0n: u32 = 0;
+    let mut c1n: u32 = 0;
     // HCI proxy sniffer census (RED path): count batched-loop iterations
     // where EITHER core sits exactly on the memcpy-site pc. Proves whether
     // the loop ever executes the site (vs the pc being wrong for this
@@ -354,7 +376,11 @@ pub extern "C" fn core_run(max_steps: u32) -> u32 {
             let core = get_core(0);
             if core.enabled != 0 {
                 core.sync_ccount();
-                run_instruction(core);
+                // Returns 1 per executed instruction (0 on early-out);
+                // accumulated locally, flushed to inst_count once per batch
+                // (the SAB view advances in ≤1024-instruction steps; exact
+                // at every FFI boundary — the only place hosts can observe).
+                c0n = c0n.wrapping_add(run_instruction(core));
                 // POST-step census: run_instruction ADVANCES pc, so the
                 // pre-step compare above can never equal the site pc on
                 // entry (pc always trails by one instruction in the batched
@@ -371,7 +397,7 @@ pub extern "C" fn core_run(max_steps: u32) -> u32 {
             let core = get_core(1);
             if core.enabled != 0 {
                 core.sync_ccount();
-                run_instruction(core);
+                c1n = c1n.wrapping_add(run_instruction(core));
                 if core.pc == 0x40177e6b {
                     unsafe { crate::native_mmio::bt_hci_census_hit(); }
                     crate::native_mmio::bt_hci_sniff_memcpy(core);
@@ -388,6 +414,16 @@ pub extern "C" fn core_run(max_steps: u32) -> u32 {
         if c0_idle && c1_idle {
             break;
         }
+    }
+    // Flush the batch accumulators (exact: every executed instruction added
+    // exactly once; early-outs returned 0).
+    {
+        let c0 = get_core(0);
+        c0.inst_count = c0.inst_count.wrapping_add(c0n);
+    }
+    {
+        let c1 = get_core(1);
+        c1.inst_count = c1.inst_count.wrapping_add(c1n);
     }
     n
 }
@@ -515,18 +551,25 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
         }
     }
 
-    let breakpoints = unsafe { has_breakpoint(core.index, core.pc) };
+    let breakpoints = if unsafe { BP_ARMED } == 0 {
+        0
+    } else {
+        unsafe { has_breakpoint(core.index, core.pc) }
+    };
     if breakpoints != 0 {
         return 0;
     }
 
     // Native shims for BT hlevel queue wrappers (bypass broken double-deref;
     // returns true when the step was emulated and the original skipped).
+    // NOTE: inst_count is NOT bumped here — run_instruction returns 1 per
+    // executed instruction and callers accumulate (core_run batches the
+    // stores; core_step adds directly). The SAB view therefore advances in
+    // ≤1024-instruction steps mid-batch; exact at every FFI boundary.
     if crate::native_mmio::bt_shim_step(core) {
         return 0;
     }
 
-    core.inst_count = core.inst_count.wrapping_add(1);
     unsafe {
         // run138: trace BOTH cores (was c1-only). Core-0 visibility is
         // required: the BTC thread is pinned to core 0 and never runs, so
@@ -1436,7 +1479,10 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
 
     core.pc = core.next_pc;
     check_ccompare(core);
-    0
+    // Executed exactly one instruction (all early-outs above return 0).
+    // Callers accumulate this into inst_count (batched in core_run, direct
+    // in core_step) instead of storing per instruction.
+    1
 }
 
 pub(crate) fn read_uint8(core: &mut CoreState, addr: u32) -> u32 {
