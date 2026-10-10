@@ -2,9 +2,6 @@ use super::constants::*;
 use super::state::CoreState;
 use super::exports::{read_uint8, read_uint16, read_uint32, write_uint8, write_uint16, write_uint32, write_special_register, read_special_register};
 
-/// Resolved-instruction function pointer (50mips decode cache).
-pub type DecodeFn = fn(&mut CoreState, u32);
-
 // Helper: sign-extend utilities (nHandler0-4)
 fn n_handler0(cpu_val: u32) -> u32 { cpu_val | if (cpu_val & 8) != 0 { 0xfffffff0 } else { 0 } }
 fn n_handler1(cpu_val: u32) -> u32 { cpu_val | if (cpu_val & 128) != 0 { 0xffffff00 } else { 0 } }
@@ -968,7 +965,7 @@ pub fn a_handler13(core: &mut CoreState, tmp_val: u32) {
 }
 // ... CONTINUED WITH MORE HANDLERS
 
-pub fn c_handler7(core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
+pub fn c_handler7(core: &mut CoreState, tmp_val: u32) {
     match tmp_val & 15 {
         0 => {
             match tmp_val & 917504 {
@@ -980,22 +977,22 @@ pub fn c_handler7(core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
                                     match tmp_val & 61440 {
                                         0 => {
                                             match tmp_val & 240 {
-                                                0 => return Some(r_handler35),
-                                                128 => return Some(a_handler61),
-                                                144 => return Some(a_handler62),
-                                                160 => return Some(r_handler40),
-                                                192 => return Some(r_handler4),
-                                                208 => return Some(r_handler5),
-                                                224 => return Some(r_handler6),
-                                                240 => return Some(r_handler7),
+                                                0 => { r_handler35(core, tmp_val); return; }
+                                                128 => { a_handler61(core, tmp_val); return; }
+                                                144 => { a_handler62(core, tmp_val); return; }
+                                                160 => { r_handler40(core, tmp_val); return; }
+                                                192 => { r_handler4(core, tmp_val); return; }
+                                                208 => { r_handler5(core, tmp_val); return; }
+                                                224 => { r_handler6(core, tmp_val); return; }
+                                                240 => { r_handler7(core, tmp_val); return; }
                                                 _ => {}
                                             }
                                         }
-                                        4096 => return Some(a_handler18),
+                                        4096 => { a_handler18(core, tmp_val); return; }
                                         8192 => {
                                             match tmp_val & 4080 {
-                                                0 | 16 | 32 | 48 | 192 | 208 | 240 => return None,
-                                                128 => return Some(r_handler25),
+                                                0 | 16 | 32 | 48 | 192 | 208 | 240 => { return; }
+                                                128 => { r_handler25(core, tmp_val); return; }
                                                 _ => {}
                                             }
                                         }
@@ -1003,110 +1000,110 @@ pub fn c_handler7(core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
                                             match tmp_val & 240 {
                                                 0 => {
                                                     match tmp_val & 3840 {
-                                                        0 => return Some(_handler2),
-                                                        256 => return Some(_handler6),
-                                                        512 => return Some(_handler0),
-                                                        1024 => return Some(_handler7),
-                                                        1280 => return Some(_handler8),
+                                                        0 => { _handler2(core, tmp_val); return; }
+                                                        256 => { _handler6(core, tmp_val); return; }
+                                                        512 => { _handler0(core, tmp_val); return; }
+                                                        1024 => { _handler7(core, tmp_val); return; }
+                                                        1280 => { _handler8(core, tmp_val); return; }
                                                         _ => {}
                                                     }
                                                 }
-                                                16 => return Some(_handler3),
-                                                32 => return Some(_handler4),
+                                                16 => { _handler3(core, tmp_val); return; }
+                                                32 => { _handler4(core, tmp_val); return; }
                                                 _ => {}
                                             }
                                         }
-                                        16384 => return Some(n_handler51),
+                                        16384 => { n_handler51(core, tmp_val); return; }
                                         20480 => {
-                                            if (tmp_val & 4080) == 256 { return Some(_handler29); }
-                                            if (tmp_val & 4080) == 0 { return Some(_handler54); }
+                                            if (tmp_val & 4080) == 256 { _handler29(core, tmp_val); return; }
+                                            if (tmp_val & 4080) == 0 { _handler54(core, tmp_val); return; }
                                         }
-                                        24576 => return Some(_handler13),
-                                        28672 => return Some(_handler63),
-                                        32768 => return Some(n_handler22),
-                                        36864 => return Some(n_handler17),
-                                        40960 => return Some(n_handler23),
-                                        45056 => return Some(n_handler18),
+                                        24576 => { _handler13(core, tmp_val); return; }
+                                        28672 => { _handler63(core, tmp_val); return; }
+                                        32768 => { n_handler22(core, tmp_val); return; }
+                                        36864 => { n_handler17(core, tmp_val); return; }
+                                        40960 => { n_handler23(core, tmp_val); return; }
+                                        45056 => { n_handler18(core, tmp_val); return; }
                                         _ => {}
                                     }
                                 }
-                                1048576 => return Some(n_handler19),
+                                1048576 => { n_handler19(core, tmp_val); return; }
                                 _ => {}
                             }
                         }
-                        65536 => return Some(_handler31),
+                        65536 => { _handler31(core, tmp_val); return; }
                         2097152 => {
-                            if (tmp_val & 1048576) == 0 { return Some(a_handler51); }
-                            if (tmp_val & 1048576) == 1048576 { return Some(c_handler4); }
+                            if (tmp_val & 1048576) == 0 { a_handler51(core, tmp_val); return; }
+                            if (tmp_val & 1048576) == 1048576 { c_handler4(core, tmp_val); return; }
                         }
-                        2162688 => return Some(_handler36),
+                        2162688 => { _handler36(core, tmp_val); return; }
                         4194304 => {
                             match tmp_val & 1110016 {
-                                0 => return Some(_handler46),
-                                4096 => return Some(_handler45),
-                                8192 => return Some(_handler41),
-                                12288 => return Some(_handler40),
-                                16384 => return Some(_handler42),
-                                24576 => return Some(a_handler60),
-                                28672 => return Some(c_handler0),
-                                32768 => return Some(_handler11),
-                                57344 => return Some(a_handler46),
-                                61440 => return Some(a_handler47),
-                                1060864 => return Some(_handler9),
-                                1064960 => return Some(r_handler33),
-                                1069056 => return Some(a_handler55),
-                                1073152 | 1093632 | 1105920 | 1110016 => return None,
-                                1077248 => return Some(_handler10),
-                                1097728 => return Some(r_handler29),
-                                1101824 => return Some(a_handler54),
+                                0 => { _handler46(core, tmp_val); return; }
+                                4096 => { _handler45(core, tmp_val); return; }
+                                8192 => { _handler41(core, tmp_val); return; }
+                                12288 => { _handler40(core, tmp_val); return; }
+                                16384 => { _handler42(core, tmp_val); return; }
+                                24576 => { a_handler60(core, tmp_val); return; }
+                                28672 => { c_handler0(core, tmp_val); return; }
+                                32768 => { _handler11(core, tmp_val); return; }
+                                57344 => { a_handler46(core, tmp_val); return; }
+                                61440 => { a_handler47(core, tmp_val); return; }
+                                1060864 => { _handler9(core, tmp_val); return; }
+                                1064960 => { r_handler33(core, tmp_val); return; }
+                                1069056 => { a_handler55(core, tmp_val); return; }
+                                1073152 | 1093632 | 1105920 | 1110016 => { return; }
+                                1077248 => { _handler10(core, tmp_val); return; }
+                                1097728 => { r_handler29(core, tmp_val); return; }
+                                1101824 => { a_handler54(core, tmp_val); return; }
                                 _ => {}
                             }
                         }
-                        4259840 => return Some(_handler39),
+                        4259840 => { _handler39(core, tmp_val); return; }
                         6291456 => {
-                            if (tmp_val & 1052416) == 256 { return Some(n_handler5); }
-                            if (tmp_val & 1052416) == 0 { return Some(a_handler44); }
+                            if (tmp_val & 1052416) == 256 { n_handler5(core, tmp_val); return; }
+                            if (tmp_val & 1052416) == 0 { a_handler44(core, tmp_val); return; }
                         }
-                        6356992 => return Some(c_handler6),
+                        6356992 => { c_handler6(core, tmp_val); return; }
                         8388608 => {
-                            if (tmp_val & 1048576) == 0 { return Some(n_handler7); }
-                            if (tmp_val & 1048576) == 1048576 { return Some(n_handler14); }
+                            if (tmp_val & 1048576) == 0 { n_handler7(core, tmp_val); return; }
+                            if (tmp_val & 1048576) == 1048576 { n_handler14(core, tmp_val); return; }
                         }
                         8454144 => {
-                            if (tmp_val & 1048576) == 0 { return Some(_handler37); }
-                            if (tmp_val & 1052416) == 1048576 { return Some(_handler38); }
+                            if (tmp_val & 1048576) == 0 { _handler37(core, tmp_val); return; }
+                            if (tmp_val & 1052416) == 1048576 { _handler38(core, tmp_val); return; }
                         }
                         0xa00000 => {
-                            if (tmp_val & 1048576) == 0 { return Some(n_handler15); }
-                            if (tmp_val & 1048576) == 1048576 { return Some(n_handler16); }
+                            if (tmp_val & 1048576) == 0 { n_handler15(core, tmp_val); return; }
+                            if (tmp_val & 1048576) == 1048576 { n_handler16(core, tmp_val); return; }
                         }
                         0xa10000 => {
-                            if (tmp_val & 1048816) == 0 { return Some(_handler30); }
-                            if (tmp_val & 1052416) == 1048576 { return Some(_handler35); }
+                            if (tmp_val & 1048816) == 0 { _handler30(core, tmp_val); return; }
+                            if (tmp_val & 1052416) == 1048576 { _handler35(core, tmp_val); return; }
                         }
                         0xc00000 => {
-                            if (tmp_val & 1048576) == 0 { return Some(_handler49); }
-                            if (tmp_val & 1048576) == 1048576 { return Some(_handler51); }
+                            if (tmp_val & 1048576) == 0 { _handler49(core, tmp_val); return; }
+                            if (tmp_val & 1048576) == 1048576 { _handler51(core, tmp_val); return; }
                         }
                         0xc10000 => {
-                            if (tmp_val & 1048576) == 1048576 { return Some(a_handler27); }
-                            if (tmp_val & 1048576) == 0 { return Some(a_handler28); }
+                            if (tmp_val & 1048576) == 1048576 { a_handler27(core, tmp_val); return; }
+                            if (tmp_val & 1048576) == 0 { a_handler28(core, tmp_val); return; }
                         }
                         0xe00000 => {
-                            if (tmp_val & 1048576) == 0 { return Some(_handler52); }
-                            if (tmp_val & 1048576) == 1048576 { return Some(_handler53); }
+                            if (tmp_val & 1048576) == 0 { _handler52(core, tmp_val); return; }
+                            if (tmp_val & 1048576) == 1048576 { _handler53(core, tmp_val); return; }
                         }
                         0xe10000 => {
                             match tmp_val & 1110016 {
-                                1048576 => return Some(r_handler52),
-                                1052672 => return Some(_handler27),
-                                1056768 => return Some(r_handler53),
-                                1060864 => return Some(_handler28),
-                                1081344 => return Some(r_handler49),
-                                1085440 => return Some(_handler25),
+                                1048576 => { r_handler52(core, tmp_val); return; }
+                                1052672 => { _handler27(core, tmp_val); return; }
+                                1056768 => { r_handler53(core, tmp_val); return; }
+                                1060864 => { _handler28(core, tmp_val); return; }
+                                1081344 => { r_handler49(core, tmp_val); return; }
+                                1085440 => { _handler25(core, tmp_val); return; }
                                 1105920 => {
-                                    if (tmp_val & 3824) == 16 { return Some(a_handler63); }
-                                    if (tmp_val & 4080) == 0 { return Some(_handler1); }
+                                    if (tmp_val & 3824) == 16 { a_handler63(core, tmp_val); return; }
+                                    if (tmp_val & 4080) == 0 { _handler1(core, tmp_val); return; }
                                 }
                                 _ => {}
                             }
@@ -1116,94 +1113,94 @@ pub fn c_handler7(core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
                 }
                 131072 => {
                     match tmp_val & 0xf10000 {
-                        0 => return Some(n_handler20),
-                        65536 => return Some(_handler14),
-                        1048576 => return Some(n_handler21),
-                        1114112 => return Some(c_handler2),
-                        2097152 => return Some(a_handler52),
-                        2162688 => return Some(_handler26),
-                        3145728 => return Some(a_handler53),
-                        3211264 => return Some(r_handler9),
-                        4194304 => return Some(c_handler5),
-                        4259840 => return Some(a_handler0),
-                        5308416 => return Some(r_handler62),
-                        6291456 => return Some(_handler24),
-                        6356992 => return Some(a_handler1),
-                        7340032 => return Some(_handler23),
-                        7405568 => return Some(r_handler63),
-                        8388608 => return Some(a_handler37),
-                        8454144 => return Some(a_handler6),
-                        9502720 => return Some(a_handler16),
-                        0xa00000 => return Some(a_handler43),
-                        0xa10000 => return Some(a_handler14),
-                        0xb00000 => return Some(a_handler42),
-                        0xb10000 => return Some(a_handler10),
-                        0xc00000 => return Some(a_handler57),
-                        0xc10000 => return Some(a_handler8),
-                        0xd00000 => return Some(a_handler56),
-                        0xd10000 => return Some(a_handler19),
-                        0xe00000 => return Some(a_handler59),
-                        0xe10000 => return Some(_handler15),
-                        0xf00000 => return Some(a_handler58),
-                        0xf10000 => return Some(c_handler3),
+                        0 => { n_handler20(core, tmp_val); return; }
+                        65536 => { _handler14(core, tmp_val); return; }
+                        1048576 => { n_handler21(core, tmp_val); return; }
+                        1114112 => { c_handler2(core, tmp_val); return; }
+                        2097152 => { a_handler52(core, tmp_val); return; }
+                        2162688 => { _handler26(core, tmp_val); return; }
+                        3145728 => { a_handler53(core, tmp_val); return; }
+                        3211264 => { r_handler9(core, tmp_val); return; }
+                        4194304 => { c_handler5(core, tmp_val); return; }
+                        4259840 => { a_handler0(core, tmp_val); return; }
+                        5308416 => { r_handler62(core, tmp_val); return; }
+                        6291456 => { _handler24(core, tmp_val); return; }
+                        6356992 => { a_handler1(core, tmp_val); return; }
+                        7340032 => { _handler23(core, tmp_val); return; }
+                        7405568 => { r_handler63(core, tmp_val); return; }
+                        8388608 => { a_handler37(core, tmp_val); return; }
+                        8454144 => { a_handler6(core, tmp_val); return; }
+                        9502720 => { a_handler16(core, tmp_val); return; }
+                        0xa00000 => { a_handler43(core, tmp_val); return; }
+                        0xa10000 => { a_handler14(core, tmp_val); return; }
+                        0xb00000 => { a_handler42(core, tmp_val); return; }
+                        0xb10000 => { a_handler10(core, tmp_val); return; }
+                        0xc00000 => { a_handler57(core, tmp_val); return; }
+                        0xc10000 => { a_handler8(core, tmp_val); return; }
+                        0xd00000 => { a_handler56(core, tmp_val); return; }
+                        0xd10000 => { a_handler19(core, tmp_val); return; }
+                        0xe00000 => { a_handler59(core, tmp_val); return; }
+                        0xe10000 => { _handler15(core, tmp_val); return; }
+                        0xf00000 => { a_handler58(core, tmp_val); return; }
+                        0xf10000 => { c_handler3(core, tmp_val); return; }
                         _ => {}
                     }
                 }
-                262144 => return Some(r_handler26),
+                262144 => { r_handler26(core, tmp_val); return; }
                 524288 => {
                     match tmp_val & 0xf10000 {
-                        0 => return Some(r_handler59),
-                        65536 => return Some(r_handler45),
-                        1048576 => return Some(r_handler60),
-                        4194304 => return Some(_handler47),
-                        4259840 => return Some(_handler19),
-                        5242880 => return Some(_handler48),
+                        0 => { r_handler59(core, tmp_val); return; }
+                        65536 => { r_handler45(core, tmp_val); return; }
+                        1048576 => { r_handler60(core, tmp_val); return; }
+                        4194304 => { _handler47(core, tmp_val); return; }
+                        4259840 => { _handler19(core, tmp_val); return; }
+                        5242880 => { _handler48(core, tmp_val); return; }
                         _ => {}
                     }
                 }
                 655360 => {
                     match tmp_val & 0xf10000 {
-                        0 => return Some(n_handler10),
-                        1048576 => return Some(_handler50),
-                        1114112 => return Some(_handler61),
-                        2097152 => return Some(a_handler26),
-                        2162688 => return Some(a_handler48),
-                        3211264 => return Some(_handler56),
-                        4194304 => return Some(r_handler61),
-                        4259840 => return Some(a_handler50),
-                        5242880 => return Some(a_handler21),
-                        5308416 => return Some(_handler59),
-                        6291456 | 7340032 => return None,
-                        6356992 => return Some(a_handler49),
-                        7405568 => return Some(_handler58),
-                        8388608 => return Some(_handler12),
-                        8454144 => return Some(a_handler7),
-                        9437184 => return Some(_handler55),
-                        9502720 => return Some(a_handler17),
-                        0xa00000 => return Some(r_handler28),
-                        0xa10000 => return Some(a_handler15),
-                        0xb00000 => return Some(r_handler8),
-                        0xb10000 => return Some(a_handler11),
-                        0xc00000 => return Some(r_handler27),
-                        0xc10000 => return Some(a_handler9),
-                        0xd00000 => return Some(_handler57),
-                        0xd10000 => return Some(a_handler20),
-                        0xe00000 => return Some(_handler62),
+                        0 => { n_handler10(core, tmp_val); return; }
+                        1048576 => { _handler50(core, tmp_val); return; }
+                        1114112 => { _handler61(core, tmp_val); return; }
+                        2097152 => { a_handler26(core, tmp_val); return; }
+                        2162688 => { a_handler48(core, tmp_val); return; }
+                        3211264 => { _handler56(core, tmp_val); return; }
+                        4194304 => { r_handler61(core, tmp_val); return; }
+                        4259840 => { a_handler50(core, tmp_val); return; }
+                        5242880 => { a_handler21(core, tmp_val); return; }
+                        5308416 => { _handler59(core, tmp_val); return; }
+                        6291456 | 7340032 => { return; }
+                        6356992 => { a_handler49(core, tmp_val); return; }
+                        7405568 => { _handler58(core, tmp_val); return; }
+                        8388608 => { _handler12(core, tmp_val); return; }
+                        8454144 => { a_handler7(core, tmp_val); return; }
+                        9437184 => { _handler55(core, tmp_val); return; }
+                        9502720 => { a_handler17(core, tmp_val); return; }
+                        0xa00000 => { r_handler28(core, tmp_val); return; }
+                        0xa10000 => { a_handler15(core, tmp_val); return; }
+                        0xb00000 => { r_handler8(core, tmp_val); return; }
+                        0xb10000 => { a_handler11(core, tmp_val); return; }
+                        0xc00000 => { r_handler27(core, tmp_val); return; }
+                        0xc10000 => { a_handler9(core, tmp_val); return; }
+                        0xd00000 => { _handler57(core, tmp_val); return; }
+                        0xd10000 => { a_handler20(core, tmp_val); return; }
+                        0xe00000 => { _handler62(core, tmp_val); return; }
                         0xf00000 => {
                             match tmp_val & 240 {
-                                0 => return Some(a_handler5),
-                                16 => return Some(n_handler6),
-                                48 => return Some(r_handler10),
-                                64 => return Some(_handler5),
-                                80 => return Some(c_handler1),
-                                96 => return Some(a_handler45),
-                                112 | 176 | 224 => return None,
-                                128 => return Some(_handler33),
-                                144 => return Some(_handler32),
-                                160 => return Some(_handler34),
-                                192 => return Some(a_handler3),
-                                208 => return Some(a_handler2),
-                                240 => return Some(n_handler8),
+                                0 => { a_handler5(core, tmp_val); return; }
+                                16 => { n_handler6(core, tmp_val); return; }
+                                48 => { r_handler10(core, tmp_val); return; }
+                                64 => { _handler5(core, tmp_val); return; }
+                                80 => { c_handler1(core, tmp_val); return; }
+                                96 => { a_handler45(core, tmp_val); return; }
+                                112 | 176 | 224 => { return; }
+                                128 => { _handler33(core, tmp_val); return; }
+                                144 => { _handler32(core, tmp_val); return; }
+                                160 => { _handler34(core, tmp_val); return; }
+                                192 => { a_handler3(core, tmp_val); return; }
+                                208 => { a_handler2(core, tmp_val); return; }
+                                240 => { n_handler8(core, tmp_val); return; }
                                 _ => {}
                             }
                         }
@@ -1213,137 +1210,137 @@ pub fn c_handler7(core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
                 _ => {}
             }
         }
-        1 => return Some(r_handler48),
+        1 => { r_handler48(core, tmp_val); return; }
         2 => {
             match tmp_val & 61440 {
-                0 => return Some(r_handler41),
-                4096 => return Some(r_handler43),
-                8192 => return Some(r_handler46),
-                16384 => return Some(_handler16),
-                20480 => return Some(_handler17),
-                24576 => return Some(_handler20),
+                0 => { r_handler41(core, tmp_val); return; }
+                4096 => { r_handler43(core, tmp_val); return; }
+                8192 => { r_handler46(core, tmp_val); return; }
+                16384 => { _handler16(core, tmp_val); return; }
+                20480 => { _handler17(core, tmp_val); return; }
+                24576 => { _handler20(core, tmp_val); return; }
                 28672 => {
                     match tmp_val & 240 {
-                        0 => return Some(r_handler20),
-                        16 => return Some(r_handler22),
-                        32 => return Some(r_handler21),
-                        48 => return Some(r_handler23),
-                        64 => return Some(r_handler13),
-                        80 => return Some(r_handler14),
-                        96 => return Some(r_handler11),
-                        112 => return Some(r_handler15),
+                        0 => { r_handler20(core, tmp_val); return; }
+                        16 => { r_handler22(core, tmp_val); return; }
+                        32 => { r_handler21(core, tmp_val); return; }
+                        48 => { r_handler23(core, tmp_val); return; }
+                        64 => { r_handler13(core, tmp_val); return; }
+                        80 => { r_handler14(core, tmp_val); return; }
+                        96 => { r_handler11(core, tmp_val); return; }
+                        112 => { r_handler15(core, tmp_val); return; }
                         128 => {
                             match tmp_val & 983040 {
-                                0 => return Some(r_handler19),
-                                131072 => return Some(r_handler12),
-                                196608 => return Some(r_handler16),
-                                262144 => return Some(r_handler17),
-                                327680 => return Some(r_handler18),
+                                0 => { r_handler19(core, tmp_val); return; }
+                                131072 => { r_handler12(core, tmp_val); return; }
+                                196608 => { r_handler16(core, tmp_val); return; }
+                                262144 => { r_handler17(core, tmp_val); return; }
+                                327680 => { r_handler18(core, tmp_val); return; }
                                 _ => {}
                             }
                         }
-                        192 => return Some(r_handler37),
+                        192 => { r_handler37(core, tmp_val); return; }
                         208 => {
                             match tmp_val & 983040 {
-                                0 => return Some(r_handler38),
-                                131072 => return Some(r_handler31),
-                                196608 => return Some(r_handler34),
+                                0 => { r_handler38(core, tmp_val); return; }
+                                131072 => { r_handler31(core, tmp_val); return; }
+                                196608 => { r_handler34(core, tmp_val); return; }
                                 _ => {}
                             }
                         }
-                        224 => return Some(r_handler30),
-                        240 => return Some(r_handler32),
+                        224 => { r_handler30(core, tmp_val); return; }
+                        240 => { r_handler32(core, tmp_val); return; }
                         _ => {}
                     }
                 }
-                36864 => return Some(r_handler42),
-                40960 => return Some(a_handler12),
-                45056 => return Some(r_handler44),
-                49152 => return Some(n_handler11),
-                53248 => return Some(n_handler13),
-                57344 => return Some(_handler18),
-                61440 => return Some(_handler22),
+                36864 => { r_handler42(core, tmp_val); return; }
+                40960 => { a_handler12(core, tmp_val); return; }
+                45056 => { r_handler44(core, tmp_val); return; }
+                49152 => { n_handler11(core, tmp_val); return; }
+                53248 => { n_handler13(core, tmp_val); return; }
+                57344 => { _handler18(core, tmp_val); return; }
+                61440 => { _handler22(core, tmp_val); return; }
                 _ => {}
             }
         }
         3 => {
             match tmp_val & 61440 {
-                0 => return Some(r_handler57),
-                16384 => return Some(_handler43),
-                32768 => return Some(r_handler58),
-                49152 => return Some(_handler44),
+                0 => { r_handler57(core, tmp_val); return; }
+                16384 => { _handler43(core, tmp_val); return; }
+                32768 => { r_handler58(core, tmp_val); return; }
+                49152 => { _handler44(core, tmp_val); return; }
                 _ => {}
             }
         }
         4 => {
             match tmp_val & 0xfc8000 {
-                524288 => return Some(a_handler36),
-                1572864 => return Some(a_handler35),
-                2359296 => return Some(a_handler25),
-                2621440 => return Some(a_handler34),
-                2883584 => return Some(a_handler41),
-                3407872 => return Some(a_handler23),
-                3670016 => return Some(a_handler30),
-                3932160 => return Some(a_handler39),
-                4718592 => return Some(a_handler33),
-                5767168 => return Some(a_handler32),
-                6553600 => return Some(a_handler24),
-                6815744 => return Some(a_handler31),
-                7077888 => return Some(a_handler40),
-                7340032 => return Some(_handler60),
-                7602176 => return Some(a_handler22),
-                7864320 => return Some(a_handler29),
-                8126464 => return Some(a_handler38),
-                8388608 => return Some(r_handler51),
-                9437184 => return Some(r_handler50),
+                524288 => { a_handler36(core, tmp_val); return; }
+                1572864 => { a_handler35(core, tmp_val); return; }
+                2359296 => { a_handler25(core, tmp_val); return; }
+                2621440 => { a_handler34(core, tmp_val); return; }
+                2883584 => { a_handler41(core, tmp_val); return; }
+                3407872 => { a_handler23(core, tmp_val); return; }
+                3670016 => { a_handler30(core, tmp_val); return; }
+                3932160 => { a_handler39(core, tmp_val); return; }
+                4718592 => { a_handler33(core, tmp_val); return; }
+                5767168 => { a_handler32(core, tmp_val); return; }
+                6553600 => { a_handler24(core, tmp_val); return; }
+                6815744 => { a_handler31(core, tmp_val); return; }
+                7077888 => { a_handler40(core, tmp_val); return; }
+                7340032 => { _handler60(core, tmp_val); return; }
+                7602176 => { a_handler22(core, tmp_val); return; }
+                7864320 => { a_handler29(core, tmp_val); return; }
+                8126464 => { a_handler38(core, tmp_val); return; }
+                8388608 => { r_handler51(core, tmp_val); return; }
+                9437184 => { r_handler50(core, tmp_val); return; }
                 _ => {}
             }
         }
         5 => {
             match tmp_val & 48 {
-                0 => return Some(r_handler0),
-                16 => return Some(r_handler1),
-                32 => return Some(r_handler2),
-                48 => return Some(r_handler3),
+                0 => { r_handler0(core, tmp_val); return; }
+                16 => { r_handler1(core, tmp_val); return; }
+                32 => { r_handler2(core, tmp_val); return; }
+                48 => { r_handler3(core, tmp_val); return; }
                 _ => {}
             }
         }
         6 => {
             match tmp_val & 48 {
-                0 => return Some(r_handler39),
+                0 => { r_handler39(core, tmp_val); return; }
                 16 => {
                     match tmp_val & 192 {
-                        0 => return Some(n_handler32),
-                        64 => return Some(n_handler48),
-                        128 => return Some(n_handler44),
-                        192 => return Some(n_handler39),
+                        0 => { n_handler32(core, tmp_val); return; }
+                        64 => { n_handler48(core, tmp_val); return; }
+                        128 => { n_handler44(core, tmp_val); return; }
+                        192 => { n_handler39(core, tmp_val); return; }
                         _ => {}
                     }
                 }
                 32 => {
                     match tmp_val & 192 {
-                        0 => return Some(n_handler31),
-                        64 => return Some(n_handler47),
-                        128 => return Some(n_handler41),
-                        192 => return Some(n_handler36),
+                        0 => { n_handler31(core, tmp_val); return; }
+                        64 => { n_handler47(core, tmp_val); return; }
+                        128 => { n_handler41(core, tmp_val); return; }
+                        192 => { n_handler36(core, tmp_val); return; }
                         _ => {}
                     }
                 }
                 48 => {
                     match tmp_val & 192 {
-                        0 => return Some(r_handler24),
+                        0 => { r_handler24(core, tmp_val); return; }
                         64 => {
                             match tmp_val & 61440 {
-                                0 => return Some(n_handler34),
-                                4096 => return Some(n_handler53),
-                                32768 => return Some(r_handler54),
-                                36864 => return Some(r_handler56),
-                                40960 => return Some(r_handler55),
+                                0 => { n_handler34(core, tmp_val); return; }
+                                4096 => { n_handler53(core, tmp_val); return; }
+                                32768 => { r_handler54(core, tmp_val); return; }
+                                36864 => { r_handler56(core, tmp_val); return; }
+                                40960 => { r_handler55(core, tmp_val); return; }
                                 _ => {}
                             }
                         }
-                        128 => return Some(n_handler43),
-                        192 => return Some(n_handler38),
+                        128 => { n_handler43(core, tmp_val); return; }
+                        192 => { n_handler38(core, tmp_val); return; }
                         _ => {}
                     }
                 }
@@ -1353,58 +1350,58 @@ pub fn c_handler7(core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
         7 => {
             match tmp_val & 57344 {
                 0 => {
-                    if (tmp_val & 4096) == 4096 { return Some(n_handler30); }
-                    if (tmp_val & 4096) == 0 { return Some(n_handler50); }
+                    if (tmp_val & 4096) == 4096 { n_handler30(core, tmp_val); return; }
+                    if (tmp_val & 4096) == 0 { n_handler50(core, tmp_val); return; }
                 }
                 8192 => {
-                    if (tmp_val & 4096) == 0 { return Some(n_handler40); }
-                    if (tmp_val & 4096) == 4096 { return Some(n_handler42); }
+                    if (tmp_val & 4096) == 0 { n_handler40(core, tmp_val); return; }
+                    if (tmp_val & 4096) == 4096 { n_handler42(core, tmp_val); return; }
                 }
                 16384 => {
-                    if (tmp_val & 4096) == 0 { return Some(n_handler24); }
-                    if (tmp_val & 4096) == 4096 { return Some(n_handler26); }
+                    if (tmp_val & 4096) == 0 { n_handler24(core, tmp_val); return; }
+                    if (tmp_val & 4096) == 4096 { n_handler26(core, tmp_val); return; }
                 }
-                24576 => return Some(n_handler27),
+                24576 => { n_handler27(core, tmp_val); return; }
                 32768 => {
-                    if (tmp_val & 4096) == 0 { return Some(n_handler25); }
-                    if (tmp_val & 4096) == 4096 { return Some(n_handler46); }
+                    if (tmp_val & 4096) == 0 { n_handler25(core, tmp_val); return; }
+                    if (tmp_val & 4096) == 4096 { n_handler46(core, tmp_val); return; }
                 }
                 40960 => {
-                    if (tmp_val & 4096) == 0 { return Some(n_handler35); }
-                    if (tmp_val & 4096) == 4096 { return Some(n_handler37); }
+                    if (tmp_val & 4096) == 0 { n_handler35(core, tmp_val); return; }
+                    if (tmp_val & 4096) == 4096 { n_handler37(core, tmp_val); return; }
                 }
                 49152 => {
-                    if (tmp_val & 4096) == 4096 { return Some(n_handler28); }
-                    if (tmp_val & 4096) == 0 { return Some(n_handler45); }
+                    if (tmp_val & 4096) == 4096 { n_handler28(core, tmp_val); return; }
+                    if (tmp_val & 4096) == 0 { n_handler45(core, tmp_val); return; }
                 }
-                57344 => return Some(n_handler29),
+                57344 => { n_handler29(core, tmp_val); return; }
                 _ => {}
             }
         }
-        8 => return Some(r_handler47),
-        9 => return Some(_handler21),
-        10 => return Some(n_handler9),
-        11 => return Some(n_handler12),
+        8 => { r_handler47(core, tmp_val); return; }
+        9 => { _handler21(core, tmp_val); return; }
+        10 => { n_handler9(core, tmp_val); return; }
+        11 => { n_handler12(core, tmp_val); return; }
         12 => {
             match tmp_val & 128 {
-                0 => return Some(a_handler13),
+                0 => { a_handler13(core, tmp_val); return; }
                 128 => {
-                    if (tmp_val & 64) == 0 { return Some(n_handler33); }
-                    if (tmp_val & 64) == 64 { return Some(n_handler49); }
+                    if (tmp_val & 64) == 0 { n_handler33(core, tmp_val); return; }
+                    if (tmp_val & 64) == 64 { n_handler49(core, tmp_val); return; }
                 }
                 _ => {}
             }
         }
         13 => {
             match tmp_val & 61440 {
-                0 => return Some(a_handler4),
+                0 => { a_handler4(core, tmp_val); return; }
                 61440 => {
                     match tmp_val & 240 {
-                        0 => return Some(a_handler61),
-                        16 => return Some(a_handler62),
-                        32 => return Some(n_handler52),
-                        48 => return None,
-                        96 => return Some(r_handler36),
+                        0 => { a_handler61(core, tmp_val); return; }
+                        16 => { a_handler62(core, tmp_val); return; }
+                        32 => { n_handler52(core, tmp_val); return; }
+                        48 => { return; }
+                        96 => { r_handler36(core, tmp_val); return; }
                         _ => {}
                     }
                 }
@@ -1413,10 +1410,8 @@ pub fn c_handler7(core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
         }
         _ => {}
     }
-    // unknownInstruction — call back to JS (miss fall-through preserved:
-    // the caller treats None as miss and continues exactly as before).
+    // unknownInstruction — call back to JS
     core.exception(TRAP_ILLEGAL_INSTRUCTION);
-    None
 }
 
 // Stubs for remaining handlers (will be filled in from JS source)

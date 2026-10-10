@@ -679,10 +679,6 @@ impl SpiPeripheral {
     // bytes go through the JS chip.flash SAB via FFI (js_spi_flash_get/set_byte).
     // Mirrors JS `this.cpu.flash` reads/writes (OOB reads → 0, OOB writes dropped).
     fn flash_set_byte(&mut self, idx: usize, val: u8) {
-        // 50mips: every mirror write bumps its page generation (covers both
-        // the native buffer and the JS-fallback path — idx is known either
-        // way). Erase loops funnel through here per byte.
-        crate::xtensa::memory::flash_gen_bump(idx as u32);
         unsafe {
             if self.flash_buffer != core::ptr::null_mut() {
                 if idx < self.flash_buffer_len as usize {

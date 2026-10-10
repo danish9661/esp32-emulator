@@ -1,5 +1,4 @@
 use super::state::CoreState;
-use super::handlers::DecodeFn;
 use super::exports::{read_uint8, read_uint32, write_uint8, write_uint32};
 
 
@@ -1785,7 +1784,7 @@ pub static SX_INST_TABLE: &[SxInstEntry] = &[
     SxInstEntry { name: "ee.src.q.LedcChannel.decodeVQFormatXp", mask: 0xfc000c0e, opcode: 0xe000000e, func: sx_ee_src_q_ledc_channel_decode_vq_format_xp },
     SxInstEntry { name: "ee.src.q.LedcChannel.xp", mask: 0xff88300e, opcode: 0xe800000e, func: sx_ee_src_q_ledc_channel_xp },
 ];
-pub fn decode_pie0(_core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
+pub fn decode_pie0(core: &mut CoreState, tmp_val: u32) -> u32 {
     // PERF (50mips): 8-way dispatch on opcode bits[3:1] instead of a linear
     // scan over the whole table. SOUNDNESS (provable, do not "optimize"
     // further without re-proving): every table mask covers bits[3:1]
@@ -1814,12 +1813,13 @@ pub fn decode_pie0(_core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
         while i < PIE0_PART_LEN[b] as usize {
             let entry = &SX_INST_TABLE[PIE0_PART[b][i] as usize];
             if (tmp_val & entry.mask) == (entry.opcode & entry.mask) {
-                return Some(entry.func);
+                (entry.func)(core, tmp_val);
+                return 1;
             }
             i += 1;
         }
     }
-    None
+    0
 }
 
 // Bucket partition of SX_INST_TABLE by (opcode>>1)&7 (see decode_pie0).
@@ -3745,12 +3745,13 @@ pub static S2_INST_TABLE: &[S2InstEntry] = &[
     S2InstEntry { name: "ee.stf.64.xp", mask: 458767, opcode: 458752, func: s2_ee_stf_64_xp },
 ];
 
-pub fn decode_pie31(_core: &mut CoreState, tmp_val: u32) -> Option<DecodeFn> {
+pub fn decode_pie31(core: &mut CoreState, tmp_val: u32) -> u32 {
     // JS builds a 256-slot lookup table; we iterate S2_INST_TABLE directly (identical behavior)
     for entry in S2_INST_TABLE {
         if (tmp_val & entry.mask) == entry.opcode {
-            return Some(entry.func);
+            (entry.func)(core, tmp_val);
+            return 1;
         }
     }
-    None
+    0
 }

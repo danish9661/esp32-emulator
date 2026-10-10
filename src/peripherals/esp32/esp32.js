@@ -503,7 +503,6 @@ class ESP32 {
       this._nativeLedcReset = () => { try { loader.exports?.native_ledc_reset?.(); } catch {} };
       this._nativePcntReset = () => { try { loader.exports?.native_pcnt_reset?.(); } catch {} };
       this._nativeRmtReset = () => { try { loader.exports?.native_rmt_reset?.(); } catch {} };
-      this._nativeDcReset = () => { try { loader.exports?.native_dc_reset?.(); } catch {} };
       this._nativeI2sReset = () => { try { loader.exports?.native_i2s_reset?.(); } catch {} };
       this._nativeSdmmcReset = () => { try { loader.exports?.native_sdmmc_reset?.(); } catch {} };
       this._nativeWifiAnalogReset = () => { try { loader.exports?.native_wifi_analog_reset?.(); } catch {} };
@@ -580,7 +579,6 @@ class ESP32 {
     if (this._nativeLedcReset) this._nativeLedcReset();
     if (this._nativePcntReset) this._nativePcntReset();
     if (this._nativeRmtReset) this._nativeRmtReset();
-    if (this._nativeDcReset) this._nativeDcReset();
     if (this._nativeI2sReset) this._nativeI2sReset();
     if (this._nativeSdmmcReset) this._nativeSdmmcReset();
     if (this._nativeWifiAnalogReset) this._nativeWifiAnalogReset();
