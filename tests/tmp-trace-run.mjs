@@ -107,7 +107,9 @@ TE.forEach((e, i) => { e.next = (i + 1 < TE.length) ? TE[i + 1].pc : END_PC_REAL
 const wb2 = live[72] >>> 0;
 const sarOff = (typeof ex.native_sar_pending_off === 'function') ? (ex.native_sar_pending_off() >>> 0) : null;
 console.log('[run] sarOff=' + sarOff);
-const built = buildTraceModule(TE, { CORE, CBASE, wb: wb2, recLoop, sarOff });
+const folded = [];
+const built = buildTraceModule(TE, { CORE, CBASE, wb: wb2, recLoop, sarOff, folded, readMem: (a) => ex.core_read_uint32(CORE, a) >>> 0 });
+console.log('[run] const-folded l32r: ' + folded.length);
 const { mod, branches } = built;
 const TELEN = built.len;
 console.log('[run] emitted ops=' + TELEN + ' endPC=0x' + built.endPC.toString(16));

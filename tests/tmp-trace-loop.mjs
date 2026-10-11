@@ -113,7 +113,7 @@ for (const cand of slices) {
   const Sc = T.slice(cand.start, cand.end).map((e) => ({ ...e }));
   Sc.forEach((e, i) => { e.next = (i + 1 < Sc.length) ? Sc[i + 1].pc : Sc[0].pc; });
   let built = null;
-  try { built = buildTraceModule(Sc, { CORE, CBASE, wb, recLoop, sarOff }); }
+  try { built = buildTraceModule(Sc, { CORE, CBASE, wb, recLoop, sarOff, readMem: (a) => ex.core_read_uint32(CORE, a) >>> 0 }); }
   catch (e) { console.log(`[loop] candidate [${cand.start},${cand.end}): unemittable (${e.message})`); continue; }
   const fn = await instantiateTrace(built.mod, L, ex);
   if (!(await enterTop(Sc[0].pc))) { console.log(`[loop] candidate [${cand.start},${cand.end}): top never reached`); continue; }

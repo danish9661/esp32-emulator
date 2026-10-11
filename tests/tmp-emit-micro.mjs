@@ -145,7 +145,8 @@ for (const m of MICROS) {
     litAddr = ((T[0].next >>> 2) + (0xffff0000 | ((m.lit >> 8) & 65535))) << 2;
     savedLit = ex.core_read_uint32(CORE, litAddr) >>> 0;
   }
-  const built = buildTraceModule(T.map((e) => ({ ...e })), { CORE, CBASE, wb: wb0, recLoop, sarOff });
+  if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A5A5A5); // stable before fold bakes it
+  const built = buildTraceModule(T.map((e) => ({ ...e })), { CORE, CBASE, wb: wb0, recLoop, sarOff, readMem: (a) => ex.core_read_uint32(CORE, a) >>> 0 });
   const fn = await instantiateTrace(built.mod, L, ex);
   let pass = 0, discard = 0, fail = 0;
   for (let t = 0; t < 20; t++) {
@@ -161,12 +162,12 @@ for (const m of MICROS) {
     };
     memU32().set(stateA, CBASE);
     for (const r of m.regs) memU32()[P(r)] = V[r];
-    if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A50000 + t);
+    if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A5A5A5);
     let a;
     try { fn(); a = snap(); } catch (e) { fail++; console.log(`[micro] ${m.name} t=${t} JIT threw: ${e.message}`); break; }
     memU32().set(stateA, CBASE);
     for (const r of m.regs) memU32()[P(r)] = V[r];
-    if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A50000 + t);
+    if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A5A5A5);
     wc0.PC = SCRATCH;
     let expect = SCRATCH, bad = false;
     for (const { w } of m.ops) {

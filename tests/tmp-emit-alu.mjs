@@ -131,7 +131,7 @@ const savedLit = ex.core_read_uint32(CORE, TB_LIT) >>> 0;
 const savedCode = [];
 for (let i = 0; i < 40; i++) savedCode.push(ex.core_read_uint8(CORE, SCRATCH + i) >>> 0);
 placeChain(CHB, SCRATCH);
-const builtB = buildTraceModule(TB.map((e) => ({ ...e })), { CORE, CBASE, wb: wb0, recLoop, sarOff });
+const builtB = buildTraceModule(TB.map((e) => ({ ...e })), { CORE, CBASE, wb: wb0, recLoop, sarOff, readMem: (a) => ex.core_read_uint32(CORE, a) >>> 0 });
 console.log('[emit] suiteB emitted ops=' + builtB.len + ' bytes=' + builtB.mod.length);
 const runB = await instantiateTrace(builtB.mod, L, ex);
 // B0: prefix bisect (which op traps?)
@@ -141,7 +141,7 @@ const runB = await instantiateTrace(builtB.mod, L, ex);
     const pre = TBp.slice(0, n);
     pre.forEach((e, i) => { e.next = (i + 1 < pre.length) ? pre[i + 1].pc : (e.pc + e.w); });
     let b;
-    try { b = buildTraceModule(pre, { CORE, CBASE, wb: wb0, recLoop, sarOff }); }
+    try { b = buildTraceModule(pre, { CORE, CBASE, wb: wb0, recLoop, sarOff, readMem: (a) => ex.core_read_uint32(CORE, a) >>> 0 }); }
     catch (e) { console.log(`[emit] prefix ${n}: build-fail ${e.message}`); break; }
     const f = await instantiateTrace(b.mod, L, ex);
     memU32().set(stateA, CBASE);
@@ -204,7 +204,7 @@ if (fail || pass < 60) { console.log('[emit] SUITE B FAILED'); process.exit(1); 
 // Suite C: call truncation ([addiN, addN, call8, addN] -> prefix of 2)
 const CHC = [{ op: 0x551b, w: 2 }, { op: 0x778a, w: 2 }, { op: 0x3b0a5, w: 3 }, { op: 0x778a, w: 2 }];
 const TC = chainPcs(CHC, SCRATCH + 64);
-const builtC = buildTraceModule(TC.map((e) => ({ ...e })), { CORE, CBASE, wb: wb0, recLoop, sarOff });
+const builtC = buildTraceModule(TC.map((e) => ({ ...e })), { CORE, CBASE, wb: wb0, recLoop, sarOff, readMem: (a) => ex.core_read_uint32(CORE, a) >>> 0 });
 console.log('[emit] suiteC: emitted=' + builtC.len + ' endPC=0x' + builtC.endPC.toString(16) + ' (call at 0x' + TC[2].pc.toString(16) + ')');
 if (builtC.len !== 2 || builtC.endPC !== TC[2].pc) { console.log('[emit] SUITE C FAILED (bad truncation)'); process.exit(1); }
 const runC = await instantiateTrace(builtC.mod, L, ex);

@@ -629,7 +629,7 @@ async function runSimChunk() {
   // traces; the interpreter covers everything when disabled/absent.
   let jitDrv = null;
   let jitKA = 0, jitKB = 0;
-  const steprofOn = (typeof process !== 'undefined' && !!steprofOn);
+  const steprofOn = (typeof process !== 'undefined' && !!process.env.STEPROF);
   const nowNs = () => BigInt(Math.round(performance.now() * 1e6));
   let profE = 0n, profS = 0n, profP = 0n, profN = 0;
   try {

@@ -157,7 +157,11 @@ export function prepareTrace(T, ctx) {
     }
   }
   const kinds = T.map((e) => classify(e.op));
-  kinds.forEach((cc, i) => { if (cc.k === 'unknown') throw new Error('unemittable op 0x' + T[i].op.toString(16) + ' at ' + i); });
+  const CALLOUT = ctx.noCallout ? new Set(['l32in', 'l32i8', 's32in', 'l32r', 'l8ui']) : null;
+  kinds.forEach((cc, i) => {
+    if (cc.k === 'unknown') throw new Error('unemittable op 0x' + T[i].op.toString(16) + ' at ' + i);
+    if (CALLOUT && CALLOUT.has(cc.k)) throw new Error('call-out shape gated: ' + cc.k);
+  });
   for (const e of T) {
     const lo = e.op & 15;
     if (e.w === 4) throw new Error('wide op needs pie guard (not implemented v1)');
@@ -250,7 +254,24 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'addx2') {
       c(P(k.t)); ld(P(k.r)); c(2); B.push(OP.i32_shl); ld(P(k.s)); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00);
     }
-    else if (k.k === 'l32r') { if (e.next === null) throw new Error('l32r as last trace op (no next pc)'); cc2(P(k.t)); cc2(CORE); cc2(e.op); cc2(e.next); B.push(OP.call, 0x06, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'l32r') {
+      if (e.next === null) throw new Error('l32r as last trace op (no next pc)');
+      // Constant-fold when the literal sits in flash (code windows
+      // 0x400C0000-0x40400000): value can't change without a flash write,
+      // which bumps the already-guarded region). RAM/DROM literals keep
+      // the call-out (RAM is mutable under the trace; DROM has its own
+      // window semantics).
+      const idx = (e.op >> 8) & 65535;
+      const litAddr = (((e.next >>> 2) + (0xffff0000 | idx)) << 2) >>> 0;
+      const inFlash = litAddr >= 0x400c0000 && litAddr < 0x40400000;
+      if (ctx.readMem && inFlash) {
+        const val = ctx.readMem(litAddr) >>> 0;
+        c(P(k.t)); c(val); B.push(OP.i32_store, 0x02, 0x00);
+        if (ctx.folded) ctx.folded.push(litAddr >>> 0);
+      } else {
+        cc2(P(k.t)); cc2(CORE); cc2(e.op); cc2(e.next); B.push(OP.call, 0x06, OP.i32_store, 0x02, 0x00);
+      }
+    }
     else if (k.k === 'ssai') {
       if (sarOff == null) { cc2(CORE); cc2(e.op); B.push(OP.call, 0x07); }
       else {

@@ -353,10 +353,12 @@ export class JitDriver {
     if (!found) { this.stats.findNull++; return false; }
     let built;
     try {
+      const ex2 = this.ex;
       built = buildTraceModule(found.TE, {
         CORE: core, CBASE: core * this.CORE_SZ, wb: found.wb,
         recLoop: found.loop, sarOff: this.sarOff,
         noCallout: !!this.chip._jitNoCallout,
+        readMem: (addr) => ex2.core_read_uint32(core, addr) >>> 0,
       });
     } catch (err) {
       this.stats.buildFail++;
