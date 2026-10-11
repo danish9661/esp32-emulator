@@ -123,6 +123,13 @@ const MICROS = [
   { name: 'l8ui', ops: [{ op: 0x982, w: 3 }], regs: [8, 9], setup: (V) => { V[9] = DATA; }, cmp: [8] },
   { name: 'nop', ops: [{ op: 0x20c0, w: 3 }], regs: [1, 2], setup: null, cmp: [1, 2] },
   { name: 'bnezn', ops: [{ op: 0xDCC, w: 2 }], regs: [13], setup: (V) => { V[13] = 0; }, cmp: [13] },
+  { name: 'l32i8', ops: [{ op: 0x2212, w: 3 }], regs: [1, 2], setup: (V) => { V[2] = DATA; }, cmp: [1] },
+  { name: 'bge', ops: [{ op: 0xFFA687, w: 3 }], regs: [6, 8], setup: (V) => { V[6] = 0; V[8] = 1; }, cmp: [6, 8] },
+  { name: 'bgeu', ops: [{ op: 0xFFB687, w: 3 }], regs: [6, 8], setup: (V) => { V[6] = 0; V[8] = 1; }, cmp: [6, 8] },
+  { name: 'blt', ops: [{ op: 0xFF2687, w: 3 }], regs: [6, 8], setup: (V) => { V[6] = 5; V[8] = 5; }, cmp: [6, 8] },
+  { name: 'j', ops: [{ op: 0xFFFFC6, w: 3 }], regs: [1, 2], setup: null, cmp: [1, 2] },
+  { name: 'mov', ops: [{ op: 0x65D, w: 2 }], regs: [5, 6], setup: null, cmp: [5] },
+  { name: 'addi8', ops: [{ op: 0x10C652, w: 3 }], regs: [5, 6], setup: null, cmp: [5] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

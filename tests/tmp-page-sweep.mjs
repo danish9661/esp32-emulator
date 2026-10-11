@@ -116,11 +116,20 @@ for (const e of ops) {
 }
 const top = Object.entries(hist).sort((x, y) => y[1] - x[1]).slice(0, 12);
 console.log('[sweep] shape census: ' + top.map(([k, n]) => `${k}=${n}`).join(' '));
-  globalThis.__lastOps = ops;
+  globalThis.__lastOps = (globalThis.__lastOps || []).concat(ops);
   for (const [k, nn] of Object.entries(hist)) GH[k] = (GH[k] || 0) + nn;
   Gtot += ops.length; Gunk += hist['unknown'] || 0;
 }
 const top = Object.entries(GH).sort((x, y) => y[1] - x[1]).slice(0, 14);
 console.log('[sweep] UNION shapes: ' + top.map(([k, nn]) => `${k}=${nn}`).join(' '));
+{
+  const seenU = new Set(), sampU = [];
+  for (const e of (globalThis.__lastOps || [])) {
+    if (classify(e.op).k !== 'unknown' || seenU.has(e.op)) continue;
+    seenU.add(e.op);
+    if (sampU.length < 60) sampU.push('0x' + e.op.toString(16));
+  }
+  console.log('[sweep] unknown samples: ' + sampU.join(' '));
+}
 console.log(`[sweep] UNION unknown=${Gunk}/${Gtot} (${(100 * Gunk / Gtot).toFixed(1)}%)`);
 process.exit(0);

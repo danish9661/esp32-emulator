@@ -6,7 +6,7 @@ export const OP = {
   end: 0x0b, if_: 0x04, else_: 0x05, return_: 0x0f, call: 0x10, br: 0x0c, br_if: 0x0d,
   loop: 0x03, block: 0x02,
   local_get: 0x20, local_set: 0x21,
-  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x48, i32_and: 0x71, i32_or: 0x72, local_tee: 0x22,
+  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x49, i32_lt_s: 0x48, i32_and: 0x71, i32_or: 0x72, local_tee: 0x22,
   i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76, i32_shr_s: 0x75,
   i32_load: 0x28, i32_store: 0x36,
   global_get: 0x23, global_set: 0x24, unreachable_: 0x00, nop_: 0x01, drop: 0x1a,
@@ -33,8 +33,29 @@ export function classify(op) {
     return { k: 'moviN', t: clk, imm: ((sim & 96) === 96 ? (sim | 0xffffff80) : sim) >>> 0 };
   }
   if (lo === 1) return { k: 'l32r', t: (op >> 4) & 15 }; // r_handler48 dest=(>>4)&15
-  if (lo === 7 && (op & 57344) === 32768 && (op & 4096) === 4096) // bne n_handler46
-    return { k: 'br', b: 'bne', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 7 && (op & 57344) === 32768 && (op & 4096) === 4096)
+    return { k: 'br', b: 'bne', r: f8, s: f4, imm: sext8((op >> 16) & 255) }; // n_handler46 (both encodings)
+  if (lo === 7 && (op & 57344) === 40960) { // bge/bgeu n_handler35/37
+    const r = f8, ss = f4;
+    return { k: 'br', b: ((op & 4096) ? 'bgeu' : 'bge'), r, s: ss, imm: sext8((op >> 16) & 255) };
+  }
+  if (lo === 7 && (op & 57344) === 8192 && !(op & 4096)) // blt n_handler40
+    return { k: 'br', b: 'blt', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 2 && (op & 61440) === 8192) { // l32i r_handler46 (8-bit offset load)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
+    return { k: 'l32i8', t, s: ss, off };
+  }
+  if (lo === 2 && (op & 61440) === 49152) { // addi8 n_handler11
+    const idx = (op >> 16) & 255;
+    return { k: 'addi8', t: f4, r: f8, imm: sext8(idx) };
+  }
+  if (lo === 13 && (op & 61440) === 0) // mov a_handler4
+    return { k: 'mov', t: f4, s: f8 };
+  if (lo === 6 && (op & 48) === 0) { // j r_handler39 (unconditional)
+    const idx = (op >> 6) & 262143;
+    const off = (idx & 131072) ? (idx | 0xfffc0000) : idx;
+    return { k: 'j', off: off | 0 };
+  }
   if (lo === 7 && (op & 57344) === 8192 && (op & 4096) === 4096) // bltu n_handler42
     return { k: 'br', b: 'bltu', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 57344) === 0 && (op & 4096) === 4096) { // beq n_handler30
@@ -142,6 +163,10 @@ export function prepareTrace(T, ctx) {
   }
   const branches = [];
   kinds.forEach((cc, i) => {
+    if (cc.k === 'j') {
+      const target = (T[i].pc + cc.off + 4) >>> 0;
+      if (T[i].next !== target) throw new Error(`jump target mismatch at ${i}`);
+    }
     if (cc.k === 'br') {
       const target = (T[i].pc + cc.imm + 4) >>> 0;
       const takenRec = T[i].next !== ((T[i].pc + T[i].w) >>> 0);
@@ -180,6 +205,8 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'mull') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_mul, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'moviN' || k.k === 'movi') { cc2(P(k.t)); cc2(k.imm); B.push(OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'addmi') { cc2(P(k.t)); ld(P(k.r)); cc2(k.imm); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'addi8') { cc2(P(k.t)); ld(P(k.r)); cc2(k.imm); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'mov') { cc2(P(k.t)); ld(P(k.s)); B.push(OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'src') {
       cc2(SPEC3); B.push(OP.i32_load, 0x02, 0x00); cc2(63); B.push(0x71); B.push(OP.local_set, 0x00);
       B.push(OP.local_get, 0x00); B.push(OP.i32_eqz);
@@ -193,7 +220,7 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       B.push(OP.i32_store, 0x02, 0x00);
       B.push(OP.end, OP.end);
     }
-    else if (k.k === 'l32in') { // r_handler47: dst = MR32(ar[s]+off)
+    else if (k.k === 'l32in' || k.k === 'l32i8') { // r_handler47/46: dst = MR32(ar[s]+off)
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
     }
     else if (k.k === 's32in') { // _handler21: MW32(ar[s]+off, ar[t]); addr 0 traps -> side exit
@@ -238,10 +265,27 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       if (br.b === 'bne' || br.b === 'bltu' || br.b === 'beq') {
         ld(P(br.r)); ld(P(br.s));
         B.push(br.b === 'bne' ? OP.i32_ne : br.b === 'bltu' ? OP.i32_lt_u : OP.i32_eq);
+      } else if (br.b === 'bge') {
+        ld(P(br.r)); ld(P(br.s)); B.push(OP.i32_lt_s);
+        B.push(OP.i32_eqz);
+      } else if (br.b === 'bgeu') {
+        ld(P(br.r)); ld(P(br.s)); B.push(OP.i32_lt_u);
+        B.push(OP.i32_eqz);
+      } else if (br.b === 'blt') {
+        ld(P(br.r)); ld(P(br.s)); B.push(OP.i32_lt_s);
       } else { ld(P(br.r)); B.push(OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') B.push(OP.i32_eqz); }
       cc2(br.takenRec ? 1 : 0); B.push(OP.i32_eq);
       B.push(OP.if_, 0x40, OP.else_); cc2(100 + branches.indexOf(br)); B.push(OP.return_); B.push(OP.end);
     }
+    else if (k.k === 'j') {
+      // trace mode: nothing (pc is driver fiction; endPC lands correctly).
+      // page mode: must thread explicitly (not yet implemented -> fail loud).
+      if (hooks) {
+        const t = (e.pc + k.off + 4) >>> 0;
+        if (t !== e.next) throw new Error('page-mode j needs threading (target 0x' + t.toString(16) + ')');
+      }
+    }
+    else { throw new Error('no emission for shape ' + k.k + ' (op 0x' + e.op.toString(16) + ')'); }
     afterLoop();
   });
   if (!hooks || !hooks.noTail) cc2(0);
