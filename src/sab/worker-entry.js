@@ -629,10 +629,12 @@ async function runSimChunk() {
   // traces; the interpreter covers everything when disabled/absent.
   let jitDrv = null;
   let jitKA = 0, jitKB = 0;
+  const steprofOn = (typeof process !== 'undefined' && !!steprofOn);
+  const nowNs = () => BigInt(Math.round(performance.now() * 1e6));
   let profE = 0n, profS = 0n, profP = 0n, profN = 0;
   try {
     if (chip._jitEnabled !== false && wasmExp?.core_run && chip._wasmLoader && idleView0 && idleView1) {
-      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader); } catch {} }
+      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader, { dryRun: !!chip._jitDryRun }); } catch {} }
       jitDrv = chip._jitDriver || null;
     }
   } catch {}
@@ -987,7 +989,7 @@ async function runSimChunk() {
       // batch below shrinks by the max so per-core totals stay exact.
       // Hoisted: single null-check per step when absent/disabled.
       let _pa = 0n;
-      if (process.env.STEPROF) _pa = process.hrtime.bigint();
+      if (steprofOn) _pa = nowNs();
       jitKA = 0; jitKB = 0;
       if (jitDrv) {
         try {
@@ -1005,13 +1007,13 @@ async function runSimChunk() {
       chip.step(Math.max(0, 512 - (jitKA > jitKB ? jitKA : jitKB)));
       steps++;
       cycles = chip.cycles;
-      if (process.env.STEPROF) { profE += process.hrtime.bigint() - _pa; }
+      if (steprofOn) { profE += nowNs() - _pa; }
 
       // Fire due ClockTree events (ccompare / beacon / wifi-tx) on the JS
       // clock tree. Pumped at the per-step (1024-instruction) cadence so the
       // JS clock stays out of the execution hot path.
       let _pb = 0n;
-      if (process.env.STEPROF) _pb = process.hrtime.bigint();
+      if (steprofOn) _pb = nowNs();
       if (fireDue) { try { fireDue(); } catch(_) {} }
       // Inline coresIdle: 4 direct typed-array reads (bypasses getter chains).
       const isIdle = idleView0 && idleView1
@@ -1029,8 +1031,8 @@ async function runSimChunk() {
         if (pumpEvents) { try { pumpEvents(); } catch(_) {} }
       }
       if ((cycles & 524287) === 0) writeSABState();
-      if (process.env.STEPROF) {
-        profP += process.hrtime.bigint() - _pb;
+      if (steprofOn) {
+        profP += nowNs() - _pb;
         if (++profN === 4000) {
           console.log(`[STEPROF] exec+hooks=${(Number(profE) / 1000 / profN).toFixed(1)}us/step post=${(Number(profP) / 1000 / profN).toFixed(1)}us/step`);
           profE = 0n; profP = 0n; profN = 0;
@@ -1472,6 +1474,8 @@ function applyBasicSetup(chip, config, flash, rom) {
   // 50mips JIT tier kill switch (per-chip, for same-run A/B): config
   // jitEnabled:false disables the driver; default follows JIT env.
   chip._jitEnabled = config.jitEnabled !== undefined ? !!config.jitEnabled : chip._jitEnabled;
+  chip._jitDryRun = !!config.jitDryRun;
+  chip._jitNoCallout = !!config.jitNoCallout;
   // ── Re-apply post-reset (reset wipes MMU, GPIO, UART, core state) ──
   if (chip.mmuTablePro && config.mmuPages) {
     for (let p = 0; p < config.mmuPages; p++) chip.mmuTablePro[p] = p;

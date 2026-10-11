@@ -17,7 +17,8 @@ export class JitDriver {
     this.chip = chip;
     this.loader = loader;
     this.ex = loader.exports;
-    this.enabled = opts.enabled !== false && !process.env.JIT?.startsWith?.('0');
+    this.enabled = opts.enabled !== false && (typeof process === 'undefined' || !process.env.JIT?.startsWith?.('0'));
+    this.dryRun = !!opts.dryRun;
     this.cache = new Map(); // `${core}:${pc}` -> entry
     this.uncompilable = new Set();
     this.maxEntries = opts.maxEntries || 128;
@@ -88,6 +89,10 @@ export class JitDriver {
   // miss breaks to the interpreter batch, which continues from the exact
   // parked pc. Returns total ops executed.
   chainCore(core, maxTraces = 8) {
+    if (this.dryRun) return 0;
+    try {
+      if ((this.pcOf(core) >>> 0) < 0x400d0020) return 0;
+    } catch { return 0; }
     let total = 0;    for (let n = 0; n < maxTraces; n++) {
       let pc;
       try { pc = this.pcOf(core); } catch { break; }
@@ -105,6 +110,7 @@ export class JitDriver {
       let code;
       try { code = e.runFn() | 0; } catch { break; }
       this.stats.hits++;
+      if (this.stats.hits % 2000000 === 0) { try { console.log('[JITHITS] ' + this.stats.hits); } catch {} }
       if (code === 0) {
         this.stats.completed++;
         try {
@@ -156,8 +162,19 @@ export class JitDriver {
       try { ok = this.guardPass(e, key); } catch { return 0; }
       if (!ok) return 0;
       let code;
-      try { code = e.runFn() | 0; } catch { return 0; }
+      try {
+        if ((this._callLog = (this._callLog || 0) + 1) <= 12) {
+          try { console.log(`[JITCALL] #${this._callLog} len=${e.len} branches=${e.branches.length}`); } catch {}
+        }
+        code = e.runFn() | 0;
+        if (this._callLog <= 12) { try { console.log(`[JITCALL] #${this._callLog} returned ${code}`); } catch {}
+        }
+      } catch (err) {
+        try { console.log(`[JITCALL] threw: ${(err && err.message) || err}`); } catch {}
+        return 0;
+      }
       this.stats.hits++;
+      if (this.stats.hits % 2000000 === 0) { try { console.log('[JITHITS] ' + this.stats.hits); } catch {} }
       if (code === 0) {
         this.stats.completed++;
         this.stats.compLen = e.len;
@@ -255,11 +272,80 @@ export class JitDriver {
     return null;
   }
 
+  // One-time self-test: a 1-op module must round-trip shared memory
+  // exactly (guards against detached/stale memory views, which would
+  // silently diverge the guest). Failure disables the driver permanently.
+  async selfTest() {
+    if (this._selfTested) return this._selfTestOk;
+    this._selfTested = true;
+    try {
+      const CBASE = 0, wb = 0;
+      const TE = [{ pc: 0x1000, op: 0x551b, w: 2, next: 0x1002 }];
+      const built = buildTraceModule(TE, { CORE: 0, CBASE, wb, recLoop: [0, 0, 0], sarOff: 4096 });
+      const runFn = await instantiateTrace(built.mod, this.loader, this.ex);
+      const m = this.memU32();
+      const phys = ((0 + 16) >>> 2) + 5; // logical a5, window base 0
+      const saved = m[phys] >>> 0;
+      const before = 0x12345678;
+      m[phys] = before;
+      const code = runFn() | 0;
+      const after = m[phys] >>> 0;
+      m[phys] = saved;
+      this._selfTestOk = (code === 0 && after === ((before + 1) >>> 0));
+      if (!this._selfTestOk) {
+        try { console.log(`[JIT] self-test FAILED code=${code} before=0x${before.toString(16)} after=0x${after.toString(16)}; driver disabled`); } catch {}
+        this.enabled = false;
+      } else {
+        try { console.log('[JIT] self-test passed (shared memory live)'); } catch {}
+        // Phase 2: call-out round trip (mr32/mw32 -> engine exports ->
+        // MMU path). Untested-in-browser WASM->JS->WASM reentrancy lives
+        // here; failure disables the driver instead of wedging the tab.
+        try {
+          const SCR = 0x3ffe7f00;
+          const TE2 = [
+            { pc: 0x2000, op: 0x218, w: 2, next: 0x2002 }, // l32in a1=[a2]
+            { pc: 0x2002, op: 0x1349, w: 2, next: 0x2004 }, // s32in [a3+4]=a4
+          ];
+          const b2 = buildTraceModule(TE2, { CORE: 0, CBASE: 0, wb: 0, recLoop: [0, 0, 0], sarOff: 4096 });
+          const f2 = await instantiateTrace(b2.mod, this.loader, this.ex);
+          const w0 = ((0 + 16) >>> 2);
+          const s2 = m[w0 + 2] >>> 0, s3 = m[w0 + 3] >>> 0, s4 = m[w0 + 4] >>> 0;
+          const smem = this.ex.core_read_uint32(0, SCR) >>> 0;
+          this.ex.core_write_uint32(0, SCR, 0xA5A50000);
+          m[w0 + 2] = SCR; m[w0 + 3] = SCR + 8; m[w0 + 4] = 0x51ED0000;
+          const c2 = f2() | 0;
+          const r1 = m[w0 + 1] >>> 0, rw = this.ex.core_read_uint32(0, SCR + 12) >>> 0;
+          m[w0 + 2] = s2; m[w0 + 3] = s3; m[w0 + 4] = s4;
+          this.ex.core_write_uint32(0, SCR, smem);
+          this.ex.core_write_uint32(0, SCR + 12, 0);
+          if (!(c2 === 0 && r1 === 0xA5A50000 && rw === 0x51ED0000)) {
+            try { console.log(`[JIT] self-test phase 2 FAILED code=${c2} r1=0x${r1.toString(16)} mem=0x${rw.toString(16)}; driver disabled`); } catch {}
+            this._selfTestOk = false;
+            this.enabled = false;
+          } else {
+            try { console.log('[JIT] self-test phase 2 passed (call-outs live)'); } catch {}
+          }
+        } catch (e) {
+          try { console.log('[JIT] self-test phase 2 error, driver disabled: ' + (e && e.message)); } catch {}
+          this._selfTestOk = false;
+          this.enabled = false;
+        }
+      }
+    } catch (e) {
+      try { console.log('[JIT] self-test error, driver disabled: ' + (e && e.message)); } catch {}
+      this._selfTestOk = false;
+      this.enabled = false;
+    }
+    return this._selfTestOk;
+  }
+
   // Compile (async: ~1ms instantiate) and cache a trace for (core, pc).
   // Returns true when a runnable entry was installed.
   async compile(core, pc) {
+    if ((pc >>> 0) < 0x400d0020) return false; // boot code: never worth compiling
     const key = core + ':' + pc;
     if (this.cache.has(key) || this.uncompilable.has(key)) return this.cache.has(key);
+    if (!(await this.selfTest())) return false;
     // Cooldown for poison-evicted pcs (avoids immediate recompile churn).
     const cool = this._cooldown && this._cooldown.get(key);
     if (cool && Date.now() < cool) return false;
@@ -270,6 +356,7 @@ export class JitDriver {
       built = buildTraceModule(found.TE, {
         CORE: core, CBASE: core * this.CORE_SZ, wb: found.wb,
         recLoop: found.loop, sarOff: this.sarOff,
+        noCallout: !!this.chip._jitNoCallout,
       });
     } catch (err) {
       this.stats.buildFail++;
@@ -303,6 +390,14 @@ export class JitDriver {
       }
     }
     if (this._cooldown) { try { this._cooldown.delete(key); } catch {} }
+    try {
+      if (typeof process !== 'undefined' && process.env.JITDUMP && !this._dumped) {
+        this._dumped = true;
+        const fs = await import('fs');
+        fs.writeFileSync('/home/danish1075/Documents/esp32 emu/tests/tmp-boottrace.bin', Buffer.from(built.mod));
+        try { console.log('[JITDUMP] wrote ' + built.mod.length + ' bytes, ops=' + built.len); } catch {}
+      }
+    } catch {}
     this.cache.set(key, {
       runFn, endPC: built.endPC !== null && built.endPC !== undefined ? built.endPC : found.endPC,
       len: built.len, branches: built.branches, startPc: pc,

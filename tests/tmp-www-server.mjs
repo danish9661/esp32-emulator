@@ -1,10 +1,11 @@
 // Static server for browser benchmarking (SAB needs COOP/COEP).
-// Usage: node tests/tmp-www-server.mjs [port]  (serves ./webdemo)
+// Usage: node tests/tmp-www-server.mjs [port] [root]
+// Serves a directory with SAB headers (default ./webdemo).
 import { createServer } from 'http';
 import { readFile } from 'fs/promises';
 import { join, extname, normalize } from 'path';
 
-const root = join(process.cwd(), 'webdemo');
+const root = join(process.cwd(), process.argv[3] || 'webdemo');
 const port = Number(process.argv[2] || 8901);
 const types = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',

@@ -155,7 +155,11 @@ export function prepareTrace(T, ctx) {
     }
   }
   const kinds = T.map((e) => classify(e.op));
-  kinds.forEach((cc, i) => { if (cc.k === 'unknown') throw new Error('unemittable op 0x' + T[i].op.toString(16) + ' at ' + i); });
+  const CALLOUT = ctx.noCallout ? new Set(['l32in', 'l32i8', 's32in', 'l32r', 'l8ui']) : null;
+  kinds.forEach((cc, i) => {
+    if (cc.k === 'unknown') throw new Error('unemittable op 0x' + T[i].op.toString(16) + ' at ' + i);
+    if (CALLOUT && CALLOUT.has(cc.k)) throw new Error('call-out shape gated: ' + cc.k);
+  });
   for (const e of T) {
     const lo = e.op & 15;
     if (e.w === 4) throw new Error('wide op needs pie guard (not implemented v1)');
