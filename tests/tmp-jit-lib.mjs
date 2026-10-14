@@ -15,6 +15,7 @@ export const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
 
 // ---- op classification (handler-verified) ----
 export const NF_SHIFT_TABLE = [-1, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256];
+export const NF_TABLE2 = [32768, 65536, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256];
 export function classify(op) {
   // run_instruction intercepts (before c_handler7): RSIL, WAITI. The fuzz
   // only models c_handler7, so these are excluded explicitly (else a waiti
@@ -48,6 +49,8 @@ export function classify(op) {
     return { k: 'br', b: 'bbsi', r: f8, s: -1, rr: ((((op >> 12) & 1) << 4) | ((op >> 4) & 15)) >>> 0, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 61440) === 49152) // bbr n_handler45 (taken iff (~ar[r])&ar[s] != 0; full-nibble: 0xD sibling is n28)
     return { k: 'br', b: 'bbr', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 7 && (op & 61440) === 20480) // bban n_handler26 (taken iff (ar[r]&(1<<(ar[s]&31)))==0; full-nibble: 0x4 sibling is n24)
+    return { k: 'br', b: 'bban', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
   if (lo === 2 && (op & 61440) === 4096) { // l16ui-zero r_handler43 (MR16 zero-extended)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
     return { k: 'l16u', t, s: ss, off };
@@ -63,6 +66,10 @@ export function classify(op) {
   if (lo === 2 && (op & 61440) === 24576) { // s32i _handler20 (8-bit offset store)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
     return { k: 's32i8', t, s: ss, off };
+  }
+  if (lo === 2 && (op & 61440) === 20480) { // s16i _handler17 (half store, off<<1)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
+    return { k: 's16i', t, s: ss, off };
   }
   if (lo === 2 && (op & 61440) === 16384) { // s8i _handler16 (byte store, unshifted off)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = ((op >> 16) & 255) >>> 0;
@@ -99,6 +106,8 @@ export function classify(op) {
     const imm12 = (op >> 12) & 4095, se = (imm12 & 2048) ? (imm12 | 0xfffff000) : imm12;
     return { k: 'br', b: 'bltz', r: (op >> 8) & 15, s: -1, imm: se };
   }
+  if (lo === 6 && (op & 48) === 48 && (op & 192) === 192) // bgetbl n_handler38 (taken iff ar>=TABLE2[t] unsigned)
+    return { k: 'br', b: 'bgetbl', r: (op >> 8) & 15, s: -1, t: (op >> 12) & 15, imm: sext8((op >> 16) & 255) };
   if (lo === 6 && (op & 48) === 32 && (op & 192) === 0) // beqtbl n_handler31 (taken iff ar==TABLE[t], signed)
     return { k: 'br', b: 'beqtbl', r: (op >> 8) & 15, s: -1, t: (op >> 12) & 15, imm: sext8((op >> 16) & 255) };
   if (lo === 6 && (op & 48) === 48 && (op & 192) === 0) return { k: 'callEnd' }; // r_handler24 RETW: trace boundary
@@ -142,6 +151,7 @@ export function classify(op) {
     if (e === 0 && f === 0x410000) return { k: 'srl', t: f12, s: f4, imm: (op >> 8) & 15 }; // _handler39 SRLI: ar[t]=ar[s]>>imm4 (NOT register shift!)
     if (e === 0 && f === 0x200000 && b20 !== 0) return { k: 'xor', t: f12, r: f8, s: f4 }; // c_handler4 (or-split on b20)
     if (e === 0 && f === 0 && b20 === 0 && (op & 61440) === 0 && (op & 240) === 240) return { k: 'callEnd' }; // r_handler7 JX: trace boundary
+    if (lo === 0 && (op >> 16) === 0x60 && (op & 0xF00) === 0) return { k: 'neg', t: (op >> 12) & 15, r: (op >> 4) & 15 }; // a_handler44 (tight: hi+bits8-11)
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x910000) return { k: 'movnez', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler16
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x810000) return { k: 'moveqz', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler6
     if (lo === 0 && e === 0 && f === 0x800000 && b20 === 0) return { k: 'addN', t: f12, r: f8, s: f4 }; // n_handler7 (reuse addN emission)
@@ -245,6 +255,7 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     if (k.k === 'addiN') { cc2(P(k.t)); ld(P(k.r)); cc2(k.imm); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'addN') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'mull') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_mul, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'neg') { cc2(P(k.t)); ld(P(k.r)); c(-1); B.push(OP.i32_xor); c(1); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); } // a_handler44: ~r+1
     else if (k.k === 'moviN' || k.k === 'movi') { cc2(P(k.t)); cc2(k.imm); B.push(OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'addmi') { cc2(P(k.t)); ld(P(k.r)); cc2(k.imm); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'addi8') { cc2(P(k.t)); ld(P(k.r)); cc2(k.imm); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
@@ -299,6 +310,13 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'moveqz') { // a_handler6: if (ar[s]==0) ar[t]=ar[r]
       ld(P(k.s)); B.push(OP.i32_eqz, OP.if_, 0x40);
       c(P(k.t)); ld(P(k.r)); B.push(OP.i32_store, 0x02, 0x00); B.push(OP.end);
+    }
+    else if (k.k === 's16i') { // _handler17: MW16(ar[s]+off, ar[t]); addr 0 traps -> side exit
+      ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
+      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      B.push(OP.return_, OP.end);
+      c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x04);
     }
     else if (k.k === 's8i') { // _handler16: MW8(ar[s]+off, ar[t]); addr 0 traps -> side exit
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
@@ -381,6 +399,10 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
         ld(P(br.r)); c(NF_SHIFT_TABLE[br.t]); B.push(OP.i32_ne);
       } else if (br.b === 'bbsi') {
         ld(P(br.r)); c(br.rr); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and);
+      } else if (br.b === 'bgetbl') {
+        ld(P(br.r)); c(NF_TABLE2[br.t]); B.push(OP.i32_lt_u, OP.i32_eqz);
+      } else if (br.b === 'bban') {
+        c(1); ld(P(br.s)); c(31); B.push(OP.i32_and, OP.i32_shl); ld(P(br.r)); B.push(OP.i32_and, OP.i32_eqz);
       } else { ld(P(br.r)); B.push(OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') B.push(OP.i32_eqz); }
       cc2(br.takenRec ? 1 : 0); B.push(OP.i32_eq);
       B.push(OP.if_, 0x40, OP.else_); cc2(100 + branches.indexOf(br)); B.push(OP.return_); B.push(OP.end);
@@ -589,6 +611,19 @@ export async function buildPage(Sc, ctx) {
           H.ld(H.P(br.r)); H.cc2(br.rr); BB.push(H.OP.i32_shr_u); H.cc2(1); BB.push(H.OP.i32_and, H.OP.i32_eqz);
         } else if (br.b === 'beqtbl') {
           H.ld(H.P(br.r)); H.cc2(NF_SHIFT_TABLE[br.t]); BB.push(H.OP.i32_eq);
+        } else if (br.b === 'bnetbl') {
+          H.ld(H.P(br.r)); H.cc2(NF_SHIFT_TABLE[br.t]); BB.push(H.OP.i32_ne);
+        } else if (br.b === 'bbsi') {
+          H.ld(H.P(br.r)); H.cc2(br.rr); BB.push(H.OP.i32_shr_u); H.cc2(1); BB.push(H.OP.i32_and);
+        } else if (br.b === 'bbr') {
+          H.ld(H.P(br.r)); H.cc2(-1); BB.push(H.OP.i32_xor); H.ld(H.P(br.s)); BB.push(H.OP.i32_and, H.OP.i32_eqz, H.OP.i32_eqz);
+        } else if (br.b === 'bltz') {
+          H.ld(H.P(br.r)); H.cc2(0); BB.push(H.OP.i32_lt_s);
+        } else if (br.b === 'bgetbl') {
+          H.ld(H.P(br.r)); H.cc2(NF_TABLE2[br.t]); BB.push(H.OP.i32_lt_u);
+          BB.push(H.OP.i32_eqz);
+        } else if (br.b === 'bban') {
+          H.cc2(1); H.ld(H.P(br.s)); H.cc2(31); BB.push(H.OP.i32_and, H.OP.i32_shl); H.ld(H.P(br.r)); BB.push(H.OP.i32_and, H.OP.i32_eqz);
         } else { H.ld(H.P(br.r)); BB.push(H.OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') BB.push(H.OP.i32_eqz); }
         BB.push(H.OP.if_, 0x40);
         // taken path: inst-add then transfer

@@ -16,11 +16,12 @@ const CASES = [
   [0x932930, 'movnez'], [0x838660, 'moveqz'], [0x803390, 'addN'], // n_handler7 reuses addN emission
   [0xec897, 'bbr'], [0xfe7296, 'bltz'],
   [0x1ea2, 'l16u'],
+  [0x5592, 's16i'], [0x602020, 'neg'], [0x3087f6, 'bgetbl'], [0x65387, 'bban'],
 ];
 let bad = 0;
 for (const [op, want] of CASES) {
   const got = classify(op).k === 'br' ? classify(op).b : classify(op).k;
-  const wantK = ['bne', 'bge', 'bgeu', 'blt', 'bltu', 'beq', 'bnez', 'beqz', 'bnezn', 'bbci', 'beqtbl', 'bnetbl', 'bbsi', 'bbr', 'bltz'].includes(want) ? want : want;
+  const wantK = ['bne', 'bge', 'bgeu', 'blt', 'bltu', 'beq', 'bnez', 'beqz', 'bnezn', 'bbci', 'beqtbl', 'bnetbl', 'bbsi', 'bbr', 'bltz', 'bgetbl', 'bban'].includes(want) ? want : want;
   if (got !== wantK) { console.log(`MISMATCH 0x${op.toString(16)}: got ${got}, want ${wantK}`); bad++; }
 }
 console.log(bad ? `CLASSIFY-CHECK FAILED (${bad})` : `CLASSIFY-CHECK passed (${CASES.length} cases)`);
