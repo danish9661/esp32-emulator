@@ -153,6 +153,8 @@ export function classify(op) {
     if (e === 0 && f === 0 && b20 === 0 && (op & 61440) === 0 && (op & 240) === 240) return { k: 'callEnd' }; // r_handler7 JX: trace boundary
     if (lo === 0 && (op >> 16) === 0x60 && (op & 0xF00) === 0) return { k: 'neg', t: (op >> 12) & 15, r: (op >> 4) & 15 }; // a_handler44 (tight: hi+bits8-11)
     if (lo === 0 && e === 0 && (op & 0xE10000) === 0x400000 && (op & 0x10F000) === 0xF000) return { k: 'nsa', t: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler47 (== clz, incl. 0->32)
+    if (lo === 0 && e === 0 && (op & 0xE10000) === 0x400000 && (op & 0x10F000) === 0x1000) return { k: 'wsar', t: (op >> 8) & 15 }; // _handler45 (SAR <= ar[t]&31)
+    if (lo === 0 && (op >> 16) === 0xA1 && (op & 0xF0) === 0) return { k: 'ssl', t: (op >> 12) & 15, r: (op >> 8) & 15 }; // _handler30 (ar[t] = ar[r] << (32-(63&EXC_CAUSE)))
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x910000) return { k: 'movnez', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler16
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xA00000) return { k: 'muluhf', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler43 (formula as coded: NOT exact muluh, +0x10000 in ~7%; verified vs bigint)
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x810000) return { k: 'moveqz', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler6
@@ -259,6 +261,19 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'mull') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_mul, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'neg') { cc2(P(k.t)); ld(P(k.r)); c(-1); B.push(OP.i32_xor); c(1); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); } // a_handler44: ~r+1
     else if (k.k === 'nsa') { cc2(P(k.t)); ld(P(k.s)); B.push(OP.i32_clz, OP.i32_store, 0x02, 0x00); } // a_handler47: NSA == clz
+    else if (k.k === 'wsar') { // _handler45: ce=31&ar[t]; EXC_CAUSE=32-ce; sar_m32=ce; pending=1
+      if (sarOff == null) throw new Error('unemittable op 0x' + e.op.toString(16) + ' (wsar needs sarOff)');
+      cc2(CBASE + 336 + 12); c(32); ld(P(k.t)); c(31); B.push(OP.i32_and, OP.i32_sub, OP.i32_store, 0x02, 0x00);
+      cc2(CBASE + sarOff - 4); ld(P(k.t)); c(31); B.push(OP.i32_and, OP.i32_store, 0x02, 0x00);
+      cc2(CBASE + sarOff); c(1); B.push(OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'ssl') { // _handler30: ar[t] = ar[r] << (32-(63&EXC_CAUSE))
+      // NOTE: i32.sub takes (deeper)-(top), and local.tee KEEPS its value, so
+      // tee-then-get leaves a stale extra copy (micro20: stack-height 2 at
+      // end + store to a garbage address). Push 32 BEFORE loading m instead.
+      cc2(P(k.t)); ld(P(k.r)); c(32); cc2(CBASE + 336 + 12); B.push(OP.i32_load, 0x02, 0x00);
+      c(63); B.push(OP.i32_and, OP.i32_sub, OP.i32_shl, OP.i32_store, 0x02, 0x00);
+    }
     else if (k.k === 'muluhf') { // a_handler43, formula as coded: rt*cfg + (sd>>16) + (sd>0xFFFFFFFF ? 65536 : 0)
       // No i64 locals exist (all locals i32), so sd is computed twice from
       // reloads rather than tee'd (loads are plain shared-mem, no call-out).

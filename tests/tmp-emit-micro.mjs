@@ -158,6 +158,8 @@ const MICROS = [
   { name: 'bban', ops: [{ op: 0x65387, w: 3 }], regs: [3, 8], setup: (V) => { V[3] = 0xFFFFFFFF; }, cmp: [3, 8] },
   { name: 'nsa', ops: [{ op: 0x40f550, w: 3 }], regs: [5], setup: null, cmp: [5] },
   { name: 'muluhf', ops: [{ op: 0xa23360, w: 3 }], regs: [3, 6], setup: null, cmp: [3] },
+  { name: 'wsar', ops: [{ op: 0x401400, w: 3 }], regs: [4], setup: null, cmp: [4] },
+  { name: 'ssl', ops: [{ op: 0xa1aa00, w: 3 }], regs: [10], setup: null, cmp: [10] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];
