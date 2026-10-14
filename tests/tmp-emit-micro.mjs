@@ -144,6 +144,13 @@ const MICROS = [
   { name: 'bnetbl', ops: [{ op: 0x20466, w: 3 }], regs: [4], setup: (V) => { V[4] = 0xFFFFFFFF; }, cmp: [4] },
   { name: 'bbsi', ops: [{ op: 0xf1e807, w: 3 }], regs: [8], setup: (V) => { V[8] = 0xFFFFFFFE; }, cmp: [8] },
   { name: 's8i', ops: [{ op: 0x4382, w: 3 }], regs: [3, 8], setup: (V) => { V[3] = DATA + 8; }, cmp: [3, 8], mem: [DATA + 8] },
+  { name: 'movnez-t', ops: [{ op: 0x932930, w: 3 }], regs: [2, 3, 9], setup: (V) => { if (V[3] === 0) V[3] = 1; }, cmp: [2] },
+  { name: 'movnez-n', ops: [{ op: 0x932930, w: 3 }], regs: [2, 3, 9], setup: (V) => { V[3] = 0; }, cmp: [2] },
+  { name: 'moveqz-t', ops: [{ op: 0x838660, w: 3 }], regs: [6, 8], setup: (V) => { V[6] = 0; }, cmp: [8] },
+  { name: 'moveqz-n', ops: [{ op: 0x838660, w: 3 }], regs: [6, 8], setup: (V) => { V[6] = 1; }, cmp: [8] },
+  { name: 'add', ops: [{ op: 0x803390, w: 3 }], regs: [3, 9], setup: null, cmp: [3] },
+  { name: 'bbr', ops: [{ op: 0xec897, w: 3 }], regs: [8, 9], setup: (V) => { V[8] = 0xFFFFFFFF; }, cmp: [8, 9] },
+  { name: 'bltz', ops: [{ op: 0xfe7296, w: 3 }], regs: [2], setup: (V) => { V[2] = 5; }, cmp: [2] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

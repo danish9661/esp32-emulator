@@ -74,6 +74,8 @@ def classify(op):
         return ('br-bbci',)
     if lo == 7 and (op & 57344) == 57344:
         return ('br-bbsi',)
+    if lo == 7 and (op & 61440) == 49152:
+        return ('br-bbr',)
     if lo == 5:
         return ('callEnd',)
     if lo == 6 and (op & 48) == 16 and (op & 192) == 64:
@@ -82,6 +84,8 @@ def classify(op):
         return ('br-beqz32',)
     if lo == 6 and (op & 48) == 32 and (op & 192) == 64:
         return ('br-bnetbl',)
+    if lo == 6 and (op & 48) == 16 and (op & 192) == 128:
+        return ('br-bltz',)
     if lo == 6 and (op & 48) == 32 and (op & 192) == 0:
         return ('br-beqtbl',)
     if lo == 6 and (op & 48) == 48 and (op & 192) == 0:
@@ -109,6 +113,14 @@ def classify(op):
             return ('srl',)
         if e == 0 and f == 0x200000 and b20 != 0:
             return ('xor',)
+        if (op & 0xF10000) == 0x910000 and e == 0x20000:
+            return ('movnez',)
+        if (op & 0xF10000) == 0x810000 and e == 0x20000:
+            return ('moveqz',)
+        if e == 0 and f == 0x800000 and b20 == 0:
+            return ('add',)
+        if e == 0 and f == 0 and b20 == 0 and (op & 61440) == 0 and (op & 240) == 240:
+            return ('callEnd',)
         if e == 0x80000 and (op & 0xF10000) == 0:
             return ('fload',)
         if e == 0 and f == 0xC00000 and b20 == 0:
@@ -132,7 +144,8 @@ EXPECT = {
     'l32in': 'r_handler47', 'l32i8': 'r_handler46', 's32i8': '_handler20',
     'br-bbci': 'n_handler27', 'srl': '_handler39', 'xor': 'c_handler4',
     'br-beqtbl': 'n_handler31', 'fload': 'r_handler59',
-    'br-bnetbl': 'n_handler47', 'br-bbsi': 'n_handler29', 'l16i': 'r_handler42', 's8i': '_handler16', 's32in': '_handler21', 'addN': 'n_handler9',
+    'br-bnetbl': 'n_handler47', 'br-bbsi': 'n_handler29', 'l16i': 'r_handler42', 's8i': '_handler16',
+    'movnez': 'a_handler16', 'moveqz': 'a_handler6', 'add': 'n_handler7', 'br-bbr': 'n_handler45', 'br-bltz': 'n_handler44', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',
     'br-bge': 'n_handler35', 'br-bgeu': 'n_handler37', 'br-blt': 'n_handler40',
@@ -148,7 +161,7 @@ EXPECT = {
 }
 BOUND = {
     'callEnd': {'r_handler0', 'r_handler1', 'r_handler2', 'r_handler3',
-                'r_handler6', 'r_handler24', 'a_handler62'},
+                'r_handler6', 'r_handler7', 'r_handler24', 'a_handler62'},
     'loopEnd': {'r_handler54', 'r_handler55', 'r_handler56'},
 }
 
