@@ -151,6 +151,7 @@ const MICROS = [
   { name: 'add', ops: [{ op: 0x803390, w: 3 }], regs: [3, 9], setup: null, cmp: [3] },
   { name: 'bbr', ops: [{ op: 0xec897, w: 3 }], regs: [8, 9], setup: (V) => { V[8] = 0xFFFFFFFF; }, cmp: [8, 9] },
   { name: 'bltz', ops: [{ op: 0xfe7296, w: 3 }], regs: [2], setup: (V) => { V[2] = 5; }, cmp: [2] },
+  { name: 'l16u', ops: [{ op: 0x1ea2, w: 3 }], regs: [10, 14], setup: (V) => { V[14] = DATA; }, cmp: [10] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

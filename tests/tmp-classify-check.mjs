@@ -15,6 +15,7 @@ const CASES = [
   [0xf1e807, 'bbsi'], [0x4382, 's8i'],
   [0x932930, 'movnez'], [0x838660, 'moveqz'], [0x803390, 'addN'], // n_handler7 reuses addN emission
   [0xec897, 'bbr'], [0xfe7296, 'bltz'],
+  [0x1ea2, 'l16u'],
 ];
 let bad = 0;
 for (const [op, want] of CASES) {

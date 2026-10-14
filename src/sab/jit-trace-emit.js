@@ -1,6 +1,6 @@
-// JIT trace emitter (production, 50mips Phase 2). 53 shapes, routing proven
-// by full 24-bit fuzz vs c_handler7 (8.4M/0 misroutes), emission proven per
-// shape (43/43 micro suites). Kill switch: callers simply never call.
+// JIT trace emitter (production, 50mips Phase 2). 54 shapes, routing proven
+// by full 24-bit fuzz vs c_handler7 (8.5M/0 misroutes), emission proven per
+// shape (44/44 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -50,6 +50,10 @@ export function classify(op) {
     return { k: 'br', b: 'bbsi', r: f8, s: -1, rr: ((((op >> 12) & 1) << 4) | ((op >> 4) & 15)) >>> 0, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 61440) === 49152) // bbr n_handler45 (taken iff (~ar[r])&ar[s] != 0; full-nibble: 0xD sibling is n28)
     return { k: 'br', b: 'bbr', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 2 && (op & 61440) === 4096) { // l16ui-zero r_handler43 (MR16 zero-extended)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
+    return { k: 'l16u', t, s: ss, off };
+  }
   if (lo === 2 && (op & 61440) === 36864) { // l16ui r_handler42 (sext16 load)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
     return { k: 'l16i', t, s: ss, off };
@@ -262,6 +266,9 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     }
     else if (k.k === 'fload') { // r_handler59: f[t] = MR32(ar[s]+ar[u]) (float dest NOT windowed)
       c(CBASE + 272 + k.t * 4); c(CORE); ld(P(k.s)); ld(P(k.u)); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'l16u') { // r_handler43: dst = MR16(ar[s]+off) (WASM i32 return already zero-extends)
+      c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x01, OP.i32_store, 0x02, 0x00);
     }
     else if (k.k === 'l16i') { // r_handler42: dst = SEXT16(MR16(ar[s]+off))
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x01, OP.i32_extend16, OP.i32_store, 0x02, 0x00);

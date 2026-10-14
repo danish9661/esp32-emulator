@@ -52,6 +52,8 @@ def classify(op):
         return ('s8i',)
     if lo == 2 and (op & 61440) == 49152:
         return ('addi8',)
+    if lo == 2 and (op & 61440) == 4096:
+        return ('l16u',)
     if lo == 2 and (op & 61440) == 36864:
         return ('l16i',)
     if lo == 2 and (op & 61440) == 8192:
@@ -145,7 +147,8 @@ EXPECT = {
     'br-bbci': 'n_handler27', 'srl': '_handler39', 'xor': 'c_handler4',
     'br-beqtbl': 'n_handler31', 'fload': 'r_handler59',
     'br-bnetbl': 'n_handler47', 'br-bbsi': 'n_handler29', 'l16i': 'r_handler42', 's8i': '_handler16',
-    'movnez': 'a_handler16', 'moveqz': 'a_handler6', 'add': 'n_handler7', 'br-bbr': 'n_handler45', 'br-bltz': 'n_handler44', 's32in': '_handler21', 'addN': 'n_handler9',
+    'movnez': 'a_handler16', 'moveqz': 'a_handler6', 'add': 'n_handler7', 'br-bbr': 'n_handler45', 'br-bltz': 'n_handler44',
+    'l16u': 'r_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',
     'br-bge': 'n_handler35', 'br-bgeu': 'n_handler37', 'br-blt': 'n_handler40',

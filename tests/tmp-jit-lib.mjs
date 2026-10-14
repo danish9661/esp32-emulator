@@ -48,6 +48,10 @@ export function classify(op) {
     return { k: 'br', b: 'bbsi', r: f8, s: -1, rr: ((((op >> 12) & 1) << 4) | ((op >> 4) & 15)) >>> 0, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 61440) === 49152) // bbr n_handler45 (taken iff (~ar[r])&ar[s] != 0; full-nibble: 0xD sibling is n28)
     return { k: 'br', b: 'bbr', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 2 && (op & 61440) === 4096) { // l16ui-zero r_handler43 (MR16 zero-extended)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
+    return { k: 'l16u', t, s: ss, off };
+  }
   if (lo === 2 && (op & 61440) === 36864) { // l16ui r_handler42 (sext16 load)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
     return { k: 'l16i', t, s: ss, off };
@@ -260,6 +264,9 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     }
     else if (k.k === 'fload') { // r_handler59: f[t] = MR32(ar[s]+ar[u]) (float dest NOT windowed)
       c(CBASE + 272 + k.t * 4); c(CORE); ld(P(k.s)); ld(P(k.u)); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'l16u') { // r_handler43: dst = MR16(ar[s]+off) (WASM i32 return already zero-extends)
+      c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x01, OP.i32_store, 0x02, 0x00);
     }
     else if (k.k === 'l16i') { // r_handler42: dst = SEXT16(MR16(ar[s]+off))
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x01, OP.i32_extend16, OP.i32_store, 0x02, 0x00);
