@@ -1,6 +1,6 @@
-// JIT trace emitter (production, 50mips Phase 2). 59 shapes, routing proven
+// JIT trace emitter (production, 50mips Phase 2). 60 shapes, routing proven
 // by full 24-bit fuzz vs c_handler7 (8.7M/0 misroutes), emission proven per
-// shape (49/49 micro suites). Kill switch: callers simply never call.
+// shape (50/50 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -8,7 +8,7 @@ export const OP = {
   end: 0x0b, if_: 0x04, else_: 0x05, return_: 0x0f, call: 0x10, br: 0x0c, br_if: 0x0d,
   loop: 0x03, block: 0x02,
   local_get: 0x20, local_set: 0x21,
-  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x49, i32_lt_s: 0x48, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, local_tee: 0x22, i32_extend16: 0xC1, i32_clz: 0x67,
+  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x49, i32_lt_s: 0x48, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, local_tee: 0x22, i32_extend16: 0xC1, i32_clz: 0x67, i64_const: 0x42, i64_mul: 0x7E, i64_shr_u: 0x88, i32_wrap: 0xA7, i64_extend_u: 0xAD, i64_add: 0x7C, i64_shl: 0x86,
   i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76, i32_shr_s: 0x75,
   i32_load: 0x28, i32_store: 0x36,
   global_get: 0x23, global_set: 0x24, unreachable_: 0x00, nop_: 0x01, drop: 0x1a,
@@ -156,6 +156,7 @@ export function classify(op) {
     if (lo === 0 && (op >> 16) === 0x60 && (op & 0xF00) === 0) return { k: 'neg', t: (op >> 12) & 15, r: (op >> 4) & 15 }; // a_handler44 (tight: hi+bits8-11)
     if (lo === 0 && e === 0 && (op & 0xE10000) === 0x400000 && (op & 0x10F000) === 0xF000) return { k: 'nsa', t: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler47 (== clz, incl. 0->32)
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x910000) return { k: 'movnez', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler16
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xA00000) return { k: 'muluhf', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler43 (formula as coded: NOT exact muluh, +0x10000 in ~7%; verified vs bigint)
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x810000) return { k: 'moveqz', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler6
     if (lo === 0 && e === 0 && f === 0x800000 && b20 === 0) return { k: 'addN', t: f12, r: f8, s: f4 }; // n_handler7 (reuse addN emission)
     if (e === 0x80000 && (op & 0xF10000) === 0) return { k: 'fload', t: (op >> 12) & 15, s: (op >> 8) & 15, u: (op >> 4) & 15 }; // r_handler59 float load
@@ -260,6 +261,28 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'mull') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_mul, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'neg') { cc2(P(k.t)); ld(P(k.r)); c(-1); B.push(OP.i32_xor); c(1); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); } // a_handler44: ~r+1
     else if (k.k === 'nsa') { cc2(P(k.t)); ld(P(k.s)); B.push(OP.i32_clz, OP.i32_store, 0x02, 0x00); } // a_handler47: NSA == clz
+    else if (k.k === 'muluhf') { // a_handler43, formula as coded: rt*cfg + (sd>>16) + (sd>0xFFFFFFFF ? 65536 : 0)
+      // No i64 locals exist (all locals i32), so sd is computed twice from
+      // reloads rather than tee'd (loads are plain shared-mem, no call-out).
+      const sdSeq = () => {
+        ld(P(k.r)); c(16); B.push(OP.i32_shr_u, OP.i64_extend_u);
+        ld(P(k.s)); c(0xFFFF); B.push(OP.i32_and, OP.i64_extend_u);
+        B.push(OP.i64_mul);
+        ld(P(k.r)); c(0xFFFF); B.push(OP.i32_and, OP.i64_extend_u);
+        ld(P(k.s)); c(16); B.push(OP.i32_shr_u, OP.i64_extend_u);
+        B.push(OP.i64_mul, OP.i64_add);
+        ld(P(k.r)); c(0xFFFF); B.push(OP.i32_and, OP.i64_extend_u);
+        ld(P(k.s)); c(0xFFFF); B.push(OP.i32_and, OP.i64_extend_u);
+        B.push(OP.i64_mul, OP.i64_const, ...sleb(16), OP.i64_shr_u, OP.i64_add);
+      };
+      cc2(P(k.t));
+      ld(P(k.r)); c(16); B.push(OP.i32_shr_u, OP.i64_extend_u);
+      ld(P(k.s)); c(16); B.push(OP.i32_shr_u, OP.i64_extend_u);
+      B.push(OP.i64_mul); // A = rt*cfg
+      sdSeq(); B.push(OP.i64_const, ...sleb(16), OP.i64_shr_u, OP.i64_add); // A + (sd>>16)
+      sdSeq(); B.push(OP.i64_const, ...sleb(32), OP.i64_shr_u, OP.i64_const, ...sleb(16), OP.i64_shl, OP.i64_add); // + it
+      B.push(OP.i32_wrap, OP.i32_store, 0x02, 0x00);
+    }
     else if (k.k === 'moviN' || k.k === 'movi') { cc2(P(k.t)); cc2(k.imm); B.push(OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'addmi') { cc2(P(k.t)); ld(P(k.r)); cc2(k.imm); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'addi8') { cc2(P(k.t)); ld(P(k.r)); cc2(k.imm); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
