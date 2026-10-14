@@ -14,6 +14,7 @@ export const OP = {
 export const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
 
 // ---- op classification (handler-verified) ----
+export const NF_SHIFT_TABLE = [-1, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256];
 export function classify(op) {
   // run_instruction intercepts (before c_handler7): RSIL, WAITI. The fuzz
   // only models c_handler7, so these are excluded explicitly (else a waiti
@@ -76,6 +77,8 @@ export function classify(op) {
     const imm12 = (op >> 12) & 4095, se = (imm12 & 2048) ? (imm12 | 0xfffff000) : imm12;
     return { k: 'br', b: 'beqz', r: (op >> 8) & 15, s: -1, imm: se };
   }
+  if (lo === 6 && (op & 48) === 32 && (op & 192) === 0) // beqtbl n_handler31 (taken iff ar==TABLE[t], signed)
+    return { k: 'br', b: 'beqtbl', r: (op >> 8) & 15, s: -1, t: (op >> 12) & 15, imm: sext8((op >> 16) & 255) };
   if (lo === 6 && (op & 48) === 48 && (op & 192) === 0) return { k: 'callEnd' }; // r_handler24 RETW: trace boundary
   if (lo === 12 && (op & 128) && (op & 64)) { // bnez.n n_handler49 (taken iff !=0, small unsigned offset)
     const sim = ((((op >> 4) & 3) << 4) | ((op >> 12) & 15)) >>> 0;
@@ -116,6 +119,7 @@ export function classify(op) {
     if (e === 0 && f === 0x200000 && b20 === 0) return { k: 'or', t: f12, r: f8, s: f4 }; // a_handler51
     if (e === 0 && f === 0x410000) return { k: 'srl', t: f12, s: f4, imm: (op >> 8) & 15 }; // _handler39 SRLI: ar[t]=ar[s]>>imm4 (NOT register shift!)
     if (e === 0 && f === 0x200000 && b20 !== 0) return { k: 'xor', t: f12, r: f8, s: f4 }; // c_handler4 (or-split on b20)
+    if (e === 0x80000 && (op & 0xF10000) === 0) return { k: 'fload', t: (op >> 12) & 15, s: (op >> 8) & 15, u: (op >> 4) & 15 }; // r_handler59 float load
     if (e === 0 && f === 0xC00000 && b20 === 0) return { k: 'sub', t: f12, r: f8, s: f4 }; // _handler49
     if (e === 0x20000 && (op & 0xF10000) === 65536) { // _handler14 RSR: inline ccount only
       const sr = (op >> 8) & 255;
@@ -232,6 +236,9 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       B.push(OP.i32_store, 0x02, 0x00);
       B.push(OP.end, OP.end);
     }
+    else if (k.k === 'fload') { // r_handler59: f[t] = MR32(ar[s]+ar[u]) (float dest NOT windowed)
+      c(CBASE + 272 + k.t * 4); c(CORE); ld(P(k.s)); ld(P(k.u)); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
+    }
     else if (k.k === 'l32in' || k.k === 'l32i8') { // r_handler47/46: dst = MR32(ar[s]+off)
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
     }
@@ -311,6 +318,8 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
         ld(P(br.r)); ld(P(br.s)); B.push(OP.i32_lt_s);
       } else if (br.b === 'bbci') {
         ld(P(br.r)); c(br.rr); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and, OP.i32_eqz);
+      } else if (br.b === 'beqtbl') {
+        ld(P(br.r)); c(NF_SHIFT_TABLE[br.t]); B.push(OP.i32_eq);
       } else { ld(P(br.r)); B.push(OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') B.push(OP.i32_eqz); }
       cc2(br.takenRec ? 1 : 0); B.push(OP.i32_eq);
       B.push(OP.if_, 0x40, OP.else_); cc2(100 + branches.indexOf(br)); B.push(OP.return_); B.push(OP.end);

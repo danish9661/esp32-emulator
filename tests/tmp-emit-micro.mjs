@@ -138,6 +138,8 @@ const MICROS = [
   { name: 'bbci', ops: [{ op: 0x66397, w: 3 }], regs: [3], setup: (V) => { V[3] = 0x200; }, cmp: [3] },
   { name: 'srl', ops: [{ op: 0x418290, w: 3 }], regs: [2, 8, 9], setup: null, cmp: [8] },
   { name: 'xor', ops: [{ op: 0x308290, w: 3 }], regs: [2, 8, 9], setup: null, cmp: [8] },
+  { name: 'beqtbl', ops: [{ op: 0xf71826, w: 3 }], regs: [8], setup: (V) => { V[8] = 7; }, cmp: [8] },
+  { name: 'fload', ops: [{ op: 0x82800, w: 3 }], regs: [0, 8], setup: (V) => { V[8] = DATA; V[0] = 0; }, cmp: [], fcmp: [2] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];
@@ -164,6 +166,7 @@ for (const m of MICROS) {
     const snap = () => {
       const o = {};
       for (const r of m.cmp) o['r' + r] = memU32()[P(r)] >>> 0;
+      if (m.fcmp) for (const r of m.fcmp) o['f' + r] = memU32()[((CBASE + 272) >>> 2) + r] >>> 0;
       if (m.mem) for (const a of m.mem) o['m' + a.toString(16)] = ex.core_read_uint32(CORE, a) >>> 0;
       if (m.spec3) o.sar = memU32()[((CBASE + 336) >>> 2) + 3] >>> 0;
       return o;
