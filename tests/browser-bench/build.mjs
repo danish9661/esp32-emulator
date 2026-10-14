@@ -17,4 +17,5 @@ copyFileSync(join(root, 'src/engine/esp-xtensa/esp_engine_wasm.wasm'), join(out,
 copyFileSync(join(root, 'tests/rom/esp32-v3-rom.bin'), join(out, 'esp32-v3-rom.bin'));
 copyFileSync(join(root, 'webdemo/firmware/fw-gpio.bin.gz'), join(out, 'fw-gpio.bin.gz'));
 copyFileSync(join(root, 'tests/browser-bench/bench.html'), join(out, 'bench.html'));
+copyFileSync(join(root, 'tests/browser-bench/bench-x2.html'), join(out, 'bench-x2.html'));
 console.log('bench www ready:', out);
