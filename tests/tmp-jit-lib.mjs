@@ -6,7 +6,7 @@ export const OP = {
   end: 0x0b, if_: 0x04, else_: 0x05, return_: 0x0f, call: 0x10, br: 0x0c, br_if: 0x0d,
   loop: 0x03, block: 0x02,
   local_get: 0x20, local_set: 0x21,
-  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x49, i32_lt_s: 0x48, i32_and: 0x71, i32_or: 0x72, local_tee: 0x22,
+  i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x49, i32_lt_s: 0x48, i32_and: 0x71, i32_or: 0x72, local_tee: 0x22, i32_extend16: 0xC1,
   i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76, i32_shr_s: 0x75,
   i32_load: 0x28, i32_store: 0x36,
   global_get: 0x23, global_set: 0x24, unreachable_: 0x00, nop_: 0x01, drop: 0x1a,
@@ -44,6 +44,12 @@ export function classify(op) {
     return { k: 'br', b: 'blt', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 57344) === 24576) // bbci n_handler27 (taken iff bit clear)
     return { k: 'br', b: 'bbci', r: f8, s: -1, rr: ((((op >> 12) & 1) << 4) | ((op >> 4) & 15)) >>> 0, imm: sext8((op >> 16) & 255) };
+  if (lo === 7 && (op & 57344) === 57344) // bbsi n_handler29 (taken iff bit set)
+    return { k: 'br', b: 'bbsi', r: f8, s: -1, rr: ((((op >> 12) & 1) << 4) | ((op >> 4) & 15)) >>> 0, imm: sext8((op >> 16) & 255) };
+  if (lo === 2 && (op & 61440) === 36864) { // l16ui r_handler42 (sext16 load)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
+    return { k: 'l16i', t, s: ss, off };
+  }
   if (lo === 2 && (op & 61440) === 8192) { // l32i r_handler46 (8-bit offset load)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
     return { k: 'l32i8', t, s: ss, off };
@@ -51,6 +57,10 @@ export function classify(op) {
   if (lo === 2 && (op & 61440) === 24576) { // s32i _handler20 (8-bit offset store)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
     return { k: 's32i8', t, s: ss, off };
+  }
+  if (lo === 2 && (op & 61440) === 16384) { // s8i _handler16 (byte store, unshifted off)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = ((op >> 16) & 255) >>> 0;
+    return { k: 's8i', t, s: ss, off };
   }
   if (lo === 2 && (op & 61440) === 49152) { // addi8 n_handler11
     const idx = (op >> 16) & 255;
@@ -77,6 +87,8 @@ export function classify(op) {
     const imm12 = (op >> 12) & 4095, se = (imm12 & 2048) ? (imm12 | 0xfffff000) : imm12;
     return { k: 'br', b: 'beqz', r: (op >> 8) & 15, s: -1, imm: se };
   }
+  if (lo === 6 && (op & 48) === 32 && (op & 192) === 64) // bnetbl n_handler47 (taken iff ar!=TABLE[t], signed)
+    return { k: 'br', b: 'bnetbl', r: (op >> 8) & 15, s: -1, t: (op >> 12) & 15, imm: sext8((op >> 16) & 255) };
   if (lo === 6 && (op & 48) === 32 && (op & 192) === 0) // beqtbl n_handler31 (taken iff ar==TABLE[t], signed)
     return { k: 'br', b: 'beqtbl', r: (op >> 8) & 15, s: -1, t: (op >> 12) & 15, imm: sext8((op >> 16) & 255) };
   if (lo === 6 && (op & 48) === 48 && (op & 192) === 0) return { k: 'callEnd' }; // r_handler24 RETW: trace boundary
@@ -239,6 +251,9 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'fload') { // r_handler59: f[t] = MR32(ar[s]+ar[u]) (float dest NOT windowed)
       c(CBASE + 272 + k.t * 4); c(CORE); ld(P(k.s)); ld(P(k.u)); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
     }
+    else if (k.k === 'l16i') { // r_handler42: dst = SEXT16(MR16(ar[s]+off))
+      c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x01, OP.i32_extend16, OP.i32_store, 0x02, 0x00);
+    }
     else if (k.k === 'l32in' || k.k === 'l32i8') { // r_handler47/46: dst = MR32(ar[s]+off)
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x02, OP.i32_store, 0x02, 0x00);
     }
@@ -257,6 +272,13 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
       B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
+    }
+    else if (k.k === 's8i') { // _handler16: MW8(ar[s]+off, ar[t]); addr 0 traps -> side exit
+      ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
+      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      B.push(OP.return_, OP.end);
+      c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x03);
     }
     else if (k.k === 'extui') { // r_handler26 formula as coded
       c(P(k.t)); ld(P(k.s)); c(k.shift); B.push(OP.i32_shr_u); c(k.mask); B.push(OP.i32_and, OP.i32_store, 0x02, 0x00);
@@ -324,6 +346,10 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
         ld(P(br.r)); c(br.rr); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and, OP.i32_eqz);
       } else if (br.b === 'beqtbl') {
         ld(P(br.r)); c(NF_SHIFT_TABLE[br.t]); B.push(OP.i32_eq);
+      } else if (br.b === 'bnetbl') {
+        ld(P(br.r)); c(NF_SHIFT_TABLE[br.t]); B.push(OP.i32_ne);
+      } else if (br.b === 'bbsi') {
+        ld(P(br.r)); c(br.rr); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and);
       } else { ld(P(br.r)); B.push(OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') B.push(OP.i32_eqz); }
       cc2(br.takenRec ? 1 : 0); B.push(OP.i32_eq);
       B.push(OP.if_, 0x40, OP.else_); cc2(100 + branches.indexOf(br)); B.push(OP.return_); B.push(OP.end);

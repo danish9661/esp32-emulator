@@ -140,6 +140,10 @@ const MICROS = [
   { name: 'xor', ops: [{ op: 0x308290, w: 3 }], regs: [2, 8, 9], setup: null, cmp: [8] },
   { name: 'beqtbl', ops: [{ op: 0xf71826, w: 3 }], regs: [8], setup: (V) => { V[8] = 7; }, cmp: [8] },
   { name: 'fload', ops: [{ op: 0x82800, w: 3 }], regs: [0, 8], setup: (V) => { V[8] = DATA; V[0] = 0; }, cmp: [], fcmp: [2] },
+  { name: 'l16i', ops: [{ op: 0x9682, w: 3 }], regs: [6, 8], setup: (V) => { V[6] = DATA; }, cmp: [8] },
+  { name: 'bnetbl', ops: [{ op: 0x20466, w: 3 }], regs: [4], setup: (V) => { V[4] = 0xFFFFFFFF; }, cmp: [4] },
+  { name: 'bbsi', ops: [{ op: 0xf1e807, w: 3 }], regs: [8], setup: (V) => { V[8] = 0xFFFFFFFE; }, cmp: [8] },
+  { name: 's8i', ops: [{ op: 0x4382, w: 3 }], regs: [3, 8], setup: (V) => { V[3] = DATA + 8; }, cmp: [3, 8], mem: [DATA + 8] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

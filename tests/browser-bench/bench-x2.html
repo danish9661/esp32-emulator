@@ -45,14 +45,18 @@ try {
   const B = await launch('B', romBytes, wasmBytes, raw);
   const iA0 = A.sim.instTotal ?? 0, iB0 = B.sim.instTotal ?? 0;
   const t0 = performance.now();
+  let doneA = 0, doneB = 0, tA = 0, tB = 0, iAend = 0, iBend = 0;
   while (true) {
     await new Promise((r) => setTimeout(r, 200));
     A.sim.pollUart();
     B.sim.pollUart();
     const want = q.get('fw') === 'speed' ? 'SPEEDDONE' : 'ALL TESTS PASSED';
-    if (A.uart().includes(want) && B.uart().includes(want)) break;
+    if (!doneA && A.uart().includes(want)) { doneA = 1; tA = performance.now(); iAend = A.sim.instTotal ?? 0; }
+    if (!doneB && B.uart().includes(want)) { doneB = 1; tB = performance.now(); iBend = B.sim.instTotal ?? 0; }
+    if (doneA && doneB) break;
     if (performance.now() - t0 > 420000) throw new Error('timeout');
   }
+  console.log(`[BENCHX2] A wall=${((tA - t0) / 1000).toFixed(1)}s inst=${iAend - iA0} B wall=${((tB - t0) / 1000).toFixed(1)}s inst=${iBend - iB0}`);
   const wall = (performance.now() - t0) / 1000;
   const iA = (A.sim.instTotal ?? 0) - iA0, iB = (B.sim.instTotal ?? 0) - iB0;
   const mA = iA / wall / 1e6, mB = iB / wall / 1e6;
