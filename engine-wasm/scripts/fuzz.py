@@ -131,6 +131,8 @@ def classify(op):
             return ('callEnd',)
         if (op >> 16) == 0x60 and (op & 0xF00) == 0:
             return ('neg',)
+        if e == 0 and (op & 0xE10000) == 0x400000 and (op & 0x10F000) == 0xF000:
+            return ('nsa',)
         if e == 0x80000 and (op & 0xF10000) == 0:
             return ('fload',)
         if e == 0 and f == 0xC00000 and b20 == 0:
@@ -157,7 +159,8 @@ EXPECT = {
     'br-bnetbl': 'n_handler47', 'br-bbsi': 'n_handler29', 'l16i': 'r_handler42', 's8i': '_handler16',
     'movnez': 'a_handler16', 'moveqz': 'a_handler6', 'add': 'n_handler7', 'br-bbr': 'n_handler45', 'br-bltz': 'n_handler44',
     'l16u': 'r_handler43',
-    's16i': '_handler17', 'br-bgetbl': 'n_handler38', 'br-bban': 'n_handler26', 'neg': 'a_handler44', 's32in': '_handler21', 'addN': 'n_handler9',
+    's16i': '_handler17', 'br-bgetbl': 'n_handler38', 'br-bban': 'n_handler26', 'neg': 'a_handler44',
+    'nsa': 'a_handler47', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',
     'br-bge': 'n_handler35', 'br-bgeu': 'n_handler37', 'br-blt': 'n_handler40',

@@ -17,6 +17,7 @@ const CASES = [
   [0xec897, 'bbr'], [0xfe7296, 'bltz'],
   [0x1ea2, 'l16u'],
   [0x5592, 's16i'], [0x602020, 'neg'], [0x3087f6, 'bgetbl'], [0x65387, 'bban'],
+  [0x40f550, 'nsa'],
 ];
 let bad = 0;
 for (const [op, want] of CASES) {

@@ -156,6 +156,7 @@ const MICROS = [
   { name: 'neg', ops: [{ op: 0x602020, w: 3 }], regs: [2], setup: null, cmp: [2] },
   { name: 'bgetbl', ops: [{ op: 0x3087f6, w: 3 }], regs: [7], setup: (V) => { V[7] = V[7] % 8; }, cmp: [7] },
   { name: 'bban', ops: [{ op: 0x65387, w: 3 }], regs: [3, 8], setup: (V) => { V[3] = 0xFFFFFFFF; }, cmp: [3, 8] },
+  { name: 'nsa', ops: [{ op: 0x40f550, w: 3 }], regs: [5], setup: null, cmp: [5] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];
