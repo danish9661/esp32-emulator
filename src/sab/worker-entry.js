@@ -638,7 +638,7 @@ async function runSimChunk() {
   let profE = 0n, profS = 0n, profP = 0n, profN = 0;
   try {
     if (chip._jitEnabled !== false && wasmExp?.core_run && chip._wasmLoader && idleView0 && idleView1) {
-      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader, { dryRun: !!chip._jitDryRun, instGate: !!chip._jitInstGate }); } catch {} }
+      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader, { dryRun: !!chip._jitDryRun, instGate: !!chip._jitInstGate, page: !!chip._jitPage }); } catch {} }
       jitDrv = chip._jitDriver || null;
     }
   } catch {}
@@ -1479,6 +1479,7 @@ function applyBasicSetup(chip, config, flash, rom) {
   // jitEnabled:false disables the driver; default follows JIT env.
   chip._jitEnabled = config.jitEnabled !== undefined ? !!config.jitEnabled : chip._jitEnabled;
   chip._jitDryRun = !!config.jitDryRun;
+  chip._jitPage = !!config.jitPage;
   chip._jitNoCallout = !!config.jitNoCallout;
   chip._jitNoFold = !!config.jitNoFold;
   chip._jitInstGate = !!config.jitInstGate || (typeof process !== 'undefined' && !!process.env.JITINSTGATE);

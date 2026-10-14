@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>rtrace repro</title></head>
+<body>
+<div id="out">-</div>
+<script type="module">
+const q = new URLSearchParams(location.search);
+const N = Number(q.get('n') || 100000);
+const F = q.get('f') || 'rtrace.bin';
+try {
+  const bytes = new Uint8Array(await (await fetch('./' + F)).arrayBuffer());
+  const mem = new WebAssembly.Memory({ initial: 1, maximum: 10, shared: true });
+  const mod = await WebAssembly.compile(bytes);
+  const inst = await WebAssembly.instantiate(mod, { env: {
+    mem, mr8: () => 0, mr16: () => 0, mr32: () => 0,
+    mw8: () => {}, mw16: () => {}, mw32: () => {},
+    jit_l32r: () => 0, jit_ssai: () => {},
+  } });
+  const t0 = performance.now();
+  let code = -1;
+  for (let i = 0; i < N; i++) code = inst.exports.run();
+  window.__codes = (window.__codes || 0) + (code === 0 ? 1 : 0);
+  const us = (performance.now() - t0) * 1000;
+  document.getElementById('out').textContent = `done code=${code} ${N} calls in ${(us / 1e6).toFixed(2)}s`;
+} catch (e) {
+  document.getElementById('out').textContent = 'FAILED ' + e.message;
+}
+</script>
+</body></html>

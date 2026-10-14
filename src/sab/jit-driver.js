@@ -10,7 +10,7 @@
 // equivalence across the worker battery is the standing gate.
 // Kill switch: enabled=false (or JIT=0) disables everything; the
 // interpreter covers all code paths by construction.
-import { classify, buildTraceModule, instantiateTrace, findLoopSlices } from './jit-trace-emit.js';
+import { classify, buildTraceModule, instantiateTrace, findLoopSlices, buildPage } from './jit-trace-emit.js';
 
 export class JitDriver {
   constructor(chip, loader, opts = {}) {
@@ -20,6 +20,7 @@ export class JitDriver {
     this.enabled = opts.enabled !== false && (typeof process === 'undefined' || !process.env.JIT?.startsWith?.('0'));
     this.dryRun = !!opts.dryRun;
     this.instGate = !!opts.instGate; // DIAG Exp D: no JIT until APP core retires (dual-core handshake safety)
+    this.pageEnabled = !!opts.page || (typeof process !== 'undefined' && !!process.env.JITPAGE);
     this.cache = new Map(); // `${core}:${pc}` -> entry
     this.uncompilable = new Set();
     this.maxEntries = opts.maxEntries || 128;
@@ -111,6 +112,33 @@ export class JitDriver {
         try { ok = this.guardPass(e, key); } catch { break; }
         if (!ok) break;
       }
+      if (e.page) {
+        // Phase 2 page entry: module self-accounts INSTW; park pc via exitpc.
+        let code;
+        try {
+          const i0 = this.instCount(e.core);
+          code = e.run() | 0;
+          const ops = ((this.instCount(e.core) - i0) >>> 0);
+          this.setPc(e.core, e.exitpc.value >>> 0);
+          this.stats.hits++;
+          if (code === 2) {
+            this.stats.completed++;
+            e.compCount = (e.compCount || 0) + 1;
+            total += ops;
+            if (total >= 2048) break; // page runs retire more per call; wider batch
+            continue;
+          }
+          this.stats.exits++;
+          e.exitCount = (e.exitCount || 0) + 1;
+          if (e.exitCount >= 64 && (e.compCount || 0) === 0) {
+            try { this.cache.delete(key); } catch {}
+            try { this._cooldown.set(key, Date.now() + 30000); } catch {}
+            this.stats.evictedPoison = (this.stats.evictedPoison || 0) + 1;
+          }
+          total += ops;
+          break;
+        } catch { break; }
+      }
       let code;
       try { code = e.runFn() | 0; } catch { break; }
       this.stats.hits++;
@@ -164,6 +192,24 @@ export class JitDriver {
       let ok = false;
       try { ok = this.guardPass(e, key); } catch { return 0; }
       if (!ok) return 0;
+      if (e.page) {
+        let code;
+        try {
+          const i0 = this.instCount(core);
+          code = e.run() | 0;
+          const ops = ((this.instCount(core) - i0) >>> 0);
+          this.setPc(core, e.exitpc.value >>> 0);
+          this.stats.hits++;
+          if (code === 2) {
+            this.stats.completed++;
+            e.compCount = (e.compCount || 0) + 1;
+            return ops;
+          }
+          this.stats.exits++;
+          e.exitCount = (e.exitCount || 0) + 1;
+          return ops;
+        } catch { return 0; }
+      }
       let code;
       try {
         if (typeof process !== 'undefined' && process.env.JITTRACE) {
@@ -358,6 +404,7 @@ export class JitDriver {
     if (cool && Date.now() < cool) return false;
     const found = this.findTrace(core, pc);
     if (!found) { this.stats.findNull++; return false; }
+    if (this.pageEnabled) return this.compilePage(core, pc, found);
     let built;
     try {
       const ex2 = this.ex;
@@ -428,5 +475,71 @@ export class JitDriver {
       try { console.log(`[JIT] first trace compiled: core=${core} pc=0x${pc.toString(16)} len=${found.TE.length}`); } catch {}
     }
     return true;
+  }
+
+  // Phase 2 page tier: compile the recorded window as an in-WASM threaded
+  // region (groups + dispatch loop) instead of a single linear trace.
+  // Loops inside the recorded set stay in-WASM (no per-iteration exits);
+  // page-leave/yield/miss return with exitpc parked. Same cache, guards,
+  // poison, cooldown and uncompilable discipline as the trace tier.
+  async compilePage(core, pc, found) {
+    const key = core + ':' + pc;
+    let handle;
+    const foldedAddrs = [];
+    try {
+      const ex2 = this.ex;
+      handle = await buildPage(found.TE.map((e) => ({ ...e })), {
+        CORE: core, CBASE: core * this.CORE_SZ, L: this.loader, ex: this.ex,
+        yieldOps: 2048,
+        wb: found.wb, recLoop: found.loop, sarOff: this.sarOff,
+        noCallout: !!this.chip._jitNoCallout,
+        noFold: !!this.chip._jitNoFold,
+        folded: foldedAddrs,
+        readMem: (addr) => ex2.core_read_uint32(core, addr) >>> 0,
+      });
+    } catch (err) {
+      this.stats.buildFail++;
+      try {
+        const m = String(err && err.message || err);
+        const o = m.match(/unemittable op (0x[0-9a-f]+)/);
+        if (o && Object.keys(this.stats.badOps).length < 24) {
+          this.stats.badOps[o[1]] = (this.stats.badOps[o[1]] || 0) + 1;
+        }
+      } catch {}
+      if (!this.stats.firstErr) { try { this.stats.firstErr = 'page-build:' + String(err && err.message || err).slice(0, 120); } catch {} }
+      this.uncompilable.add(key);
+      return false;
+    }
+    if (!handle || typeof handle.run !== 'function') {
+      this.stats.instFail++;
+      if (!this.stats.firstErr) { try { this.stats.firstErr = 'page-inst: no run handle'; } catch {} }
+      this.uncompilable.add(key);
+      return false;
+    }
+    if (this.cache.size >= this.maxEntries) {
+      let drop = Math.max(1, this.maxEntries >> 2);
+      for (const k of this.cache.keys()) {
+        if (drop-- <= 0) break;
+        this.cache.delete(k);
+        this.stats.evictions++;
+      }
+    }
+    if (this._cooldown) { try { this._cooldown.delete(key); } catch {} }
+    this.cache.set(key, {
+      page: true, run: handle.run, exitpc: handle.exitpc, startPc: pc,
+      core, rmin: found.rmin, rmax: found.rmax, rgens: found.rgens,
+      s72: found.s72, s73: found.s73, s230: found.s230,
+      l0: found.loop[0], l1: found.loop[1], l2: found.loop[2],
+      len: found.TE.length,
+    });
+    this.stats.compiles++;
+    this.stats.pageCompiles = (this.stats.pageCompiles || 0) + 1;
+    this.stats.folds = (this.stats.folds || 0) + foldedAddrs.length;
+    return true;
+  }
+
+  instCount(core) {
+    try { return this.memU32()[((core * this.CORE_SZ + 2608) >>> 2)] >>> 0; }
+    catch { return 0; }
   }
 }

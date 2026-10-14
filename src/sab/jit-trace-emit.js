@@ -1,4 +1,6 @@
-// Shared JIT-trace emitter (milestone C). Pure JS: classify + emit.
+// JIT trace emitter (production, 50mips Phase 2). 44 shapes, routing proven
+// by full 24-bit fuzz vs c_handler7 (7.9M/0 misroutes), emission proven per
+// shape (28/28 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -246,12 +248,16 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       // NOTE: exit goes in the THEN (eqz=1 means addr==0); an exit in ELSE
       // would fire on every nonzero address (inverted once, caught by micro).
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
-      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1); B.push(OP.return_, OP.end);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
+      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
     }
     else if (k.k === 's32i8') { // _handler20: MW32(ar[s]+off8, ar[t]); addr 0 traps -> side exit
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
-      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1); B.push(OP.return_, OP.end);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
+      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
     }
     else if (k.k === 'extui') { // r_handler26 formula as coded
@@ -510,19 +516,34 @@ export async function buildPage(Sc, ctx) {
       noTail: true,
       onBranch(BB, H, br, e) {
         const takenPc = br.target >>> 0, fallPc = (e.pc + e.w) >>> 0;
+        // Exact accounting: only the executed prefix (through this branch),
+        // NOT the full group (unexecuted suffix would inflate instTotal).
+        const prefixLen = subT.indexOf(e) + 1;
         if (br.b === 'bne' || br.b === 'bltu' || br.b === 'beq') {
           H.ld(H.P(br.r)); H.ld(H.P(br.s));
           BB.push(br.b === 'bne' ? H.OP.i32_ne : br.b === 'bltu' ? H.OP.i32_lt_u : H.OP.i32_eq);
+        } else if (br.b === 'bge') {
+          H.ld(H.P(br.r)); H.ld(H.P(br.s)); BB.push(H.OP.i32_lt_s);
+          BB.push(H.OP.i32_eqz);
+        } else if (br.b === 'bgeu') {
+          H.ld(H.P(br.r)); H.ld(H.P(br.s)); BB.push(H.OP.i32_lt_u);
+          BB.push(H.OP.i32_eqz);
+        } else if (br.b === 'blt') {
+          H.ld(H.P(br.r)); H.ld(H.P(br.s)); BB.push(H.OP.i32_lt_s);
+        } else if (br.b === 'bbci') {
+          H.ld(H.P(br.r)); H.cc2(br.rr); BB.push(H.OP.i32_shr_u); H.cc2(1); BB.push(H.OP.i32_and, H.OP.i32_eqz);
+        } else if (br.b === 'beqtbl') {
+          H.ld(H.P(br.r)); H.cc2(NF_SHIFT_TABLE[br.t]); BB.push(H.OP.i32_eq);
         } else { H.ld(H.P(br.r)); BB.push(H.OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') BB.push(H.OP.i32_eqz); }
         BB.push(H.OP.if_, 0x40);
         // taken path: inst-add then transfer
         BB.push(H.OP.i32_const, ...H.sleb(INSTW), H.OP.i32_const, ...H.sleb(INSTW));
-        BB.push(H.OP.i32_load, 0x02, 0x00, H.OP.i32_const, ...H.sleb(glen), H.OP.i32_add, H.OP.i32_store, 0x02, 0x00);
+        BB.push(H.OP.i32_load, 0x02, 0x00, H.OP.i32_const, ...H.sleb(prefixLen), H.OP.i32_add, H.OP.i32_store, 0x02, 0x00);
         if (inPage(takenPc)) { BB.push(H.OP.i32_const, ...H.sleb(takenPc), H.OP.local_set, 0x01, H.OP.br, 0x02); }
         else { BB.push(H.OP.i32_const, ...H.sleb(takenPc), H.OP.global_set, 0x00, H.OP.i32_const, ...H.sleb(1), H.OP.return_); }
         BB.push(H.OP.else_);
         BB.push(H.OP.i32_const, ...H.sleb(INSTW), H.OP.i32_const, ...H.sleb(INSTW));
-        BB.push(H.OP.i32_load, 0x02, 0x00, H.OP.i32_const, ...H.sleb(glen), H.OP.i32_add, H.OP.i32_store, 0x02, 0x00);
+        BB.push(H.OP.i32_load, 0x02, 0x00, H.OP.i32_const, ...H.sleb(prefixLen), H.OP.i32_add, H.OP.i32_store, 0x02, 0x00);
         if (inPage(fallPc)) { BB.push(H.OP.i32_const, ...H.sleb(fallPc), H.OP.local_set, 0x01, H.OP.br, 0x02); }
         else { BB.push(H.OP.i32_const, ...H.sleb(fallPc), H.OP.global_set, 0x00, H.OP.i32_const, ...H.sleb(1), H.OP.return_); }
         BB.push(H.OP.end);
