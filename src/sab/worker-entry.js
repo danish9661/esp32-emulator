@@ -630,11 +630,15 @@ async function runSimChunk() {
   let jitDrv = null;
   let jitKA = 0, jitKB = 0;
   const steprofOn = (typeof process !== 'undefined' && !!process.env.STEPROF);
+  // Max traces per chainCore call (JITNOTRACE=1 executes nothing: compiles
+  // still populate the cache; isolates execution effects from compile effects).
+  const jitMaxTraces = (typeof process !== 'undefined' && process.env.JITNOTRACE) ? 0 :
+    (typeof process !== 'undefined' && process.env.JITMAXTRACES ? (parseInt(process.env.JITMAXTRACES, 10) || 8) : 8);
   const nowNs = () => BigInt(Math.round(performance.now() * 1e6));
   let profE = 0n, profS = 0n, profP = 0n, profN = 0;
   try {
     if (chip._jitEnabled !== false && wasmExp?.core_run && chip._wasmLoader && idleView0 && idleView1) {
-      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader, { dryRun: !!chip._jitDryRun }); } catch {} }
+      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader, { dryRun: !!chip._jitDryRun, instGate: !!chip._jitInstGate }); } catch {} }
       jitDrv = chip._jitDriver || null;
     }
   } catch {}
@@ -994,11 +998,11 @@ async function runSimChunk() {
       if (jitDrv) {
         try {
           if (idleView0[0] === 0) {
-            jitKA = jitDrv.chainCore(0);
+            jitKA = jitDrv.chainCore(0, jitMaxTraces);
             if (jitKA === 0) jitCompileKick(jitDrv, 0);
           }
           if (idleView1[0] === 0) {
-            jitKB = jitDrv.chainCore(1);
+            jitKB = jitDrv.chainCore(1, jitMaxTraces);
             if (jitKB === 0) jitCompileKick(jitDrv, 1);
           }
           if ((steps & 262143) === 0) console.log('[JIT]', JSON.stringify(jitDrv.stats));
@@ -1476,6 +1480,8 @@ function applyBasicSetup(chip, config, flash, rom) {
   chip._jitEnabled = config.jitEnabled !== undefined ? !!config.jitEnabled : chip._jitEnabled;
   chip._jitDryRun = !!config.jitDryRun;
   chip._jitNoCallout = !!config.jitNoCallout;
+  chip._jitNoFold = !!config.jitNoFold;
+  chip._jitInstGate = !!config.jitInstGate || (typeof process !== 'undefined' && !!process.env.JITINSTGATE);
   // ── Re-apply post-reset (reset wipes MMU, GPIO, UART, core state) ──
   if (chip.mmuTablePro && config.mmuPages) {
     for (let p = 0; p < config.mmuPages; p++) chip.mmuTablePro[p] = p;

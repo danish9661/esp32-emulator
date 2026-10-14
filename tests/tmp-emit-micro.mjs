@@ -130,6 +130,14 @@ const MICROS = [
   { name: 'j', ops: [{ op: 0xFFFFC6, w: 3 }], regs: [1, 2], setup: null, cmp: [1, 2] },
   { name: 'mov', ops: [{ op: 0x65D, w: 2 }], regs: [5, 6], setup: null, cmp: [5] },
   { name: 'addi8', ops: [{ op: 0x10C652, w: 3 }], regs: [5, 6], setup: null, cmp: [5] },
+  { name: 'extui-2', ops: [{ op: 0x5a080, w: 3 }], regs: [8, 10], setup: null, cmp: [10] },
+  { name: 'extui-3', ops: [{ op: 0x458180, w: 3 }], regs: [8], setup: null, cmp: [8] },
+  { name: 'l32in-2', ops: [{ op: 0x288, w: 2 }], regs: [2, 8], setup: (V) => { V[2] = DATA; }, cmp: [8] },
+  { name: 'l32in-3', ops: [{ op: 0x3228, w: 2 }], regs: [2], setup: (V) => { V[2] = DATA; }, cmp: [2] },
+  { name: 's32i8', ops: [{ op: 0x16682, w: 3 }], regs: [6, 8], setup: (V) => { V[6] = DATA; }, cmp: [6, 8], mem: [DATA + 4] },
+  { name: 'bbci', ops: [{ op: 0x66397, w: 3 }], regs: [3], setup: (V) => { V[3] = 0x200; }, cmp: [3] },
+  { name: 'srl', ops: [{ op: 0x418290, w: 3 }], regs: [2, 8, 9], setup: null, cmp: [8] },
+  { name: 'xor', ops: [{ op: 0x308290, w: 3 }], regs: [2, 8, 9], setup: null, cmp: [8] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

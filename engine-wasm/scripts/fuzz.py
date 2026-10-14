@@ -52,6 +52,8 @@ def classify(op):
         return ('addi8',)
     if lo == 2 and (op & 61440) == 8192:
         return ('l32i8',)
+    if lo == 2 and (op & 61440) == 24576:
+        return ('s32i8',)
     if lo == 1:
         return ('l32r',)
     if lo == 7 and (op & 57344) == 32768 and (op & 4096) == 4096:
@@ -64,6 +66,8 @@ def classify(op):
         return ('br-bgeu',) if (op & 4096) else ('br-bge',)
     if lo == 7 and (op & 57344) == 8192 and not (op & 4096):
         return ('br-blt',)
+    if lo == 7 and (op & 57344) == 24576:
+        return ('br-bbci',)
     if lo == 5:
         return ('callEnd',)
     if lo == 6 and (op & 48) == 16 and (op & 192) == 64:
@@ -91,6 +95,10 @@ def classify(op):
             return ('and',)
         if e == 0 and f == 0x200000 and b20 == 0:
             return ('or',)
+        if e == 0 and f == 0x410000:
+            return ('srl',)
+        if e == 0 and f == 0x200000 and b20 != 0:
+            return ('xor',)
         if e == 0 and f == 0xC00000 and b20 == 0:
             return ('sub',)
         if e == 0x20000 and (op & 0xF10000) == 65536:
@@ -109,7 +117,8 @@ def classify(op):
 
 
 EXPECT = {
-    'l32in': 'r_handler47', 'l32i8': 'r_handler46', 's32in': '_handler21', 'addN': 'n_handler9',
+    'l32in': 'r_handler47', 'l32i8': 'r_handler46', 's32i8': '_handler20',
+    'br-bbci': 'n_handler27', 'srl': '_handler39', 'xor': 'c_handler4', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',
     'br-bge': 'n_handler35', 'br-bgeu': 'n_handler37', 'br-blt': 'n_handler40',

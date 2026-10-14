@@ -19,6 +19,7 @@ export class JitDriver {
     this.ex = loader.exports;
     this.enabled = opts.enabled !== false && (typeof process === 'undefined' || !process.env.JIT?.startsWith?.('0'));
     this.dryRun = !!opts.dryRun;
+    this.instGate = !!opts.instGate; // DIAG Exp D: no JIT until APP core retires (dual-core handshake safety)
     this.cache = new Map(); // `${core}:${pc}` -> entry
     this.uncompilable = new Set();
     this.maxEntries = opts.maxEntries || 128;
@@ -88,8 +89,11 @@ export class JitDriver {
   // pending) — stores target data pages, loads are read-only. Any exit or
   // miss breaks to the interpreter batch, which continues from the exact
   // parked pc. Returns total ops executed.
+  instOf(core) { try { return this.memU32()[((core * this.CORE_SZ + 2608) >>> 2)] >>> 0; } catch { return 0; } }
+
   chainCore(core, maxTraces = 8) {
     if (this.dryRun) return 0;
+    if (this.instGate && this.instOf(1) < 10000000) return 0;
     try {
       if ((this.pcOf(core) >>> 0) < 0x400d0020) return 0;
     } catch { return 0; }
@@ -110,7 +114,6 @@ export class JitDriver {
       let code;
       try { code = e.runFn() | 0; } catch { break; }
       this.stats.hits++;
-      if (this.stats.hits % 2000000 === 0) { try { console.log('[JITHITS] ' + this.stats.hits); } catch {} }
       if (code === 0) {
         this.stats.completed++;
         try {
@@ -163,18 +166,22 @@ export class JitDriver {
       if (!ok) return 0;
       let code;
       try {
-        if ((this._callLog = (this._callLog || 0) + 1) <= 12) {
-          try { console.log(`[JITCALL] #${this._callLog} len=${e.len} branches=${e.branches.length}`); } catch {}
+        if (typeof process !== 'undefined' && process.env.JITTRACE) {
+          if ((this._callLog = (this._callLog || 0) + 1) <= 12) {
+            try { console.log(`[JITCALL] #${this._callLog} len=${e.len} branches=${e.branches.length}`); } catch {}
+          }
         }
         code = e.runFn() | 0;
-        if (this._callLog <= 12) { try { console.log(`[JITCALL] #${this._callLog} returned ${code}`); } catch {}
+        if (typeof process !== 'undefined' && process.env.JITTRACE) {
+          if ((this._callLog || 0) <= 12) { try { console.log(`[JITCALL] #${this._callLog} returned ${code}`); } catch {} }
         }
       } catch (err) {
-        try { console.log(`[JITCALL] threw: ${(err && err.message) || err}`); } catch {}
+        if (typeof process !== 'undefined' && process.env.JITTRACE) {
+          try { console.log(`[JITCALL] threw: ${(err && err.message) || err}`); } catch {}
+        }
         return 0;
       }
       this.stats.hits++;
-      if (this.stats.hits % 2000000 === 0) { try { console.log('[JITHITS] ' + this.stats.hits); } catch {} }
       if (code === 0) {
         this.stats.completed++;
         this.stats.compLen = e.len;
@@ -354,10 +361,13 @@ export class JitDriver {
     let built;
     try {
       const ex2 = this.ex;
+      const foldedAddrs = [];
       built = buildTraceModule(found.TE, {
         CORE: core, CBASE: core * this.CORE_SZ, wb: found.wb,
         recLoop: found.loop, sarOff: this.sarOff,
         noCallout: !!this.chip._jitNoCallout,
+        noFold: !!this.chip._jitNoFold,
+        folded: foldedAddrs,
         readMem: (addr) => ex2.core_read_uint32(core, addr) >>> 0,
       });
     } catch (err) {
@@ -408,7 +418,13 @@ export class JitDriver {
       l0: found.loop[0], l1: found.loop[1], l2: found.loop[2],
     });
     this.stats.compiles++;
-    if (this.stats.compiles === 1) {
+    this.stats.folds = (this.stats.folds || 0) + foldedAddrs.length;
+    if (typeof process !== 'undefined' && process.env.JITTRACE) {
+      try {
+        const shapes = found.TE.map((e) => '0x' + e.op.toString(16)).join(',');
+        console.log(`[JITTRACE] core=${core} pc=0x${pc.toString(16)} len=${found.TE.length} ops=${shapes}`);
+      } catch {}
+    } else if (this.stats.compiles === 1) {
       try { console.log(`[JIT] first trace compiled: core=${core} pc=0x${pc.toString(16)} len=${found.TE.length}`); } catch {}
     }
     return true;

@@ -1,6 +1,6 @@
-// JIT trace emitter (production, 50mips Phase 2). 38 shapes, routing proven
-// by full 24-bit fuzz vs c_handler7 (7.6M/0 misroutes), emission proven per
-// shape (22/22 micro suites). Kill switch: callers simply never call.
+// JIT trace emitter (production, 50mips Phase 2). 42 shapes, routing proven
+// by full 24-bit fuzz vs c_handler7 (7.9M/0 misroutes), emission proven per
+// shape (26/26 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -43,9 +43,15 @@ export function classify(op) {
   }
   if (lo === 7 && (op & 57344) === 8192 && !(op & 4096)) // blt n_handler40
     return { k: 'br', b: 'blt', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 7 && (op & 57344) === 24576) // bbci n_handler27 (taken iff bit clear)
+    return { k: 'br', b: 'bbci', r: f8, s: -1, rr: ((((op >> 12) & 1) << 4) | ((op >> 4) & 15)) >>> 0, imm: sext8((op >> 16) & 255) };
   if (lo === 2 && (op & 61440) === 8192) { // l32i r_handler46 (8-bit offset load)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
     return { k: 'l32i8', t, s: ss, off };
+  }
+  if (lo === 2 && (op & 61440) === 24576) { // s32i _handler20 (8-bit offset store)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
+    return { k: 's32i8', t, s: ss, off };
   }
   if (lo === 2 && (op & 61440) === 49152) { // addi8 n_handler11
     const idx = (op >> 16) & 255;
@@ -110,6 +116,8 @@ export function classify(op) {
     }
     if (e === 0 && (op & 0xE10000) === 0 && b20 !== 0) return { k: 'and', t: f12, r: f8, s: f4 }; // n_handler19
     if (e === 0 && f === 0x200000 && b20 === 0) return { k: 'or', t: f12, r: f8, s: f4 }; // a_handler51
+    if (e === 0 && f === 0x410000) return { k: 'srl', t: f12, s: f4, imm: (op >> 8) & 15 }; // _handler39 SRLI: ar[t]=ar[s]>>imm4 (NOT register shift!)
+    if (e === 0 && f === 0x200000 && b20 !== 0) return { k: 'xor', t: f12, r: f8, s: f4 }; // c_handler4 (or-split on b20)
     if (e === 0 && f === 0xC00000 && b20 === 0) return { k: 'sub', t: f12, r: f8, s: f4 }; // _handler49
     if (e === 0x20000 && (op & 0xF10000) === 65536) { // _handler14 RSR: inline ccount only
       const sr = (op >> 8) & 255;
@@ -236,12 +244,19 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1); B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
     }
+    else if (k.k === 's32i8') { // _handler20: MW32(ar[s]+off8, ar[t]); addr 0 traps -> side exit
+      ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1); B.push(OP.return_, OP.end);
+      c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
+    }
     else if (k.k === 'extui') { // r_handler26 formula as coded
       c(P(k.t)); ld(P(k.s)); c(k.shift); B.push(OP.i32_shr_u); c(k.mask); B.push(OP.i32_and, OP.i32_store, 0x02, 0x00);
     }
     else if (k.k === 'and') { c(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_and, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'or') { c(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(0x72, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'sub') { c(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_sub, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'srl') { c(P(k.t)); ld(P(k.s)); c(k.imm); B.push(OP.i32_shr_u, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'xor') { c(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(0x73, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'rsrcc') { c(P(k.t)); c(CBASE + 336 + 234 * 4); B.push(OP.i32_load, 0x02, 0x00, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'l8ui') { // r_handler41: dst = MR8(ar[s]+off)
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x00, OP.i32_store, 0x02, 0x00);
@@ -264,7 +279,7 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       const idx = (e.op >> 8) & 65535;
       const litAddr = (((e.next >>> 2) + (0xffff0000 | idx)) << 2) >>> 0;
       const inFlash = litAddr >= 0x400c0000 && litAddr < 0x40400000;
-      if (ctx.readMem && inFlash) {
+      if (ctx.readMem && !ctx.noFold && inFlash) {
         const val = ctx.readMem(litAddr) >>> 0;
         c(P(k.t)); c(val); B.push(OP.i32_store, 0x02, 0x00);
         if (ctx.folded) ctx.folded.push(litAddr >>> 0);
@@ -296,6 +311,8 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
         B.push(OP.i32_eqz);
       } else if (br.b === 'blt') {
         ld(P(br.r)); ld(P(br.s)); B.push(OP.i32_lt_s);
+      } else if (br.b === 'bbci') {
+        ld(P(br.r)); c(br.rr); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and, OP.i32_eqz);
       } else { ld(P(br.r)); B.push(OP.i32_eqz); if (br.b === 'bnez' || br.b === 'bnezn') B.push(OP.i32_eqz); }
       cc2(br.takenRec ? 1 : 0); B.push(OP.i32_eq);
       B.push(OP.if_, 0x40, OP.else_); cc2(100 + branches.indexOf(br)); B.push(OP.return_); B.push(OP.end);
