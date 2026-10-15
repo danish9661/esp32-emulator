@@ -60,7 +60,9 @@ while (p < code.length) {
     case 0x2a: rSleb(); rSleb(); need(1); break; // f32.load
     case 0x38: rSleb(); rSleb(); need(2); push(-2); break; // f32.store
     case 0x45: need(1); break; // eqz net 0
-    case 0x46: case 0x47: case 0x48: case 0x49: need(2); push(-1); break; // cmp
+    case 0x46: case 0x47: case 0x48: case 0x49: case 0x4a: case 0x4b: need(2); push(-1); break; // i32 cmp
+    case 0x5b: case 0x5c: case 0x5d: case 0x5e: case 0x5f: case 0x60: need(2); push(-1); break; // f32 cmp
+    case 0x6e: case 0x6f: need(2); push(-1); break; // i32 div/rem
     case 0x51: case 0x56: need(2); push(-1); break; // i64 cmp
     case 0x71: case 0x72: case 0x73: case 0x6a: case 0x6b: case 0x6c: case 0x6f:
     case 0x74: case 0x75: case 0x76: case 0x7c: case 0x86: case 0x88:

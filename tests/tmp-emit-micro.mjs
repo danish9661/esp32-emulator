@@ -176,6 +176,10 @@ const MICROS = [
   { name: 'bor', ops: [{ op: 0x220000, w: 3 }], regs: [], setup: null, cmp: [], psw: true },
   { name: 'sexpn', ops: [{ op: 0x239a00, w: 3 }], regs: [9, 10], setup: null, cmp: [9] },
   { name: 'ftrunc', ops: [{ op: 0x9a2500, w: 3 }], regs: [2], setup: null, cmp: [2] },
+  { name: 'maxu', ops: [{ op: 0x732a80, w: 3 }], regs: [2, 8, 10], setup: null, cmp: [2] },
+  { name: 'maxs', ops: [{ op: 0x5399a0, w: 3 }], regs: [9, 10], setup: null, cmp: [9] },
+  { name: 'divu', ops: [{ op: 0xc22a80, w: 3 }], regs: [2, 8, 10], setup: null, cmp: [2] },
+  { name: 'fcmp', ops: [{ op: 0x5bb800, w: 3 }], regs: [], setup: null, cmp: [], psw: true },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

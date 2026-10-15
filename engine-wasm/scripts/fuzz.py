@@ -151,6 +151,14 @@ def classify(op):
             return ('band',)
         if e == 0x20000 and (op & 0xF10000) == 0xC10000:
             return ('movbr',)
+        if e == 0x20000 and (op & 0xF10000) == 0x710000:
+            return ('maxu',)
+        if e == 0x20000 and (op & 0xF10000) == 0x510000:
+            return ('maxs',)
+        if e == 0x20000 and (op & 0xF10000) == 0xC00000:
+            return ('divu',)
+        if e == 0xA0000 and (op & 0xF10000) == 0x510000:
+            return ('fcmp',)
         if (op >> 16) == 0xB0 and (op & 15) == 0:
             return ('addx8',)
         if e == 0x20000 and (op & 0xF10000) == 0xF00000:
@@ -207,6 +215,7 @@ EXPECT = {
     'br-bbrn': 'n_handler24', 'minu': 'a_handler1',
     'br-bgez12': 'n_handler39', 'fadd': 'n_handler10', 'band': 'n_handler20', 'movbr': 'a_handler8',
     'addx8': 'n_handler16', 'lsiu': 'r_handler58', 'rems': 'a_handler58', 'bor': 'a_handler52', 'sexpn': '_handler26', 'ftrunc': '_handler55',
+    'maxu': 'r_handler63', 'maxs': 'r_handler62', 'divu': 'a_handler57', 'fcmp': '_handler59',
     'muluhf': 'a_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',

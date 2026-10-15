@@ -1,6 +1,6 @@
-// JIT trace emitter (production, 50mips Phase 2). 78 shapes, routing proven
-// by full 24-bit fuzz vs c_handler7 (9.0M/0 misroutes), emission proven per
-// shape (68/68 micro suites). Kill switch: callers simply never call.
+// JIT trace emitter (production, 50mips Phase 2). 82 shapes, routing proven
+// by full 24-bit fuzz vs c_handler7 (9.1M/0 misroutes), emission proven per
+// shape (72/72 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -10,7 +10,7 @@ export const OP = {
   local_get: 0x20, local_set: 0x21,
   i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x49, i32_lt_s: 0x48, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, local_tee: 0x22, i32_extend16: 0xC1, i32_clz: 0x67, i64_const: 0x42, i64_mul: 0x7E, i64_shr_u: 0x88, i32_wrap: 0xA7, i64_extend_u: 0xAD, i64_add: 0x7C, i64_shl: 0x86,
   i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76, i32_shr_s: 0x75,
-  i32_load: 0x28, i32_store: 0x36, f32_load: 0x2A, f32_store: 0x38, f32_add: 0x92, f32_const: 0x43, f32_trunc: 0x8F, i32_rem_s: 0x6F, f32_mul: 0x94, f32_reinterpret: 0xBE,
+  i32_load: 0x28, i32_store: 0x36, f32_load: 0x2A, f32_store: 0x38, f32_add: 0x92, f32_const: 0x43, f32_trunc: 0x8F, i32_rem_s: 0x6F, f32_mul: 0x94, f32_reinterpret: 0xBE, f32_ne: 0x5C, f32_lt: 0x5D, i32_div_u: 0x6E, i32_gt_u: 0x4B, i32_gt_s: 0x4A,
   global_get: 0x23, global_set: 0x24, unreachable_: 0x00, nop_: 0x01, drop: 0x1a,
 };
 export const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
@@ -174,6 +174,10 @@ export function classify(op) {
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0) return { k: 'band', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // n_handler20 (br[t] = br[r]&br[s])
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xC10000) return { k: 'movbr', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler8 (if (!br[s]) ar[t]=ar[r])
     if (lo === 0 && (op >> 16) === 0xB0) return { k: 'addx8', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // n_handler16: (r<<3)+s
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x710000) return { k: 'maxu', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // r_handler63: max(r,s) unsigned
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x510000) return { k: 'maxs', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // r_handler62: max(r,s) signed
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xC00000) return { k: 'divu', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler57: unsigned div (div0 exits; no overflow case)
+    if (lo === 0 && e === 0xA0000 && (op & 0xF10000) === 0x510000) return { k: 'fcmp', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // _handler59: br[t] = isnan(r)|isnan(s)|(r<s)
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xF00000) return { k: 'rems', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler58: signed rem (div0/overflow exit)
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x200000) return { k: 'bor', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler52: br[t] = br[r]|br[s]
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x210000) return { k: 'sexpn', t: (op >> 12) & 15, r: (op >> 8) & 15, rr: (((op >> 4) & 15) + 7) >>> 0 }; // _handler26: if bit set, sign-expand
@@ -352,6 +356,33 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       cc2(P(k.t)); cc2(CBASE + 272 + k.r * 4); B.push(OP.f32_load, 0x02, 0x00);
       B.push(OP.f32_const); for (const byte of new Uint8Array(new Uint32Array([k.sc]).buffer)) B.push(byte);
       B.push(OP.f32_mul, OP.f32_trunc, 0xFC, 0x01, OP.i32_store, 0x02, 0x00); // sat_u subop is 0x01 (0x02 is f64 - caught by micro36)
+    }
+    else if (k.k === 'maxu' || k.k === 'maxs') { // r_handler63/62: ar[t] = max(ar[r],ar[s]) (un)signed
+      ld(P(k.r)); ld(P(k.s)); B.push(k.k === 'maxu' ? OP.i32_gt_u : OP.i32_gt_s, OP.if_, 0x40);
+      cc2(P(k.t)); ld(P(k.r)); B.push(OP.i32_store, 0x02, 0x00, OP.else_);
+      cc2(P(k.t)); ld(P(k.s)); B.push(OP.i32_store, 0x02, 0x00, OP.end);
+    }
+    else if (k.k === 'divu') { // a_handler57: ar[t] = ar[r]/ar[s] unsigned; div0 exits (WASM div_u traps like rem_s)
+      ld(P(k.s)); B.push(OP.i32_eqz, OP.if_, 0x40);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
+      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); }
+      B.push(OP.return_, OP.end);
+      cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_div_u, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'fcmp') { // _handler59: br[t] = isnan(r)|isnan(s)|(r<s); newbit is i32 so local0 tee is legal
+      cc2(CBASE + 336 + 16); cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
+      c(1 << k.t); c(-1); B.push(OP.i32_xor, OP.i32_and, OP.i32_store, 0x02, 0x00);
+      cc2(CBASE + 272 + k.r * 4); B.push(OP.f32_load, 0x02, 0x00);
+      cc2(CBASE + 272 + k.r * 4); B.push(OP.f32_load, 0x02, 0x00);
+      B.push(OP.f32_ne);
+      cc2(CBASE + 272 + k.s * 4); B.push(OP.f32_load, 0x02, 0x00);
+      cc2(CBASE + 272 + k.s * 4); B.push(OP.f32_load, 0x02, 0x00);
+      B.push(OP.f32_ne);
+      cc2(CBASE + 272 + k.r * 4); B.push(OP.f32_load, 0x02, 0x00);
+      cc2(CBASE + 272 + k.s * 4); B.push(OP.f32_load, 0x02, 0x00);
+      B.push(OP.f32_lt, OP.i32_or, OP.i32_or, OP.local_tee, 0x00, OP.drop);
+      cc2(CBASE + 336 + 16); cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
+      B.push(OP.local_get, 0x00); c(k.t); B.push(OP.i32_shl, OP.i32_or, OP.i32_store, 0x02, 0x00);
     }
     else if (k.k === 'minu') { // a_handler1: ar[t] = min(ar[r],ar[s]) unsigned
       ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_lt_u, OP.if_, 0x40);
