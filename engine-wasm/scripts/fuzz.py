@@ -82,6 +82,8 @@ def classify(op):
         return ('br-bbsi',)
     if lo == 7 and (op & 61440) == 49152:
         return ('br-bbr',)
+    if lo == 7 and (op & 61440) == 16384:
+        return ('br-bbrn',)
     if lo == 7 and (op & 61440) == 20480:
         return ('br-bban',)
     if lo == 5:
@@ -125,6 +127,8 @@ def classify(op):
             return ('srl',)
         if e == 0 and f == 0x200000 and b20 != 0:
             return ('xor',)
+        if (op & 0xF10000) == 0x610000 and e == 0x20000:
+            return ('minu',)
         if (op & 0xF10000) == 0x910000 and e == 0x20000:
             return ('movnez',)
         if (op & 0xF10000) == 0xA00000 and e == 0x20000:
@@ -134,6 +138,8 @@ def classify(op):
         if e == 0 and f == 0x800000 and b20 == 0:
             return ('add',)
         if e == 0 and f == 0 and b20 == 0 and (op & 61440) == 0 and (op & 240) == 240:
+            return ('callEnd',)
+        if e == 0 and f == 0 and b20 == 0 and (op & 61440) == 0 and (op & 240) == 144:
             return ('callEnd',)
         if (op >> 16) == 0x60 and (op & 0xF00) == 0:
             return ('neg',)
@@ -178,6 +184,7 @@ EXPECT = {
     'wsar': '_handler45', 'ssl': '_handler30',
     'subx4': '_handler52', 'subx8': '_handler53',
     'br-bgetbls': 'n_handler36', 's32c1i': '_handler18',
+    'br-bbrn': 'n_handler24', 'minu': 'a_handler1',
     'muluhf': 'a_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',

@@ -164,6 +164,8 @@ const MICROS = [
   { name: 'subx8', ops: [{ op: 0xf0a990, w: 3 }], regs: [9, 10], setup: null, cmp: [10] },
   { name: 'bgetbls', ops: [{ op: 0x518e6, w: 3 }], regs: [8], setup: (V) => { V[8] = 0; }, cmp: [8] },
   { name: 's32c1i', ops: [{ op: 0x3fe502, w: 3 }], regs: [0, 5], setup: (V) => { V[5] = DATA + 8; }, cmp: [0, 5], mem: [DATA + 260] },
+  { name: 'bbrn', ops: [{ op: 0xb4387, w: 3 }], regs: [3, 8], setup: (V) => { V[3] = 0; }, cmp: [3, 8] },
+  { name: 'minu', ops: [{ op: 0x638200, w: 3 }], regs: [0, 2, 8], setup: null, cmp: [8] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

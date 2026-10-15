@@ -1,6 +1,6 @@
-// JIT trace emitter (production, 50mips Phase 2). 66 shapes, routing proven
-// by full 24-bit fuzz vs c_handler7 (8.8M/0 misroutes), emission proven per
-// shape (56/56 micro suites). Kill switch: callers simply never call.
+// JIT trace emitter (production, 50mips Phase 2). 68 shapes, routing proven
+// by full 24-bit fuzz vs c_handler7 (8.9M/0 misroutes), emission proven per
+// shape (58/58 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -51,6 +51,8 @@ export function classify(op) {
     return { k: 'br', b: 'bbsi', r: f8, s: -1, rr: ((((op >> 12) & 1) << 4) | ((op >> 4) & 15)) >>> 0, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 61440) === 49152) // bbr n_handler45 (taken iff (~ar[r])&ar[s] != 0; full-nibble: 0xD sibling is n28)
     return { k: 'br', b: 'bbr', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
+  if (lo === 7 && (op & 61440) === 16384) // bbrn n_handler24 (taken iff ((~ar[r])&ar[s])==0; full-nibble 0x4)
+    return { k: 'br', b: 'bbrn', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
   if (lo === 7 && (op & 61440) === 20480) // bban n_handler26 (taken iff (ar[r]&(1<<(ar[s]&31)))==0; full-nibble: 0x4 sibling is n24)
     return { k: 'br', b: 'bban', r: f8, s: f4, imm: sext8((op >> 16) & 255) };
   if (lo === 2 && (op & 61440) === 4096) { // l16ui-zero r_handler43 (MR16 zero-extended)
@@ -159,12 +161,14 @@ export function classify(op) {
     if (e === 0 && f === 0x410000) return { k: 'srl', t: f12, s: f4, imm: (op >> 8) & 15 }; // _handler39 SRLI: ar[t]=ar[s]>>imm4 (NOT register shift!)
     if (e === 0 && f === 0x200000 && b20 !== 0) return { k: 'xor', t: f12, r: f8, s: f4 }; // c_handler4 (or-split on b20)
     if (e === 0 && f === 0 && b20 === 0 && (op & 61440) === 0 && (op & 240) === 240) return { k: 'callEnd' }; // r_handler7 JX: trace boundary
+    if (e === 0 && f === 0 && b20 === 0 && (op & 61440) === 0 && (op & 240) === 144) return { k: 'callEnd' }; // a_handler62 RETQ: trace boundary
     if (lo === 0 && (op >> 16) === 0x60 && (op & 0xF00) === 0) return { k: 'neg', t: (op >> 12) & 15, r: (op >> 4) & 15 }; // a_handler44 (tight: hi+bits8-11)
     if (lo === 0 && (op >> 16) === 0xE0) return { k: 'subx4', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // _handler52: (r<<2)-s
     if (lo === 0 && (op >> 16) === 0xF0) return { k: 'subx8', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // _handler53: (r<<3)-s
     if (lo === 0 && e === 0 && (op & 0xE10000) === 0x400000 && (op & 0x10F000) === 0xF000) return { k: 'nsa', t: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler47 (== clz, incl. 0->32)
     if (lo === 0 && e === 0 && (op & 0xE10000) === 0x400000 && (op & 0x10F000) === 0x1000) return { k: 'wsar', t: (op >> 8) & 15 }; // _handler45 (SAR <= ar[t]&31)
     if (lo === 0 && (op >> 16) === 0xA1 && (op & 0xF0) === 0) return { k: 'ssl', t: (op >> 12) & 15, r: (op >> 8) & 15 }; // _handler30 (ar[t] = ar[r] << (32-(63&EXC_CAUSE)))
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x610000) return { k: 'minu', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler1: min(r,s) unsigned
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x910000) return { k: 'movnez', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler16
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xA00000) return { k: 'muluhf', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler43 (formula as coded: NOT exact muluh, +0x10000 in ~7%; verified vs bigint)
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x810000) return { k: 'moveqz', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler6
@@ -270,6 +274,11 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'addN') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'mull') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_mul, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'neg') { cc2(P(k.t)); ld(P(k.r)); c(-1); B.push(OP.i32_xor); c(1); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); } // a_handler44: ~r+1
+    else if (k.k === 'minu') { // a_handler1: ar[t] = min(ar[r],ar[s]) unsigned
+      ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_lt_u, OP.if_, 0x40);
+      cc2(P(k.t)); ld(P(k.r)); B.push(OP.i32_store, 0x02, 0x00, OP.else_);
+      cc2(P(k.t)); ld(P(k.s)); B.push(OP.i32_store, 0x02, 0x00, OP.end);
+    }
     else if (k.k === 'subx4' || k.k === 'subx8') { // _handler52/53: ar[t] = (ar[r]<<N)-ar[s] (sub order: deeper-top, natural here)
       cc2(P(k.t)); ld(P(k.r)); c(k.k === 'subx4' ? 2 : 3); B.push(OP.i32_shl); ld(P(k.s)); B.push(OP.i32_sub, OP.i32_store, 0x02, 0x00);
     }
@@ -458,6 +467,8 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
         ld(P(br.r)); c(NF_SHIFT_TABLE[br.t]); B.push(OP.i32_eq);
       } else if (br.b === 'bbr') {
         ld(P(br.r)); c(-1); B.push(OP.i32_xor); ld(P(br.s)); B.push(OP.i32_and, OP.i32_eqz, OP.i32_eqz);
+      } else if (br.b === 'bbrn') {
+        ld(P(br.r)); c(-1); B.push(OP.i32_xor); ld(P(br.s)); B.push(OP.i32_and, OP.i32_eqz);
       } else if (br.b === 'bltz') {
         ld(P(br.r)); c(0); B.push(OP.i32_lt_s);
       } else if (br.b === 'bnetbl') {
@@ -684,6 +695,8 @@ export async function buildPage(Sc, ctx) {
           H.ld(H.P(br.r)); H.cc2(br.rr); BB.push(H.OP.i32_shr_u); H.cc2(1); BB.push(H.OP.i32_and);
         } else if (br.b === 'bbr') {
           H.ld(H.P(br.r)); H.cc2(-1); BB.push(H.OP.i32_xor); H.ld(H.P(br.s)); BB.push(H.OP.i32_and, H.OP.i32_eqz, H.OP.i32_eqz);
+        } else if (br.b === 'bbrn') {
+          H.ld(H.P(br.r)); H.cc2(-1); BB.push(H.OP.i32_xor); H.ld(H.P(br.s)); BB.push(H.OP.i32_and, H.OP.i32_eqz);
         } else if (br.b === 'bltz') {
           H.ld(H.P(br.r)); H.cc2(0); BB.push(H.OP.i32_lt_s);
         } else if (br.b === 'bgetbl') {
