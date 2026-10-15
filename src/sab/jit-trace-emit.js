@@ -1,6 +1,6 @@
-// JIT trace emitter (production, 50mips Phase 2). 62 shapes, routing proven
+// JIT trace emitter (production, 50mips Phase 2). 64 shapes, routing proven
 // by full 24-bit fuzz vs c_handler7 (8.7M/0 misroutes), emission proven per
-// shape (52/52 micro suites). Kill switch: callers simply never call.
+// shape (54/54 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -154,6 +154,8 @@ export function classify(op) {
     if (e === 0 && f === 0x200000 && b20 !== 0) return { k: 'xor', t: f12, r: f8, s: f4 }; // c_handler4 (or-split on b20)
     if (e === 0 && f === 0 && b20 === 0 && (op & 61440) === 0 && (op & 240) === 240) return { k: 'callEnd' }; // r_handler7 JX: trace boundary
     if (lo === 0 && (op >> 16) === 0x60 && (op & 0xF00) === 0) return { k: 'neg', t: (op >> 12) & 15, r: (op >> 4) & 15 }; // a_handler44 (tight: hi+bits8-11)
+    if (lo === 0 && (op >> 16) === 0xE0) return { k: 'subx4', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // _handler52: (r<<2)-s
+    if (lo === 0 && (op >> 16) === 0xF0) return { k: 'subx8', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // _handler53: (r<<3)-s
     if (lo === 0 && e === 0 && (op & 0xE10000) === 0x400000 && (op & 0x10F000) === 0xF000) return { k: 'nsa', t: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler47 (== clz, incl. 0->32)
     if (lo === 0 && e === 0 && (op & 0xE10000) === 0x400000 && (op & 0x10F000) === 0x1000) return { k: 'wsar', t: (op >> 8) & 15 }; // _handler45 (SAR <= ar[t]&31)
     if (lo === 0 && (op >> 16) === 0xA1 && (op & 0xF0) === 0) return { k: 'ssl', t: (op >> 12) & 15, r: (op >> 8) & 15 }; // _handler30 (ar[t] = ar[r] << (32-(63&EXC_CAUSE)))
@@ -262,6 +264,9 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'addN') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'mull') { cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_mul, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'neg') { cc2(P(k.t)); ld(P(k.r)); c(-1); B.push(OP.i32_xor); c(1); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00); } // a_handler44: ~r+1
+    else if (k.k === 'subx4' || k.k === 'subx8') { // _handler52/53: ar[t] = (ar[r]<<N)-ar[s] (sub order: deeper-top, natural here)
+      cc2(P(k.t)); ld(P(k.r)); c(k.k === 'subx4' ? 2 : 3); B.push(OP.i32_shl); ld(P(k.s)); B.push(OP.i32_sub, OP.i32_store, 0x02, 0x00);
+    }
     else if (k.k === 'nsa') { cc2(P(k.t)); ld(P(k.s)); B.push(OP.i32_clz, OP.i32_store, 0x02, 0x00); } // a_handler47: NSA == clz
     else if (k.k === 'wsar') { // _handler45: ce=31&ar[t]; EXC_CAUSE=32-ce; sar_m32=ce; pending=1
       if (sarOff == null) throw new Error('unemittable op 0x' + e.op.toString(16) + ' (wsar needs sarOff)');

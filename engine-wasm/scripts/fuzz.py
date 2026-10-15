@@ -133,6 +133,10 @@ def classify(op):
             return ('callEnd',)
         if (op >> 16) == 0x60 and (op & 0xF00) == 0:
             return ('neg',)
+        if (op >> 16) == 0xE0 and (op & 15) == 0:
+            return ('subx4',)
+        if (op >> 16) == 0xF0 and (op & 15) == 0:
+            return ('subx8',)
         if e == 0 and (op & 0xE10000) == 0x400000 and (op & 0x10F000) == 0xF000:
             return ('nsa',)
         if e == 0 and (op & 0xE10000) == 0x400000 and (op & 0x10F000) == 0x1000:
@@ -168,6 +172,7 @@ EXPECT = {
     's16i': '_handler17', 'br-bgetbl': 'n_handler38', 'br-bban': 'n_handler26', 'neg': 'a_handler44',
     'nsa': 'a_handler47',
     'wsar': '_handler45', 'ssl': '_handler30',
+    'subx4': '_handler52', 'subx8': '_handler53',
     'muluhf': 'a_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',

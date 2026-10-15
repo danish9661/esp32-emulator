@@ -160,6 +160,8 @@ const MICROS = [
   { name: 'muluhf', ops: [{ op: 0xa23360, w: 3 }], regs: [3, 6], setup: null, cmp: [3] },
   { name: 'wsar', ops: [{ op: 0x401400, w: 3 }], regs: [4], setup: null, cmp: [4] },
   { name: 'ssl', ops: [{ op: 0xa1aa00, w: 3 }], regs: [10], setup: null, cmp: [10] },
+  { name: 'subx4', ops: [{ op: 0xe0a990, w: 3 }], regs: [9, 10], setup: null, cmp: [10] },
+  { name: 'subx8', ops: [{ op: 0xf0a990, w: 3 }], regs: [9, 10], setup: null, cmp: [10] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];

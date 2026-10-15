@@ -20,6 +20,7 @@ const CASES = [
   [0x40f550, 'nsa'],
   [0xa23360, 'muluhf'],
   [0x401400, 'wsar'], [0xa1aa00, 'ssl'],
+  [0xe0a990, 'subx4'], [0xf0a990, 'subx8'],
 ];
 let bad = 0;
 for (const [op, want] of CASES) {
