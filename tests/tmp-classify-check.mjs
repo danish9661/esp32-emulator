@@ -23,11 +23,12 @@ const CASES = [
   [0xe0a990, 'subx4'], [0xf0a990, 'subx8'],
   [0x518e6, 'bgetbls'], [0x3fe502, 's32c1i'],
   [0xb4387, 'bbrn'], [0x638200, 'minu'], [0x90, 'callEnd'],
+  [0x49ad6, 'bgez12'], [0xabd00, 'fadd'], [0x2ad00, 'band'], [0xc33020, 'movbr'],
 ];
 let bad = 0;
 for (const [op, want] of CASES) {
   const got = classify(op).k === 'br' ? classify(op).b : classify(op).k;
-  const wantK = ['bne', 'bge', 'bgeu', 'blt', 'bltu', 'beq', 'bnez', 'beqz', 'bnezn', 'bbci', 'beqtbl', 'bnetbl', 'bbsi', 'bbr', 'bltz', 'bgetbl', 'bban', 'bgetbls'].includes(want) ? want : want;
+  const wantK = ['bne', 'bge', 'bgeu', 'blt', 'bltu', 'beq', 'bnez', 'beqz', 'bnezn', 'bbci', 'beqtbl', 'bnetbl', 'bbsi', 'bbr', 'bltz', 'bgetbl', 'bban', 'bgetbls', 'bgez12'].includes(want) ? want : want;
   if (got !== wantK) { console.log(`MISMATCH 0x${op.toString(16)}: got ${got}, want ${wantK}`); bad++; }
 }
 console.log(bad ? `CLASSIFY-CHECK FAILED (${bad})` : `CLASSIFY-CHECK passed (${CASES.length} cases)`);

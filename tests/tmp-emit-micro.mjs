@@ -166,6 +166,10 @@ const MICROS = [
   { name: 's32c1i', ops: [{ op: 0x3fe502, w: 3 }], regs: [0, 5], setup: (V) => { V[5] = DATA + 8; }, cmp: [0, 5], mem: [DATA + 260] },
   { name: 'bbrn', ops: [{ op: 0xb4387, w: 3 }], regs: [3, 8], setup: (V) => { V[3] = 0; }, cmp: [3, 8] },
   { name: 'minu', ops: [{ op: 0x638200, w: 3 }], regs: [0, 2, 8], setup: null, cmp: [8] },
+  { name: 'bgez12', ops: [{ op: 0x49ad6, w: 3 }], regs: [10], setup: (V) => { V[10] = 0x80000000; }, cmp: [10] },
+  { name: 'fadd', ops: [{ op: 0xabd00, w: 3 }], regs: [], setup: null, cmp: [], fcmp: [13] },
+  { name: 'band', ops: [{ op: 0x2ad00, w: 3 }], regs: [], setup: null, cmp: [], psw: true },
+  { name: 'movbr', ops: [{ op: 0xc33020, w: 3 }], regs: [0, 3], setup: null, cmp: [3] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];
@@ -195,6 +199,7 @@ for (const m of MICROS) {
       if (m.fcmp) for (const r of m.fcmp) o['f' + r] = memU32()[((CBASE + 272) >>> 2) + r] >>> 0;
       if (m.mem) for (const a of m.mem) o['m' + a.toString(16)] = ex.core_read_uint32(CORE, a) >>> 0;
       if (m.spec3) o.sar = memU32()[((CBASE + 336) >>> 2) + 3] >>> 0;
+      if (m.psw) o.psw = memU32()[((CBASE + 336) >>> 2) + 4] >>> 0;
       return o;
     };
     memU32().set(stateA, CBASE);

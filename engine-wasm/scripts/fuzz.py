@@ -96,6 +96,8 @@ def classify(op):
         return ('br-bnetbl',)
     if lo == 6 and (op & 48) == 16 and (op & 192) == 128:
         return ('br-bltz',)
+    if lo == 6 and (op & 48) == 16 and (op & 192) == 192:
+        return ('br-bgez12',)
     if lo == 6 and (op & 48) == 48 and (op & 192) == 192:
         return ('br-bgetbl',)
     if lo == 6 and (op & 48) == 32 and (op & 192) == 192:
@@ -141,6 +143,12 @@ def classify(op):
             return ('callEnd',)
         if e == 0 and f == 0 and b20 == 0 and (op & 61440) == 0 and (op & 240) == 144:
             return ('callEnd',)
+        if e == 0xA0000 and (op & 0xF10000) == 0:
+            return ('fadd',)
+        if e == 0x20000 and (op & 0xF10000) == 0:
+            return ('band',)
+        if e == 0x20000 and (op & 0xF10000) == 0xC10000:
+            return ('movbr',)
         if (op >> 16) == 0x60 and (op & 0xF00) == 0:
             return ('neg',)
         if (op >> 16) == 0xE0 and (op & 15) == 0:
@@ -185,6 +193,7 @@ EXPECT = {
     'subx4': '_handler52', 'subx8': '_handler53',
     'br-bgetbls': 'n_handler36', 's32c1i': '_handler18',
     'br-bbrn': 'n_handler24', 'minu': 'a_handler1',
+    'br-bgez12': 'n_handler39', 'fadd': 'n_handler10', 'band': 'n_handler20', 'movbr': 'a_handler8',
     'muluhf': 'a_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',
