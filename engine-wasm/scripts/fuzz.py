@@ -48,6 +48,8 @@ def classify(op):
         return ('movi',)
     if lo == 2 and (op & 61440) == 53248:
         return ('addmi',)
+    if lo == 2 and (op & 61440) == 57344:
+        return ('s32c1i',)
     if lo == 2 and (op & 61440) == 20480:
         return ('s16i',)
     if lo == 2 and (op & 61440) == 16384:
@@ -94,6 +96,8 @@ def classify(op):
         return ('br-bltz',)
     if lo == 6 and (op & 48) == 48 and (op & 192) == 192:
         return ('br-bgetbl',)
+    if lo == 6 and (op & 48) == 32 and (op & 192) == 192:
+        return ('br-bgetbls',)
     if lo == 6 and (op & 48) == 32 and (op & 192) == 0:
         return ('br-beqtbl',)
     if lo == 6 and (op & 48) == 48 and (op & 192) == 0:
@@ -173,6 +177,7 @@ EXPECT = {
     'nsa': 'a_handler47',
     'wsar': '_handler45', 'ssl': '_handler30',
     'subx4': '_handler52', 'subx8': '_handler53',
+    'br-bgetbls': 'n_handler36', 's32c1i': '_handler18',
     'muluhf': 'a_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',
