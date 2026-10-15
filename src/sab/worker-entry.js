@@ -596,6 +596,15 @@ function syncClockState(exp) {
 // busy recorder) resolve to interpreter coverage. Never throws.
 function jitCompileKick(jd, core) {
   try {
+    // Miss-path throttle: each kick copies the ~49KB recorder ring
+    // (findTrace slice+scan). Unthrottled on cold code this runs ~2x per
+    // step and blows wall-clock test budgets (onewire presence=0 with
+    // compiles=0). Kicks only attempt compiles; the interpreter covers all
+    // execution, so delaying attempts is always sound.
+    const now = Date.now();
+    const lk = jd._lastKick || (jd._lastKick = [0, 0]);
+    if (now - lk[core] < 10) return;
+    lk[core] = now;
     const pc = jd.pcOf(core);
     const k = core + ':' + pc;
     if (jd.cache.has(k) || jd.uncompilable.has(k)) return;
