@@ -85,7 +85,7 @@ const spec72 = () => memU32()[((CBASE + SPEC_OFF) >>> 2) + 72];
 const wb0 = spec72();
 const P = (reg) => ((CBASE + PHYS_OFF) >>> 2) + ((((wb0 << 2) + reg) & 63));
 const wc0 = L._wasmCores[CORE];
-const stateA = memU32().slice(CBASE, CBASE + CORE_SZ);
+const stateA = memU32().slice(CBASE >>> 2, (CBASE >>> 2) + (CORE_SZ >>> 2)); // ELEMENT indices (byte addr >>> 2)
 const stateB = memU32().slice(0, CORE_SZ);
 const stateC = memU32().slice(CORE_SZ, 2 * CORE_SZ);
 const live = Array.from(memU32().slice(((CBASE + 336) >>> 2), ((CBASE + 336) >>> 2) + 256));
@@ -113,7 +113,7 @@ const MICROS = [
   { name: 's32in', ops: [{ op: 0x1349, w: 2 }], regs: [3, 4], setup: (V) => { V[3] = DATA + 8; }, cmp: [3, 4], mem: [DATA + 12] },
   { name: 'extui', ops: [{ op: 0x75a820, w: 3 }], regs: [2, 10], setup: null, cmp: [10] },
   { name: 'alu3', ops: [{ op: 0x1022a0, w: 3 }, { op: 0x2088a0, w: 3 }, { op: 0xc0aa30, w: 3 }], regs: [2, 3, 8, 10], setup: null, cmp: [2, 8, 10] },
-  { name: 'rsrcc', ops: [{ op: 0x3ea20, w: 3 }], regs: [2], setup: null, cmp: [2] },
+  { name: 'rsrcc', ops: [{ op: 0x3ea20, w: 3 }], regs: [2], setup: null, cmp: [2], ccount: true }, // time-source: mechanism-checked, not value-compared
   { name: 'bne-robust', ops: [{ op: 0xFF9DE7, w: 3 }], regs: [13, 14], setup: (V) => { V[13] = V[14]; }, cmp: [13, 14] },
   { name: 'ssai-src', ops: [{ op: 0x404600, w: 3 }, { op: 0x818880, w: 3 }], regs: [7, 8], setup: null, cmp: [7, 8], spec3: true },
   { name: 'l32r', ops: [{ op: 0xfa5381, w: 3 }], regs: [8], setup: null, cmp: [8], lit: 0xfa5381 },
@@ -170,6 +170,12 @@ const MICROS = [
   { name: 'fadd', ops: [{ op: 0xabd00, w: 3 }], regs: [], setup: null, cmp: [], fcmp: [13] },
   { name: 'band', ops: [{ op: 0x2ad00, w: 3 }], regs: [], setup: null, cmp: [], psw: true },
   { name: 'movbr', ops: [{ op: 0xc33020, w: 3 }], regs: [0, 3], setup: null, cmp: [3] },
+  { name: 'addx8', ops: [{ op: 0xb0aaf0, w: 3 }], regs: [10, 15], setup: null, cmp: [10] },
+  { name: 'lsiu', ops: [{ op: 0x238903, w: 3 }], regs: [9], setup: (V) => { V[9] = DATA; }, cmp: [9], fcmp: [0], mem: [DATA + 140] },
+  { name: 'rems', ops: [{ op: 0xf2b100, w: 3 }], regs: [0, 1, 11], setup: null, cmp: [11] },
+  { name: 'bor', ops: [{ op: 0x220000, w: 3 }], regs: [], setup: null, cmp: [], psw: true },
+  { name: 'sexpn', ops: [{ op: 0x239a00, w: 3 }], regs: [9, 10], setup: null, cmp: [9] },
+  { name: 'ftrunc', ops: [{ op: 0x9a2500, w: 3 }], regs: [2], setup: null, cmp: [2] },
 ];
 globalThis.__l32log = 6;
 const savedD = [];
@@ -202,12 +208,13 @@ for (const m of MICROS) {
       if (m.psw) o.psw = memU32()[((CBASE + 336) >>> 2) + 4] >>> 0;
       return o;
     };
-    memU32().set(stateA, CBASE);
+    memU32().set(stateA, CBASE >>> 2);
     for (const r of m.regs) memU32()[P(r)] = V[r];
     if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A5A5A5);
     let a;
-    try { fn(); a = snap(); } catch (e) { fail++; console.log(`[micro] ${m.name} t=${t} JIT threw: ${e.message}`); break; }
-    memU32().set(stateA, CBASE);
+    let ccJit = 0;
+    try { fn(); if (m.ccount) ccJit = memU32()[((CBASE + 336) >>> 2) + 234] >>> 0; a = snap(); } catch (e) { fail++; console.log(`[micro] ${m.name} t=${t} JIT threw: ${e.message}`); break; }
+    memU32().set(stateA, CBASE >>> 2);
     for (const r of m.regs) memU32()[P(r)] = V[r];
     if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A5A5A5);
     wc0.PC = SCRATCH;
@@ -218,9 +225,17 @@ for (const m of MICROS) {
       if ((wc0.PC >>> 0) !== (expect >>> 0)) { bad = true; break; }
     }
     if (bad || (spec72() >>> 0) !== (wb0 >>> 0)) { discard++; continue; }
+    let ccOra = 0;
+    if (m.ccount) ccOra = memU32()[((CBASE + 336) >>> 2) + 234] >>> 0;
     const b = snap();
     const ka = Object.keys(a);
-    if (ka.every((k) => a[k] === b[k])) pass++;
+    if (m.ccount) {
+      // CCOUNT advances on every core_run sync (wall-driven) while JIT reads
+      // the pre-sync word: exact JIT-vs-oracle equality is impossible. Prove
+      // the mechanism instead: each run returns its own live word.
+      if (a['r' + m.regs[0]] === ccJit && b['r' + m.regs[0]] === ccOra) pass++;
+      else { fail++; console.log(`[micro] ${m.name} t=${t} CCOUNT-MECHANISM jit=${a['r' + m.regs[0]]}~${ccJit} ora=${b['r' + m.regs[0]]}~${ccOra}`); if (fail > 2) break; }
+    } else if (ka.every((k) => a[k] === b[k])) pass++;
     else { fail++; console.log(`[micro] ${m.name} t=${t} MISMATCH jit=${JSON.stringify(a)} ora=${JSON.stringify(b)}`); if (fail > 2) break; }
   }
   console.log(`[micro] ${m.name}: pass=${pass} discard=${discard} fail=${fail}`);
@@ -229,7 +244,7 @@ for (const m of MICROS) {
 }
 for (let i = 0; i < 32; i++) ex.core_write_uint8(CORE, SCRATCH + i, savedCode[i]);
 for (let i = 0; i < 8; i++) ex.core_write_uint32(CORE, DATA + i * 4, savedD[i]);
-memU32().set(stateA, CBASE);
+memU32().set(stateA, CBASE >>> 2);
 memU32().set(stateB, 0);
 memU32().set(stateC, CORE_SZ);
 try { ex.native_set_clock_state(chip.cycles >>> 0); } catch {}

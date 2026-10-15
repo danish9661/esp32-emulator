@@ -1,6 +1,6 @@
-// JIT trace emitter (production, 50mips Phase 2). 72 shapes, routing proven
+// JIT trace emitter (production, 50mips Phase 2). 78 shapes, routing proven
 // by full 24-bit fuzz vs c_handler7 (9.0M/0 misroutes), emission proven per
-// shape (62/62 micro suites). Kill switch: callers simply never call.
+// shape (68/68 micro suites). Kill switch: callers simply never call.
 // Context: { CORE, CBASE, wb, recLoop:[begin,end,count] }.
 export function uleb(n) { const o = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; }
 export function sleb(n) { const o = []; let more = true; while (more) { let b = n & 0x7f; n >>= 7; if ((n === 0 && (b & 0x40) === 0) || (n === -1 && (b & 0x40) !== 0)) more = false; else b |= 0x80; o.push(b); } return o; }
@@ -10,7 +10,7 @@ export const OP = {
   local_get: 0x20, local_set: 0x21,
   i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_u: 0x49, i32_lt_s: 0x48, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, local_tee: 0x22, i32_extend16: 0xC1, i32_clz: 0x67, i64_const: 0x42, i64_mul: 0x7E, i64_shr_u: 0x88, i32_wrap: 0xA7, i64_extend_u: 0xAD, i64_add: 0x7C, i64_shl: 0x86,
   i32_add: 0x6a, i32_sub: 0x6b, i32_mul: 0x6c, i32_shl: 0x74, i32_shr_u: 0x76, i32_shr_s: 0x75,
-  i32_load: 0x28, i32_store: 0x36, f32_load: 0x2A, f32_store: 0x38, f32_add: 0x92,
+  i32_load: 0x28, i32_store: 0x36, f32_load: 0x2A, f32_store: 0x38, f32_add: 0x92, f32_const: 0x43, f32_trunc: 0x8F, i32_rem_s: 0x6F, f32_mul: 0x94, f32_reinterpret: 0xBE,
   global_get: 0x23, global_set: 0x24, unreachable_: 0x00, nop_: 0x01, drop: 0x1a,
 };
 export const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
@@ -74,6 +74,10 @@ export function classify(op) {
   if (lo === 2 && (op & 61440) === 57344) { // s32c1i _handler18 (cond store iff mem==SAR)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
     return { k: 's32c1i', t, s: ss, off };
+  }
+  if (lo === 3 && (op & 61440) === 32768) { // lsiu r_handler58 (f[s]=MR32(ar[r]+off); ar[r]+=off)
+    const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 2) >>> 0;
+    return { k: 'lsiu', t, s: ss, off };
   }
   if (lo === 2 && (op & 61440) === 20480) { // s16i _handler17 (half store, off<<1)
     const t = (op >> 4) & 15, ss = (op >> 8) & 15, off = (((op >> 16) & 255) << 1) >>> 0;
@@ -169,6 +173,11 @@ export function classify(op) {
     if (lo === 0 && e === 0xA0000 && (op & 0xF10000) === 0) return { k: 'fadd', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // n_handler10 (f[t] = f[r]+f[s])
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0) return { k: 'band', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // n_handler20 (br[t] = br[r]&br[s])
     if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xC10000) return { k: 'movbr', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler8 (if (!br[s]) ar[t]=ar[r])
+    if (lo === 0 && (op >> 16) === 0xB0) return { k: 'addx8', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // n_handler16: (r<<3)+s
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0xF00000) return { k: 'rems', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler58: signed rem (div0/overflow exit)
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x200000) return { k: 'bor', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // a_handler52: br[t] = br[r]|br[s]
+    if (lo === 0 && e === 0x20000 && (op & 0xF10000) === 0x210000) return { k: 'sexpn', t: (op >> 12) & 15, r: (op >> 8) & 15, rr: (((op >> 4) & 15) + 7) >>> 0 }; // _handler26: if bit set, sign-expand
+    if (lo === 0 && e === 0xA0000 && (op & 0xF10000) === 0x900000) return { k: 'ftrunc', t: (op >> 12) & 15, r: (op >> 8) & 15, sc: (((127 + ((op >> 4) & 15)) << 23) >>> 0) }; // _handler55: ar[t] = trunc_sat(f[r]*2^s)
     if (lo === 0 && (op >> 16) === 0x60 && (op & 0xF00) === 0) return { k: 'neg', t: (op >> 12) & 15, r: (op >> 4) & 15 }; // a_handler44 (tight: hi+bits8-11)
     if (lo === 0 && (op >> 16) === 0xE0) return { k: 'subx4', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // _handler52: (r<<2)-s
     if (lo === 0 && (op >> 16) === 0xF0) return { k: 'subx8', t: (op >> 12) & 15, r: (op >> 8) & 15, s: (op >> 4) & 15 }; // _handler53: (r<<3)-s
@@ -286,10 +295,14 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       cc2(CBASE + 272 + k.s * 4); B.push(OP.f32_load, 0x02, 0x00);
       B.push(OP.f32_add, OP.f32_store, 0x02, 0x00);
     }
-    else if (k.k === 'band') { // n_handler20: PS.bit[t] = PS.bit[r]&PS.bit[s] (PS = SPEC+4); two self-contained stores, no locals
-      cc2(CBASE + 336 + 16); cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
-      c(1 << k.t); c(-1); B.push(OP.i32_xor, OP.i32_and, OP.i32_store, 0x02, 0x00);
-      cc2(CBASE + 336 + 16); cc2(CBASE + 336 + 16); cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
+    else if (k.k === 'band') { // n_handler20: PS.bit[t] = PS.bit[r]&PS.bit[s]
+      // NOTE (micro33): the final or/and MUST combine the masked VALUE, not
+      // the address: [A,A,nb]+or stores A|nb (address leak!). Recompute the
+      // masked value as its own stack item: [A, masked, nb]+or.
+      cc2(CBASE + 336 + 16);
+      cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
+      c(1 << k.t); c(-1); B.push(OP.i32_xor, OP.i32_and);
+      cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
       c(k.r); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and);
       cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
       c(k.s); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and, OP.i32_and);
@@ -299,6 +312,46 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
       c(k.s); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and, OP.i32_eqz, OP.if_, 0x40);
       cc2(P(k.t)); ld(P(k.r)); B.push(OP.i32_store, 0x02, 0x00, OP.end);
+    }
+    else if (k.k === 'addx8') { // n_handler16: ar[t] = (ar[r]<<3)+ar[s]
+      cc2(P(k.t)); ld(P(k.r)); c(3); B.push(OP.i32_shl); ld(P(k.s)); B.push(OP.i32_add, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'lsiu') { // r_handler58: f[t] = MR32(ar[s]+off); ar[s] += off (float dst k.t, base k.s)
+      ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
+      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      B.push(OP.return_, OP.end);
+      cc2(CBASE + 272 + k.t * 4); c(CORE); B.push(OP.local_get, 0x00, OP.call, 0x02, OP.f32_reinterpret, OP.f32_store, 0x02, 0x00);
+      cc2(P(k.s)); B.push(OP.local_get, 0x00, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'rems') { // a_handler58: ar[t] = ar[r] % ar[s] signed; div0 AND INT_MIN%-1 exit (WASM rem_s traps, Rust wraps)
+      ld(P(k.s)); B.push(OP.i32_eqz);
+      ld(P(k.r)); c(-2147483648); B.push(OP.i32_eq);
+      ld(P(k.s)); c(-1); B.push(OP.i32_eq, OP.i32_and, OP.i32_or, OP.if_, 0x40);
+      branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
+      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); }
+      B.push(OP.return_, OP.end);
+      cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_rem_s, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'bor') { // a_handler52: PS.bit[t] = PS.bit[r]|PS.bit[s] (same addr/value discipline as band)
+      cc2(CBASE + 336 + 16);
+      cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
+      c(1 << k.t); c(-1); B.push(OP.i32_xor, OP.i32_and);
+      cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
+      c(k.r); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and);
+      cc2(CBASE + 336 + 16); B.push(OP.i32_load, 0x02, 0x00);
+      c(k.s); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and, OP.i32_or);
+      c(k.t); B.push(OP.i32_shl, OP.i32_or, OP.i32_store, 0x02, 0x00);
+    }
+    else if (k.k === 'sexpn') { // _handler26: ar[t] = bit? wa|mask : wa&~mask (ALWAYS writes; ~mask=(1<<rr)-1 at classify time)
+      ld(P(k.r)); B.push(OP.local_tee, 0x00); c(k.rr); B.push(OP.i32_shr_u); c(1); B.push(OP.i32_and, OP.if_, 0x40);
+      cc2(P(k.t)); B.push(OP.local_get, 0x00); c(-1); c(k.rr); B.push(OP.i32_shl, OP.i32_or, OP.i32_store, 0x02, 0x00, OP.else_);
+      cc2(P(k.t)); B.push(OP.local_get, 0x00); c((1 << k.rr) - 1); B.push(OP.i32_and, OP.i32_store, 0x02, 0x00, OP.end);
+    }
+    else if (k.k === 'ftrunc') { // _handler55: ar[t] = trunc_sat_u(f[r]*2^s) (Rust `as` saturates, like 0xFC ops)
+      cc2(P(k.t)); cc2(CBASE + 272 + k.r * 4); B.push(OP.f32_load, 0x02, 0x00);
+      B.push(OP.f32_const); for (const byte of new Uint8Array(new Uint32Array([k.sc]).buffer)) B.push(byte);
+      B.push(OP.f32_mul, OP.f32_trunc, 0xFC, 0x01, OP.i32_store, 0x02, 0x00); // sat_u subop is 0x01 (0x02 is f64 - caught by micro36)
     }
     else if (k.k === 'minu') { // a_handler1: ar[t] = min(ar[r],ar[s]) unsigned
       ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_lt_u, OP.if_, 0x40);

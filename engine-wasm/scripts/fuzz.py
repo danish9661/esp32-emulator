@@ -64,6 +64,8 @@ def classify(op):
         return ('l32i8',)
     if lo == 2 and (op & 61440) == 24576:
         return ('s32i8',)
+    if lo == 3 and (op & 61440) == 32768:
+        return ('lsiu',)
     if lo == 1:
         return ('l32r',)
     if lo == 7 and (op & 57344) == 32768 and (op & 4096) == 4096:
@@ -149,6 +151,16 @@ def classify(op):
             return ('band',)
         if e == 0x20000 and (op & 0xF10000) == 0xC10000:
             return ('movbr',)
+        if (op >> 16) == 0xB0 and (op & 15) == 0:
+            return ('addx8',)
+        if e == 0x20000 and (op & 0xF10000) == 0xF00000:
+            return ('rems',)
+        if e == 0x20000 and (op & 0xF10000) == 0x200000:
+            return ('bor',)
+        if e == 0x20000 and (op & 0xF10000) == 0x210000:
+            return ('sexpn',)
+        if e == 0xA0000 and (op & 0xF10000) == 0x900000:
+            return ('ftrunc',)
         if (op >> 16) == 0x60 and (op & 0xF00) == 0:
             return ('neg',)
         if (op >> 16) == 0xE0 and (op & 15) == 0:
@@ -194,6 +206,7 @@ EXPECT = {
     'br-bgetbls': 'n_handler36', 's32c1i': '_handler18',
     'br-bbrn': 'n_handler24', 'minu': 'a_handler1',
     'br-bgez12': 'n_handler39', 'fadd': 'n_handler10', 'band': 'n_handler20', 'movbr': 'a_handler8',
+    'addx8': 'n_handler16', 'lsiu': 'r_handler58', 'rems': 'a_handler58', 'bor': 'a_handler52', 'sexpn': '_handler26', 'ftrunc': '_handler55',
     'muluhf': 'a_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',

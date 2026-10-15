@@ -2,11 +2,15 @@
 // WITHOUT instantiating (instant, no engine boot). Supports the opcodes
 // the emitter uses; anything else throws.
 import { buildTraceModule } from './tmp-jit-lib.mjs';
-const ops = process.argv[2].split(',').map((x) => parseInt(x));
+import { readFileSync } from 'fs';
+const ops = process.argv[2] === 'ALL'
+  ? [...new Set(readFileSync('tests/tmp-emit-micro.mjs', 'utf8').match(/op: (0x[0-9a-f]+)/g).map((m) => parseInt(m.slice(4))))]
+  : process.argv[2].split(',').map((x) => parseInt(x));
+process.envConsts = process.env.PRINTconsts ? [] : null;
 const TRACE = process.env.TRACE === '1';
 const T = ops.map((op, i) => ({ pc: 0x3ffe8000 + i * 3, op, w: 3, next: 0 }));
 T.forEach((e, i) => { e.next = (i + 1 < T.length) ? T[i + 1].pc : (e.pc + e.w); });
-const built = buildTraceModule(T, { CORE: 0, CBASE: 0, wb: 0, recLoop: [0,0,0], sarOff: 100, readMem: () => 0 });
+const built = buildTraceModule(T, { CORE: 0, CBASE: parseInt(process.env.CBASE || '0', 10), wb: 0, recLoop: [0,0,0], sarOff: 100, readMem: () => 0 });
 const b = [...built.mod];
 // find code section function body (last section 0x0a, single func, skip decl)
 let i = 8; // skip magic+version
@@ -50,7 +54,7 @@ while (p < code.length) {
     continue;
   }
   switch (o) {
-    case 0x41: rSleb(); push(1); break; // const
+    case 0x41: { let v = 0, s3 = 0, x; do { x = code[p++]; v |= (x & 0x7f) << s3; s3 += 7; } while (x & 0x80); if (v & (1 << (s3 - 1))) v -= (1 << s3); if (process.envConsts) process.envConsts.push(v); push(1); break; } // const
     case 0x28: rSleb(); rSleb(); need(1); break; // load: net 0
     case 0x36: rSleb(); rSleb(); need(2); push(-2); break; // store
     case 0x2a: rSleb(); rSleb(); need(1); break; // f32.load
@@ -58,12 +62,17 @@ while (p < code.length) {
     case 0x45: need(1); break; // eqz net 0
     case 0x46: case 0x47: case 0x48: case 0x49: need(2); push(-1); break; // cmp
     case 0x51: case 0x56: need(2); push(-1); break; // i64 cmp
-    case 0x71: case 0x72: case 0x73: case 0x6a: case 0x6b: case 0x6c:
+    case 0x71: case 0x72: case 0x73: case 0x6a: case 0x6b: case 0x6c: case 0x6f:
     case 0x74: case 0x75: case 0x76: case 0x7c: case 0x86: case 0x88:
-    case 0x92: need(2); push(-1); break; // binops (i32+i64+f32)
+    case 0x92: case 0x94: need(2); push(-1); break; // f32 binops
     case 0x67: need(1); break; // clz
     case 0xa7: case 0xad: case 0xc1: need(1); break; // conversions
     case 0x42: rSleb(); push(1); break; // i64.const (slebs may be multi-byte; ok)
+    case 0xbc: need(1); break; // i32.reinterpret_f32 (net 0)
+    case 0xbe: need(1); break; // f32.reinterpret_i32 (net 0)
+    case 0x43: p += 4; push(1); break; // f32.const
+    case 0x8a: need(1); break; // f32.trunc
+    case 0xfc: { const s = code[p++]; if (s === 2) { need(1); } else err('bad 0xfc subop'); break; }
     case 0x20: case 0x22: p++; push(o === 0x20 ? 1 : 0); break; // get/tee
     case 0x21: p++; need(1); push(-1); break; // set
     case 0x10: { const f = code[p++]; const nt = f <= 2 ? -1 : (f <= 5 ? -3 : -2); need(-nt + (f <= 5 ? (f <= 2 ? 1 : 0) : (f === 6 ? 1 : 0))); push(nt); break; } // call by import idx
@@ -77,3 +86,4 @@ while (p < code.length) {
   }
 }
 console.log('STACKSIM-OK final depth=' + depth);
+if (process.envConsts) console.log('consts: ' + process.envConsts.join(' '));
