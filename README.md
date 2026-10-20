@@ -364,6 +364,31 @@ callback is unimplemented in-repo, GDB uses memory watchpoints on a
 different path) and batching `inst_count` stores per `core_run` call
 (exact at every FFI boundary).
 
+### JIT execution tier (Oct 2026)
+
+A second tier compiles hot guest windows to WebAssembly (`src/sab/jit-trace-emit.js`
++ `src/sab/jit-driver.js`) and chains them per step; the interpreter still runs
+everything it cannot compile (boot, boundaries, unsupported shapes). Same-run
+measurements, retired instructions, identical guest output on both sides:
+
+| Workload | JIT | Interpreter | Ratio |
+|---|---|---|---|
+| Browser, 2.81G retired inst (heavy 4 MB firmware) | **228–541 MIPS** (median 390) | ~10 | ~39× |
+| Browser, 268M retired inst | **103 MIPS** | 15.9 MIPS | 6.5× |
+| Node worker, 2.81G retired inst | **4.8–11.3 s** per run (20/20 canonical) | — | — |
+
+Admission is deterministic: compile kicks are spaced by retired instructions
+(default 4096) and nothing is compiled before a core retires 12M instructions
+(`jitBoot`/`JITBOOT`), so boot-phase code is never compiled — that is where the
+remaining miscompiles live, and compiling it wedged the browser boot. A window
+whose recording starts mid-iteration is re-anchored to the first full period,
+so the emitted module's steady-state body is reachable. A park-count gate also
+exists (`jitHot`/`JITHOT`) but is off: it changed *when* the hot loop was
+recorded and diverged 4/20 runs at `hot=100`. Kill switches: `JIT=0`,
+`jitPage:false` (`JITPAGE=0`, trace tier), `jitHot`/`JITHOT`,
+`jitKick`/`JITKICK`, `jitBoot`/`JITBOOT`, `jitMaxTraces`, `jitPageWindow`,
+`jitDryRun`.
+
 ### Measuring honestly
 
 - Count **retired instructions** (`inst_count` sum), never `chip.cycles`

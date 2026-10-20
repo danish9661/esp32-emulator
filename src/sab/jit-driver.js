@@ -20,7 +20,41 @@ export class JitDriver {
     this.enabled = opts.enabled !== false && (typeof process === 'undefined' || !process.env.JIT?.startsWith?.('0'));
     this.dryRun = !!opts.dryRun;
     this.instGate = !!opts.instGate; // DIAG Exp D: no JIT until APP core retires (dual-core handshake safety)
-    this.pageEnabled = !!opts.page || (typeof process !== 'undefined' && !!process.env.JITPAGE);
+    // Hotness gate for compiles: a pc must be missed this many times before a
+    // window is compiled (0 = compile on first miss, the default).
+    // DEFAULT 0 (off) — measured Oct 2026 on the 2.81G-instruction heavy
+    // firmware: gating changes WHEN a hot loop is recorded, and that window set
+    // diverges (8/20 wrong ACC at hot=100 before the phase fix in findTrace,
+    // 4/20 after it) while hot=0 is 20/20 canonical. It also buys no speed —
+    // the kick cadence below already throttles compiles (hot=100: 3.5-10.0s,
+    // hot=0: 4.8-11.3s on the same runs). Keep the knob for probing.
+    // Hot-gate probe sweep on the 268M-instruction firmware (no kick cadence):
+    // 2000 -> 4.6-5.4s, 500 -> 2.8s, 100/50/25 -> 2.2s, 0 -> never finishes.
+    this.hotMin = opts.hot !== undefined ? (opts.hot | 0)
+      : (typeof process !== 'undefined' && process.env.JITHOT !== undefined ? (parseInt(process.env.JITHOT, 10) || 0) : 0);
+    // Compile-kick cadence in retired instructions (0 = unthrottled).
+    this.kickInst = opts.kick !== undefined ? (opts.kick | 0)
+      : (typeof process !== 'undefined' && process.env.JITKICK !== undefined ? (parseInt(process.env.JITKICK, 10) || 0) : 4096);
+    // Warmup gate: never compile before this core has retired N guest
+    // instructions. Boot-phase app code (early init, one-shot list walks) is
+    // where the remaining page-tier miscompiles live — a boot window wedges
+    // the browser inside the boot loader (measured: page tier compiles
+    // 0x400d82ba/0x400d8dxx during boot and never reaches "SPEEDGO"). Unlike
+    // the park-count gate this is phase-neutral: it only delays the FIRST
+    // compile, so a hot loop is recorded at the same loop phase either way.
+    // The reference firmware prints its first line after ~6.7M instructions.
+    this.bootInst = opts.boot !== undefined ? (opts.boot | 0)
+      : (typeof process !== 'undefined' && process.env.JITBOOT !== undefined ? (parseInt(process.env.JITBOOT, 10) || 0) : 12000000);
+    // Diagnostics (env-only): JITLIST dumps every compiled window; JITDELAY
+    // simulates async-availability latency; JITSYNC (worker-entry) instantiates
+    // synchronously so a window set reproduces identically across runs.
+    this.listDump = !!(opts.list || (typeof process !== 'undefined' && !!process.env.JITLIST));
+    this.listOps = !!(typeof process !== 'undefined' && !!process.env.JITLISTOPS);
+    this.installDelayMs = (typeof process !== 'undefined' && process.env.JITDELAY) ? (parseInt(process.env.JITDELAY, 10) || 0) : 0;
+    // Page tier is the default (see worker-entry.js); JITPAGE=0 opts back out
+    // to the trace tier.
+    this.pageEnabled = opts.page !== undefined ? !!opts.page
+      : !(typeof process !== 'undefined' && process.env.JITPAGE === '0');
     this.cache = new Map(); // `${core}:${pc}` -> entry
     this.uncompilable = new Set();
     this.maxEntries = opts.maxEntries || 128;
@@ -83,13 +117,13 @@ export class JitDriver {
     return ok;
   }
 
-  // Chain loop-closed traces within one step (up to maxTraces): after a
-  // completion pc usually returns to a cached start, so keep executing
-  // without re-guarding. Sound: only JIT ran since the entry guard, and JIT
-  // never mutates guard words (spec72/73/230, LOOP triple, code regions,
-  // pending) — stores target data pages, loads are read-only. Any exit or
-  // miss breaks to the interpreter batch, which continues from the exact
-  // parked pc. Returns total ops executed.
+  // Chain loop-closed modules within one step (up to maxTraces): after a
+  // completion the pc usually returns to a cached start, so keep executing.
+  // Every chained entry re-checks the guard (window base / LOOP triple /
+  // code-region generations / pending IRQs) instead of trusting the entry
+  // guard taken before the previous module ran. Any exit or miss breaks to
+  // the interpreter batch, which continues from the exact parked pc.
+  // Returns total ops executed.
   instOf(core) { try { return this.memU32()[((core * this.CORE_SZ + 2608) >>> 2)] >>> 0; } catch { return 0; } }
 
   chainCore(core, maxTraces = 8) {
@@ -107,7 +141,14 @@ export class JitDriver {
         if (n === 0) this.stats.misses++;
         break;
       }
-      if (n === 0) {
+      // Guard EVERY entry, not just the first of a chain. A chained entry
+      // follows a module that already retired guest code (page modules run
+      // thousands of ops), so the compile-time window base / LOOP triple may
+      // no longer describe it; entering with stale baked window offsets
+      // mis-addresses the register file and can produce a wild jump.
+      // guardPass is memory reads + one region-gen FFI, negligible next to a
+      // page module's run.
+      {
         let ok = false;
         try { ok = this.guardPass(e, key); } catch { break; }
         if (!ok) break;
@@ -293,14 +334,40 @@ export class JitDriver {
         });
       }
       // Last pc bounds the window (emit all but last).
-      const endPC = T[T.length - 1].pc;
-      const TE = T.slice(0, T.length - 1);
+      let endPC = T[T.length - 1].pc;
+      let TE = T.slice(0, T.length - 1);
       TE.forEach((e, i) => { e.next = (i + 1 < TE.length) ? TE[i + 1].pc : endPC; });
+      // PHASE CONSISTENCY (required): a closed slice must repeat with a
+      // uniform period. A compile kick fires at an arbitrary park, so the
+      // ring's newest pass can begin MID-ITERATION; the first period is then
+      // shorter than the steady-state period and buildPage emits two dispatch
+      // groups with the same start pc -- only the first (truncated) one is
+      // reachable, so the loop body that updates the induction registers is
+      // dead code and the guest gets a wrong trip count (measured: 8/20 wrong
+      // ACC on the heavy firmware, and the boot list-walk wedge). Drop the
+      // truncated prefix: TE[i0] has the SAME pc as TE[0], so the module's
+      // anchor/entry pc and guard context are unchanged.
+      {
+        const p0 = TE[0].pc >>> 0;
+        const occ = [];
+        for (let i = 0; i < TE.length; i++) if ((TE[i].pc >>> 0) === p0) occ.push(i);
+        if (occ.length >= 3) {
+          const per = occ[2] - occ[1];
+          if (occ[1] - occ[0] !== per && per >= this.minLen) {
+            let end = occ[1] + per;
+            while (end + per <= TE.length) end += per;
+            TE = TE.slice(occ[1], end);
+            endPC = p0; // the period repeats: the successor of the last op is p0
+            TE.forEach((e, i) => { e.next = (i + 1 < TE.length) ? TE[i + 1].pc : endPC; });
+            this.stats.phaseShift = (this.stats.phaseShift || 0) + 1;
+          }
+        }
+      }
       const sp = this.spec(core);
       // Prefer a loop-closed slice in the completable band (24..64 ops):
       // the bench shows 200+ op windows never validate (phase flips) while
       // ~56-op closed slices go 3/3 clean. Falls back to the full window.
-      let use = TE, useEnd = endPC;
+      let use = TE, useEnd = endPC, closed = false;
       try {
         const cands = findLoopSlices(TE);
         for (const cand of cands) {
@@ -313,13 +380,14 @@ export class JitDriver {
             const S = TE.slice(cand.start, cand.end);
             use = S;
             useEnd = S[0].pc;
+            closed = true;
             break;
           }
         }
       } catch {}
       use.forEach((e, i) => { e.next = (i + 1 < use.length) ? use[i + 1].pc : useEnd; });
       return {
-        TE: use, endPC: useEnd,
+        TE: use, endPC: useEnd, closed,
         rmin, rmax, rgens,
         s72: sp.w72, s73: sp.w73, s230: sp.w230,
         loop: [sp.l0, sp.l1, sp.l2],
@@ -332,9 +400,14 @@ export class JitDriver {
   // One-time self-test: a 1-op module must round-trip shared memory
   // exactly (guards against detached/stale memory views, which would
   // silently diverge the guest). Failure disables the driver permanently.
-  async selfTest() {
-    if (this._selfTested) return this._selfTestOk;
-    this._selfTested = true;
+  // Memoized promise: the flag used to be set before the awaits, so every
+  // compile kicked while the first self-test was in flight saw `undefined`
+  // and silently bailed (measured: compiles started, none completed).
+  selfTest() {
+    if (!this._selfTestP) this._selfTestP = this._selfTestRun();
+    return this._selfTestP;
+  }
+  async _selfTestRun() {
     try {
       const CBASE = 0, wb = 0;
       const TE = [{ pc: 0x1000, op: 0x551b, w: 2, next: 0x1002 }];
@@ -457,6 +530,10 @@ export class JitDriver {
       this.uncompilable.add(key);
       return false;
     }
+    // Diag: simulate async module-availability latency deterministically.
+    if (this.installDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, this.installDelayMs));
+    }
     if (this.cache.size >= this.maxEntries) {
       // Evict oldest quarter (Map preserves insertion order).
       let drop = Math.max(1, this.maxEntries >> 2);
@@ -502,6 +579,18 @@ export class JitDriver {
   // poison, cooldown and uncompilable discipline as the trace tier.
   async compilePage(core, pc, found) {
     const key = core + ':' + pc;
+    // SELF-CONTAINED LOOP SLICES ONLY. A straight-line fallback window (the
+    // full 255-op recording) ends at the ring tail (endPC), so its module
+    // depends on where the recording happened to stop and can span phase or
+    // call boundaries -- those windows are where the remaining miscompiles
+    // live (boot-phase quiet stalls and, rarely, wrong loop-trip counts).
+    // A loop-closed slice starts and ends at the same pc and is therefore
+    // self-contained; the hot speed loops are exactly those, so nothing is
+    // lost where it matters. Escape hatch for experiments: _jitPageWindow.
+    if (!found.closed && !this.chip._jitPageWindow) {
+      this.stats.openRej = (this.stats.openRej || 0) + 1;
+      return false;
+    }
     let handle;
     const foldedAddrs = [];
     try {
@@ -552,6 +641,12 @@ export class JitDriver {
     });
     this.stats.compiles++;
     this.stats.pageCompiles = (this.stats.pageCompiles || 0) + 1;
+    if (this.listDump) {
+      try {
+        console.log(`[JP] core=${core} pc=0x${(pc >>> 0).toString(16)} len=${found.TE.length} ops=${handle.ops} groups=${handle.groups} wb=${found.wb} loop=${JSON.stringify(found.loop)} regs=${found.rmin}..${found.rmax}`);
+        if (this.listOps) console.log(`[JPO] core=${core} pc=0x${(pc >>> 0).toString(16)} len=${found.TE.length} pcs=${found.TE.map((e) => (e.pc >>> 0).toString(16)).join(',')}`);
+      } catch {}
+    }
     this.stats.folds = (this.stats.folds || 0) + foldedAddrs.length;
     return true;
   }

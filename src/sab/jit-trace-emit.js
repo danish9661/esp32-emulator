@@ -718,22 +718,35 @@ export function assemblePageModule(body, { locals = 3, exitGlobal = true } = {})
     ...typeSec, ...impSec, ...funcSec, ...globSec, ...expSec, ...codeSec]);
 }
 
+const pageImports = (L, ex) => ({
+  env: {
+    mem: L.memory,
+    mr8: (core, addr) => ex.core_read_uint8(core, addr),
+    mr16: (core, addr) => ex.core_read_uint16(core, addr),
+    mr32: (core, addr) => ex.core_read_uint32(core, addr),
+    mw8: (core, addr, val) => ex.core_write_uint8(core, addr, val),
+    mw16: (core, addr, val) => ex.core_write_uint16(core, addr, val),
+    mw32: (core, addr, val) => ex.core_write_uint32(core, addr, val),
+    jit_l32r: (core, op, nextpc) => ex.native_jit_l32r(core, op, nextpc),
+    jit_ssai: (core, op) => ex.native_jit_ssai(core, op),
+    jit_rsr: (core, op) => ex.native_jit_rsr(core, op),
+    jit_rsrv: (core, op) => ex.native_jit_rsrv(core, op),
+  },
+});
+
+// Sync instantiation (JITSYNC): removes the async-availability nondeterminism
+// that makes a miscompiled window reproduce only ~1 run in 10. Same imports.
+export function instantiatePageModuleSync(mod, L, ex) {
+  const m = new WebAssembly.Module(mod);
+  const inst = new WebAssembly.Instance(m, pageImports(L, ex));
+  return { run: inst.exports.run, exitpc: inst.exports.exitpc };
+}
+
 export async function instantiatePageModule(mod, L, ex) {
-  const inst = await WebAssembly.instantiate(mod, {
-    env: {
-      mem: L.memory,
-      mr8: (core, addr) => ex.core_read_uint8(core, addr),
-      mr16: (core, addr) => ex.core_read_uint16(core, addr),
-      mr32: (core, addr) => ex.core_read_uint32(core, addr),
-      mw8: (core, addr, val) => ex.core_write_uint8(core, addr, val),
-      mw16: (core, addr, val) => ex.core_write_uint16(core, addr, val),
-      mw32: (core, addr, val) => ex.core_write_uint32(core, addr, val),
-      jit_l32r: (core, op, nextpc) => ex.native_jit_l32r(core, op, nextpc),
-      jit_ssai: (core, op) => ex.native_jit_ssai(core, op),
-      jit_rsr: (core, op) => ex.native_jit_rsr(core, op),
-      jit_rsrv: (core, op) => ex.native_jit_rsrv(core, op),
-    },
-  });
+  if (typeof globalThis !== 'undefined' && globalThis.__JIT_SYNC) {
+    return instantiatePageModuleSync(mod, L, ex);
+  }
+  const inst = await WebAssembly.instantiate(mod, pageImports(L, ex));
   return { run: inst.instance.exports.run, exitpc: inst.instance.exports.exitpc };
 }
 

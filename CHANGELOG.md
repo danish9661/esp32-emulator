@@ -5,6 +5,85 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
 
 ## [Unreleased]
 
+### Added (Xtensa page-JIT execution tier — 230–540 MIPS in the browser)
+- Second execution tier on top of the WASM interpreter: `src/sab/jit-trace-emit.js`
+  emits a WebAssembly module per recorded window (Xtensa → WASM, literal
+  folding, engine call-outs for the non-inlinable shapes) and
+  `src/sab/jit-driver.js` records, validates and chains those modules;
+  `worker-entry.js` `runSimChunk` drives it per step. Guest behavior is
+  identical to the interpreter — every measurement below produced the same
+  `ACC`/UART trace as `jit=0`.
+- **Page tier is the default**: modules are built from loop-closed page
+  windows (a window whose slice starts and ends at the same pc), which are
+  self-contained and beat the older trace tier on both speed and reliability.
+  `jitPage:false` / `JITPAGE=0` falls back to trace; `jitPageWindow` re-admits
+  open (straight-line) windows for experiments.
+- **Guards are re-checked on every chained entry**, not just the first: a
+  chained module follows one that already retired guest code, so the
+  compile-time window base / LOOP triple may no longer describe it. Entering
+  with stale baked window offsets mis-addresses the register file and can
+  produce a wild jump.
+- **Recorded windows must be phase-consistent**: a compile kick fires at an
+  arbitrary park, so the ring's newest pass can begin **mid-iteration**; the
+  first period is then shorter than the steady-state period, `buildPage()`
+  emits two dispatch groups with the same start pc, and only the truncated one
+  is reachable — the loop body that advances the induction registers becomes
+  dead code and the guest gets a wrong trip count (measured: 8/20 wrong `ACC`
+  on the heavy firmware, plus a boot-time list-walk wedge). `findTrace()` now
+  drops the truncated prefix before slicing (same start pc, so the anchor and
+  guard context are unchanged). This also made the window set uniform and cut
+  Node wall clock from 6.3-7.0 s to 3.8-4.8 s.
+- **Compile admission is deterministic and boot-safe**: compile kicks are
+  spaced by **retired instructions** (`kickInst`, default 4096;
+  `jitKick`/`JITKICK`) and nothing is compiled before a core has retired
+  `bootInst` instructions (`jitBoot`/`JITBOOT`, default 12M). Boot-phase app
+  code (early init, one-shot list walks) is where the remaining page-tier
+  miscompiles live — with the warmup gate removed, the browser compiled
+  `0x400d82ba`/`0x400d8dxx` during boot and never reached its first print,
+  while the same build was clean in Node. The gate only delays the *first*
+  compile, so it is phase-neutral. A park-count gate also exists (`hotMin`,
+  default **0 = off**; `jitHot`/`JITHOT`) but stays off: it changes *when* a
+  hot loop is recorded, and at 100 it diverged 4/20 runs. Hot-gate probe sweep
+  on the 268M-instruction firmware (no kick cadence): hot=2000 → 5.4 s,
+  hot=500 → 2.8 s, hot=100/50/25 → 2.2 s, hot=0 with unthrottled kicks →
+  never finishes (boot windows thrash the compiler).
+- **Clock parity with the JIT**: `chip.step()` advances a flat 512 cycles for
+  an interpreter batch, while a JIT step retires `jitOpsMax` guest
+  instructions, so the batch shrink is compensated
+  (`chip.cycles += jitOpsMax - 512`). Without it simulated time ran up to
+  ~27× slow whenever a page module dominated and every time-based init wait
+  cost that many more instructions.
+- **Debug-SAB publish is delta-based**: the JIT can jump over a
+  `(cycles & 524287) === 0` boundary, so the old bitmask test stopped firing
+  and the SAB reported a stale instruction count (measured 6.7M for a
+  2.2G-instruction run).
+- **Host-I/O yield**: the step loop now yields on a 2 ms wall / 8192-step
+  cadence instead of every 512 steps, using `setImmediate` in Node and a
+  `MessageChannel` hop in the browser (no timer clamp). Note for future work:
+  a MessageChannel-driven await loop **starves async WASM compilation** in a
+  Node worker — `WebAssembly.instantiate()` never settles while port messages
+  keep the loop busy (isolated: bare await OK, `setTimeout` loop OK, channel
+  loop hangs), which silently disabled the whole tier in Node until the
+  `setImmediate` preference was added.
+- `selfTest()` memoizes its **promise** instead of a flag set before the
+  awaits: compiles kicked while the first self-test was in flight used to see
+  `undefined` and silently bail (compiles started, none completed).
+- Measured (same-run, canonical guest output):
+  - Browser, 4 MB heavy firmware (2.81G retired instructions):
+    **228–541 MIPS, median 390** (`ACC=f0d809784e93ba21` and
+    `SPEEDGO`/`SPEEDDONE` in 6/6 runs, no wedges).
+  - Browser, 268M-instruction firmware: **103.4 MIPS with JIT vs 15.9
+    without** in the same page session (6.5×), identical `ACC`.
+  - Node, same heavy firmware: **4.8–11.3 s per run, 20/20 canonical ACC**.
+    Interpreter-only is 10–13 MIPS.
+- Kill switches / diagnostics (all same-run): `jitEnabled:false`/`JIT=0`,
+  `jitPage`, `jitHot`/`JITHOT`, `jitKick`/`JITKICK`, `jitBoot`/`JITBOOT`,
+  `jitMaxTraces`/
+  `JITMAXTRACES`, `jitPageWindow`, `jitDryRun`, `jitInstGate`, `jitList`/
+  `JITLIST`, `JITSYNC` (synchronous instantiation, removes
+  async-availability nondeterminism), `JITSTATS` (opt-in periodic stats —
+  it previously flooded worker logs).
+
 ### Added (esp32-emu.md §1–4 + §6–7: host peripheral taps)
 - I2C slave taps (`chip.i2c0`/`i2c1`): bus-level `onStart`/`onWrite`/`onRead`/
   `onStop` (F1 parity) + per-address `attachSlave`/`detachSlave` with NACK at

@@ -256,6 +256,33 @@ function uartWriteByte(byte) {
 
 let needsEventLoop = true;
 let simChunkSize = 500000;
+
+// Host-I/O yield inside the step loop. `setTimeout(0)` costs ~1ms in Node and
+// clamps to ~4ms per nested timer in a browser worker, so the old fixed
+// 512-step cadence burnt seconds per 500k-step chunk whenever it actually
+// fired. A MessageChannel hop is a macrotask WITHOUT the timer clamp
+// (microseconds), which lets the loop keep I/O latency low without paying
+// wall-clock for it. Fallback: plain setTimeout where MessageChannel is absent.
+let _yieldCh = null;
+try {
+  const MC = globalThis.MessageChannel;
+  if (typeof MC === 'function' && typeof globalThis.setImmediate !== 'function') _yieldCh = new MC();
+} catch { _yieldCh = null; }
+// NOTE (measured): a MessageChannel-driven await loop STARVES async WASM
+// compilation in a Node worker — `WebAssembly.instantiate(...)` never settles
+// while port messages keep the loop busy (isolation: bare await OK, setTimeout
+// loop OK, MessageChannel loop hangs). The JIT compiles asynchronously, so the
+// channel yield silently disabled the whole tier in Node. setImmediate is the
+// cheap check-phase macrotask there and drains compile completions normally.
+function yieldMacrotask() {
+  const si = globalThis.setImmediate;
+  if (typeof si === 'function') return new Promise((r) => si(r));
+  if (!_yieldCh) return new Promise((r) => setTimeout(r, 0));
+  return new Promise((r) => {
+    _yieldCh.port1.onmessage = () => r();
+    _yieldCh.port2.postMessage(0);
+  });
+}
 // TWAI peer-frame staging (SEND_TWAI stages id/flags/data0-3, PUSH_TWAI
 // delivers with data4-7) — the 3-arg CMD channel can't fit a full frame.
 let twaiStage = [0, 0, 0];
@@ -601,12 +628,37 @@ function jitCompileKick(jd, core) {
     // step and blows wall-clock test budgets (onewire presence=0 with
     // compiles=0). Kicks only attempt compiles; the interpreter covers all
     // execution, so delaying attempts is always sound.
-    const now = Date.now();
-    const lk = jd._lastKick || (jd._lastKick = [0, 0]);
-    if (now - lk[core] < 10) return;
-    lk[core] = now;
     const pc = jd.pcOf(core);
     const k = core + ':' + pc;
+    // Hotness gate (JITHOT / config jitHot, 0 = off): only compile code that
+    // has parked at this pc HOT times. Cold/boot-phase code executes once and
+    // never reaches the counter, so boot windows are never compiled -- they
+    // are the windows the remaining page-tier miscompiles live in (a boot
+    // module corrupts state and the guest wedges in the bootloader). Hot
+    // loops (an LCG running 100M iterations) cross any threshold instantly.
+    const HOT = jd.hotMin | 0;
+    if (HOT > 0) {
+      const hot = jd._hot || (jd._hot = new Map());
+      const c = (hot.get(k) || 0) + 1;
+      if (c < HOT) {
+        hot.set(k, c);
+        if (hot.size > 8192) hot.clear(); // bounded: cold pcs never grow it
+        return;
+      }
+      hot.delete(k);
+    }
+    // Deterministic kick cadence (retired-instruction based, not wall clock):
+    // the same guest execution therefore attempts the same compiles in Node
+    // and in the browser, which is what makes a divergent window bisectable.
+    // JITKICK overrides (0 = unthrottled); default 4096 instructions.
+    const KICK = jd.kickInst | 0;
+    if (KICK > 0) {
+      const inst = jd.instOf(core);
+      if (inst < (jd.bootInst | 0)) return; // warmup: boot code is not compiled
+      const lk = jd._lastKick || (jd._lastKick = [-1, -1]);
+      if (lk[core] >= 0 && ((inst - lk[core]) >>> 0) < KICK) return;
+      lk[core] = inst;
+    }
     if (jd.cache.has(k) || jd.uncompilable.has(k)) return;
     const inflight = jd._inflight || (jd._inflight = new Set());
     if (inflight.has(k)) return;
@@ -639,15 +691,18 @@ async function runSimChunk() {
   let jitDrv = null;
   let jitKA = 0, jitKB = 0;
   const steprofOn = (typeof process !== 'undefined' && !!process.env.STEPROF);
+  // Periodic JIT stats dump (JITSTATS=1): opt-in, it made 500KB+ worker logs.
+  const jitStatsLog = (typeof process !== 'undefined' && !!process.env.JITSTATS);
   // Max traces per chainCore call (JITNOTRACE=1 executes nothing: compiles
   // still populate the cache; isolates execution effects from compile effects).
-  const jitMaxTraces = (typeof process !== 'undefined' && process.env.JITNOTRACE) ? 0 :
+  const jitMaxTraces = chip._jitMaxTraces !== undefined ? (chip._jitMaxTraces | 0) :
+    (typeof process !== 'undefined' && process.env.JITNOTRACE) ? 0 :
     (typeof process !== 'undefined' && process.env.JITMAXTRACES ? (parseInt(process.env.JITMAXTRACES, 10) || 8) : 8);
   const nowNs = () => BigInt(Math.round(performance.now() * 1e6));
   let profE = 0n, profS = 0n, profP = 0n, profN = 0;
   try {
     if (chip._jitEnabled !== false && wasmExp?.core_run && chip._wasmLoader && idleView0 && idleView1) {
-      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader, { dryRun: !!chip._jitDryRun, instGate: !!chip._jitInstGate, page: !!chip._jitPage }); } catch {} }
+      if (!chip._jitDriver) { try { chip._jitDriver = new JitDriver(chip, chip._wasmLoader, { dryRun: !!chip._jitDryRun, instGate: !!chip._jitInstGate, page: !!chip._jitPage, hot: chip._jitHot, kick: chip._jitKick, list: !!chip._jitList }); } catch {} }
       jitDrv = chip._jitDriver || null;
     }
   } catch {}
@@ -657,6 +712,9 @@ async function runSimChunk() {
   try {
     let steps = 0;
     let cycles = chip.cycles;
+    let lastSabCycles = cycles;
+    let lastYield = performance.now();
+    let lastYieldStep = 0;
     // Cache native UART feed for hot loop
     const nativeUartFeed = wasmExp?.native_uart_feed || null;
     if (cycles === 0 || isNaN(cycles)) console.log(`[RUNSIM] start cycles=${cycles} isNaN=${isNaN(cycles)}`);
@@ -1014,10 +1072,20 @@ async function runSimChunk() {
             jitKB = jitDrv.chainCore(1, jitMaxTraces);
             if (jitKB === 0) jitCompileKick(jitDrv, 1);
           }
-          if ((steps & 262143) === 0) console.log('[JIT]', JSON.stringify(jitDrv.stats));
+          if (jitStatsLog && (steps & 262143) === 0) console.log('[JIT]', JSON.stringify(jitDrv.stats));
         } catch {}
       }
-      chip.step(Math.max(0, 512 - (jitKA > jitKB ? jitKA : jitKB)));
+      const jitOpsMax = jitKA > jitKB ? jitKA : jitKB;
+      chip.step(Math.max(0, 512 - jitOpsMax));
+      // Clock parity: step() advances a flat 512 cycles for the interpreter
+      // batch, but the JIT just retired jitOpsMax guest instructions (the
+      // engine model is 1 cycle per instruction), so the batch shrink must not
+      // shorten simulated time. Without this the guest's virtual clock runs up
+      // to ~27x slow whenever the JIT dominates (a page module retires ~14k
+      // ops per step), so every time-based init wait costs that many more
+      // instructions: in the browser the boot needed ~190M instead of ~6.7M
+      // and looked like an early-boot stall at ~6.5 MIPS.
+      if (jitOpsMax > 512) chip.cycles += jitOpsMax - 512;
       steps++;
       cycles = chip.cycles;
       if (steprofOn) { profE += nowNs() - _pa; }
@@ -1043,7 +1111,15 @@ async function runSimChunk() {
         syncClockState(wasmExp);
         if (pumpEvents) { try { pumpEvents(); } catch(_) {} }
       }
-      if ((cycles & 524287) === 0) writeSABState();
+      // State publish cadence: DELTA-based, not an exact bitmask. The JIT
+      // advances chip.cycles by its retired-op count (clock parity), so a
+      // step can jump over a 512K-cycle boundary and `(cycles & mask)===0`
+      // never fires while the JIT dominates -- the debug SAB then reports a
+      // stale inst/PC snapshot (measured: 6.7M reported for a 2.2G-inst run).
+      if (cycles - lastSabCycles >= 524288 || cycles < lastSabCycles) {
+        lastSabCycles = cycles;
+        writeSABState();
+      }
       if (steprofOn) {
         profP += nowNs() - _pb;
         if (++profN === 4000) {
@@ -1052,18 +1128,20 @@ async function runSimChunk() {
         }
       }
       if (!Atomics.load(ctrl, SAB_RUN)) break;
-      // Yield to the event loop every 512 steps so socket I/O callbacks
-      // (BT HCI proxy TCP, gateway WebSocket) can fire mid-chunk. A chunk
-      // is 500k steps; without this the loop never turns and connect/data
-      // callbacks starve (observed: proxy socket created but 'connect'
-      // never fired). Await a zero-delay macrotask — costs microseconds
-      // per 512 steps. 4096 proved too coarse (connect raced past the
-      // 15s observation window); 512 keeps I/O latency <100ms.
-      // NOTE (2026-09-28): per-step yield was tried (every-step await) and
-      // REVERTED — a zero-delay macrotask costs ~50-100us, so 500k steps
-      // balloon from ~1s to ~60s wall (ADVBOOT took 30s, CTL_ENABLE 99s).
-      // C2H latency is fixed differently (see btHciProxyPump below).
-      if ((steps & 511) === 0) await new Promise((r) => setTimeout(r, 0));
+      // Yield to the event loop so host I/O callbacks (BT HCI proxy TCP,
+      // gateway WebSocket, GDB) can turn mid-chunk. Checks every 512 steps but
+      // only yields once ~2ms of wall time elapsed (hard cap 8192 steps), so a
+      // chunk runs at full speed and still keeps callback latency ~2ms -- both
+      // better than the old every-512-steps timer, whose 4ms browser clamp cost
+      // seconds per chunk (and ~50-100us per step when made per-step, see the
+      // 2026-09-28 note).
+      if ((steps & 511) === 0) {
+        const t = performance.now();
+        if (t - lastYield >= 2 || steps - lastYieldStep >= 8192) {
+          lastYield = t; lastYieldStep = steps;
+          await yieldMacrotask();
+        }
+      }
     }
   } catch (err) {
     console.error('[SIM-ERROR]', err.message, err.stack);
@@ -1484,14 +1562,40 @@ function applyBasicSetup(chip, config, flash, rom) {
   let mac = null;
   if (config.macAddress) mac = parseMacAddress(config.macAddress);
   if (chip.reset) chip.reset();
-  // 50mips JIT tier kill switch (per-chip, for same-run A/B): config
-  // jitEnabled:false disables the driver; default follows JIT env.
+  // ── 50mips JIT tier knobs (all optional; defaults are the tuned values) ──
+  // Kill switches, all same-run capable: jitEnabled:false / JIT=0 disables the
+  // driver, jitPage:false / JITPAGE=0 falls back to the trace tier,
+  // jitDryRun records without compiling, jitNoCallout / jitNoFold drop the
+  // call-out and literal-folding shapes, jitPageWindow re-admits open windows.
   chip._jitEnabled = config.jitEnabled !== undefined ? !!config.jitEnabled : chip._jitEnabled;
   chip._jitDryRun = !!config.jitDryRun;
-  chip._jitPage = !!config.jitPage || (typeof process !== 'undefined' && !!process.env.JITPAGE);
+  // Page modules are the DEFAULT: loop-closed page windows are both faster and
+  // more reliable than trace modules, while trace still stalls a share of
+  // browser runs. Measured (Oct 2026, 4MB heavy firmware, canonical ACC):
+  // browser 250-380 MIPS (median 351), Node ~122 MIPS end-to-end on the
+  // 268M-instruction firmware vs 10-12 MIPS interpreted.
+  chip._jitPage = config.jitPage !== undefined ? !!config.jitPage
+    : !(typeof process !== 'undefined' && process.env.JITPAGE === '0');
+  chip._jitPageWindow = !!config.jitPageWindow;
   chip._jitNoCallout = !!config.jitNoCallout;
   chip._jitNoFold = !!config.jitNoFold;
   chip._jitInstGate = !!config.jitInstGate || (typeof process !== 'undefined' && !!process.env.JITINSTGATE);
+  chip._jitMaxTraces = config.jitMaxTraces !== undefined ? (config.jitMaxTraces | 0) : undefined;
+  // Compile admission: a pc must park this many times before its window is
+  // compiled (jitHot, JITHOT, default 0 = compile on first miss; see the
+  // jit-driver default comment — a non-zero gate changed the recorded window
+  // and diverged the heavy firmware) and kicks are spaced by retired
+  // instructions (jitKick, JITKICK, default 4096 = deterministic across Node
+  // and the browser, 0 = unthrottled).
+  chip._jitHot = config.jitHot !== undefined ? (config.jitHot | 0)
+    : (typeof process !== 'undefined' && process.env.JITHOT !== undefined ? (parseInt(process.env.JITHOT, 10) || 0) : undefined);
+  chip._jitKick = config.jitKick !== undefined ? (config.jitKick | 0) : undefined;
+  chip._jitList = !!config.jitList;
+  // jitSync / JITSYNC: synchronous WASM instantiation (diagnostics only --
+  // removes async-availability nondeterminism, blocks the hot path per compile).
+  if (config.jitSync || (typeof process !== 'undefined' && (process.env.JITSYNC === '1' || process.env.JITSYNC === 'true'))) {
+    globalThis.__JIT_SYNC = true;
+  }
   // ── Re-apply post-reset (reset wipes MMU, GPIO, UART, core state) ──
   if (chip.mmuTablePro && config.mmuPages) {
     for (let p = 0; p < config.mmuPages; p++) chip.mmuTablePro[p] = p;
