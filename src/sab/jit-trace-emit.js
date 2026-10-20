@@ -17,6 +17,11 @@ export const OP = {
   global_get: 0x23, global_set: 0x24, unreachable_: 0x00, nop_: 0x01, drop: 0x1a,
 };
 export const sext8 = (v) => (v & 128) ? (v | 0xffffff00) : v;
+// Xtensa instruction width by low opcode nibble (engine parity:
+// xtensa-constants.js InstWidthTable). Needed wherever the emitted code must
+// know the FALL-THROUGH pc: the recorder's per-op `w` is the delta to the
+// next recorded pc, which for a taken branch is the taken distance.
+export const INST_W = [3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 4, 4];
 
 // ---- op classification (handler-verified) ----
 export const NF_SHIFT_TABLE = [-1, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256];
@@ -331,7 +336,7 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'lsiu') { // r_handler58: f[t] = MR32(ar[s]+off); ar[s] += off (float dst k.t, base k.s)
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
       B.push(OP.return_, OP.end);
       cc2(CBASE + 272 + k.t * 4); c(CORE); B.push(OP.local_get, 0x00, OP.call, 0x02, OP.f32_reinterpret, OP.f32_store, 0x02, 0x00);
       cc2(P(k.s)); B.push(OP.local_get, 0x00, OP.i32_store, 0x02, 0x00);
@@ -341,7 +346,7 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       ld(P(k.r)); c(-2147483648); B.push(OP.i32_eq);
       ld(P(k.s)); c(-1); B.push(OP.i32_eq, OP.i32_and, OP.i32_or, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); }
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); }
       B.push(OP.return_, OP.end);
       cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_rem_s, OP.i32_store, 0x02, 0x00);
     }
@@ -373,7 +378,7 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'divu') { // a_handler57: ar[t] = ar[r]/ar[s] unsigned; div0 exits (WASM div_u traps like rem_s)
       ld(P(k.s)); B.push(OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); }
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); }
       B.push(OP.return_, OP.end);
       cc2(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(OP.i32_div_u, OP.i32_store, 0x02, 0x00);
     }
@@ -470,14 +475,14 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       // would fire on every nonzero address (inverted once, caught by micro).
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
       B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
     }
     else if (k.k === 's32i8') { // _handler20: MW32(ar[s]+off8, ar[t]); addr 0 traps -> side exit
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
       B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x05);
     }
@@ -496,7 +501,7 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
       // store shapes: only addr-0 traps, handled by the side exit below).
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
       B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00, OP.call, 0x02, OP.local_tee, 0x00);
       cc2(CBASE + 336 + 48); B.push(OP.i32_load, 0x02, 0x00, OP.i32_ne, OP.if_, 0x40);
@@ -506,14 +511,14 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 's16i') { // _handler17: MW16(ar[s]+off, ar[t]); addr 0 traps -> side exit
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
       B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x04);
     }
     else if (k.k === 's8i') { // _handler16: MW8(ar[s]+off, ar[t]); addr 0 traps -> side exit
       ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.local_tee, 0x00, OP.i32_eqz, OP.if_, 0x40);
       branches.push({ idx: i, pc: e.pc }); c(100 + branches.length - 1);
-      if (hooks) { cc(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
+      if (hooks) { cc2(e.pc); B.push(OP.global_set, 0x00); } // page mode: driver parks via exitpc
       B.push(OP.return_, OP.end);
       c(CORE); B.push(OP.local_get, 0x00); ld(P(k.t)); B.push(OP.call, 0x03);
     }
@@ -800,7 +805,23 @@ export async function buildPage(Sc, ctx) {
     const hooks = {
       noTail: true,
       onBranch(BB, H, br, e) {
-        const takenPc = br.target >>> 0, fallPc = (e.pc + e.w) >>> 0;
+        const takenPc = br.target >>> 0;
+        // FALL-THROUGH must come from the TRUE instruction width, not the
+        // ring's `e.w`: the recorder stores `next` = the actual successor and
+        // derives `w` from the pc delta, so a branch recorded TAKEN carries
+        // w = distance to the taken target (e.g. 4 for a 2-byte beqz.n) and
+        // e.pc + e.w is the TAKEN pc, not the fall-through. Threading that
+        // made the module skip the fall-through instruction (observed: boot
+        // list-walk spin at 0x400d82ba, rare LCG loop-trip miscounts).
+        // Density rule (engine parity: xtensa-constants.js InstWidthTable):
+        // width by low opcode nibble, 0-7 => 3, 8-13 => 2, 14-15 => 4.
+        const wtrue = INST_W[e.op & 0x0f];
+        const fallPc = (e.pc + wtrue) >>> 0;
+        if (e.next !== takenPc && e.next !== fallPc) {
+          throw new Error('branch successors disagree (pc=0x' + e.pc.toString(16)
+            + ' next=0x' + e.next.toString(16) + ' taken=0x' + takenPc.toString(16)
+            + ' fall=0x' + fallPc.toString(16) + ')');
+        }
         // Exact accounting: only the executed prefix (through this branch),
         // NOT the full group (unexecuted suffix would inflate instTotal).
         const prefixLen = subT.indexOf(e) + 1;
