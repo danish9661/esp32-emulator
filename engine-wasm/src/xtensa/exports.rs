@@ -259,6 +259,47 @@ pub extern "C" fn native_jit_ssai(core_idx: u32, op: u32) {
     core.sar_m32_pending = 0;
 }
 
+/// 50mips milestone C: rsr call-out for JIT traces. Exact _handler14 body
+/// (window_check + privileged trap included) so routing parity is by
+/// construction; only the live CALLER_REGS value is touched, which is where
+/// the trace keeps ARs. Reads go through read_special_register (CCOUNT /
+/// WINDOW_START semantics live there, not in the register file).
+#[no_mangle]
+pub extern "C" fn native_jit_rsr(core_idx: u32, op: u32) {
+    use super::constants::TRAP_PRIVILEGED;
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 255;
+    let idx_reg = (op >> 4) & 15;
+    if !core.window_check(0, 0, idx_reg >> 2) {
+        if idx_val >= 64 && core.ps_owing() != 0 {
+            core.exception(TRAP_PRIVILEGED);
+        } else {
+            let val = read_special_register(core, idx_val);
+            core.set_ar(idx_reg, val);
+        }
+    }
+}
+
+/// 50mips milestone C: rsrv call-out for JIT traces. Exact c_handler6 body
+/// (SWAP: ar[t] <-> SR), including the privileged trap on the read side.
+#[no_mangle]
+pub extern "C" fn native_jit_rsrv(core_idx: u32, op: u32) {
+    use super::constants::TRAP_PRIVILEGED;
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 255;
+    let idx_reg = (op >> 4) & 15;
+    if !core.window_check(0, 0, idx_reg >> 2) {
+        if idx_val >= 64 && core.ps_owing() != 0 {
+            core.exception(TRAP_PRIVILEGED);
+        } else {
+            let tmp = core.ar(idx_reg);
+            let old = read_special_register(core, idx_val);
+            write_special_register(core, idx_val, tmp);
+            core.set_ar(idx_reg, old);
+        }
+    }
+}
+
 /// Byte offset of sar_m32_pending from its core-state base (for JIT
 /// emission of ssai without layout guesses — the field order before
 /// `enabled` is not independently pinned like the loader offsets are).

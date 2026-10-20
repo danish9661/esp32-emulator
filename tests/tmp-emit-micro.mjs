@@ -180,6 +180,10 @@ const MICROS = [
   { name: 'maxs', ops: [{ op: 0x5399a0, w: 3 }], regs: [9, 10], setup: null, cmp: [9] },
   { name: 'divu', ops: [{ op: 0xc22a80, w: 3 }], regs: [2, 8, 10], setup: null, cmp: [2] },
   { name: 'fcmp', ops: [{ op: 0x5bb800, w: 3 }], regs: [], setup: null, cmp: [], psw: true },
+  // RSR / RSRV call-outs: SR 12 (SCOMPARE1) seeded per-trial, AR compared
+  // after; RSRV must also swap the SR back (spec snapshot catches that).
+  { name: 'rsr', ops: [{ op: 0x30c80, w: 3 }], regs: [8], setup: null, cmp: [8], spec: [12], specInit: () => rnd32() },
+  { name: 'rsrv', ops: [{ op: 0x610c20, w: 3 }], regs: [2], setup: null, cmp: [2], spec: [12], specInit: () => rnd32() },
 ];
 globalThis.__l32log = 6;
 const savedD = [];
@@ -203,23 +207,28 @@ for (const m of MICROS) {
     const V = {};
     for (const r of m.regs) V[r] = rnd32() >>> 0;
     if (m.setup) m.setup(V);
+    const SV = {};
+    if (m.specInit) for (const i of m.spec) SV[i] = m.specInit(i) >>> 0;
     const snap = () => {
       const o = {};
       for (const r of m.cmp) o['r' + r] = memU32()[P(r)] >>> 0;
       if (m.fcmp) for (const r of m.fcmp) o['f' + r] = memU32()[((CBASE + 272) >>> 2) + r] >>> 0;
       if (m.mem) for (const a of m.mem) o['m' + a.toString(16)] = ex.core_read_uint32(CORE, a) >>> 0;
       if (m.spec3) o.sar = memU32()[((CBASE + 336) >>> 2) + 3] >>> 0;
+      if (m.spec) for (const i of m.spec) o['s' + i] = memU32()[((CBASE + 336) >>> 2) + i] >>> 0;
       if (m.psw) o.psw = memU32()[((CBASE + 336) >>> 2) + 4] >>> 0;
       return o;
     };
     memU32().set(stateA, CBASE >>> 2);
     for (const r of m.regs) memU32()[P(r)] = V[r];
+    for (const i of Object.keys(SV)) memU32()[((CBASE + 336) >>> 2) + (+i)] = SV[i];
     if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A5A5A5);
     let a;
     let ccJit = 0;
     try { fn(); if (m.ccount) ccJit = memU32()[((CBASE + 336) >>> 2) + 234] >>> 0; a = snap(); } catch (e) { fail++; console.log(`[micro] ${m.name} t=${t} JIT threw: ${e.message}`); break; }
     memU32().set(stateA, CBASE >>> 2);
     for (const r of m.regs) memU32()[P(r)] = V[r];
+    for (const i of Object.keys(SV)) memU32()[((CBASE + 336) >>> 2) + (+i)] = SV[i];
     if (m.lit !== undefined) ex.core_write_uint32(CORE, litAddr, 0xA5A5A5A5);
     wc0.PC = SCRATCH;
     let expect = SCRATCH, bad = false;

@@ -156,6 +156,16 @@ export function classify(op) {
   }
   if (lo === 0) {
     const e = op & 0xE0000, f = op & 0xE10000, b20 = op & 0x100000;
+    // RSR (hi 0x03, lo 0) and RSRV (hi 0x61|0x71, lo 0): exact router masks,
+    // both proven by the full-24-bit fuzz. RSR reads an SR into an AR, RSRV
+    // swaps them; neither is a pure register move (read_special_register /
+    // write_special_register side effects), so both emit call-outs.
+    if ((op & 0xFF000F) === 0x030000) {
+      const sr = (op >> 8) & 255;
+      if (sr === 234) return { k: 'rsrcc', t: f4 }; // CCOUNT: register-file read is its value
+      return { k: 'rsr', t: f4, sr };
+    }
+    if ((op & 0xEF000F) === 0x610000) return { k: 'rsrv', t: f4, sr: (op >> 8) & 255 };
     if (e === 0x20000 && f === 0x800000 && b20 === 0) return { k: 'mull', t: f12, r: f8, s: f4 }; // a_handler37 full mul
     if (e === 0 && f === 0x810000 && b20 === 0) return { k: 'src', t: f12, r: f8, s: f4 }; // _handler37 (formula as coded)
     if (e === 0x40000) { // r_handler26 (formula as coded, NOT objdump name)
@@ -193,11 +203,6 @@ export function classify(op) {
     if (lo === 0 && e === 0 && f === 0x800000 && b20 === 0) return { k: 'addN', t: f12, r: f8, s: f4 }; // n_handler7 (reuse addN emission)
     if (e === 0x80000 && (op & 0xF10000) === 0) return { k: 'fload', t: (op >> 12) & 15, s: (op >> 8) & 15, u: (op >> 4) & 15 }; // r_handler59 float load
     if (e === 0 && f === 0xC00000 && b20 === 0) return { k: 'sub', t: f12, r: f8, s: f4 }; // _handler49
-    if (e === 0x20000 && (op & 0xF10000) === 65536) { // _handler14 RSR: inline ccount only
-      const sr = (op >> 8) & 255;
-      if (sr === 234) return { k: 'rsrcc', t: f4 };
-      return { k: 'unknown', op };
-    }
     if (e === 0 && f === 0x400000 && (op & 1110016) === 16384) return { k: 'ssai' }; // _handler42 (no window call)
     if (e === 0 && f === 65536) { // slli _handler31
       const sh = 32 - ((((op >> 20) & 1) << 4) | ((op >> 4) & 15));
@@ -516,6 +521,8 @@ export function emitOpsBody(TE, kinds, branches, ctx, hooks = null) {
     else if (k.k === 'srl') { c(P(k.t)); ld(P(k.s)); c(k.imm); B.push(OP.i32_shr_u, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'xor') { c(P(k.t)); ld(P(k.r)); ld(P(k.s)); B.push(0x73, OP.i32_store, 0x02, 0x00); }
     else if (k.k === 'rsrcc') { c(P(k.t)); c(CBASE + 336 + 234 * 4); B.push(OP.i32_load, 0x02, 0x00, OP.i32_store, 0x02, 0x00); }
+    else if (k.k === 'rsr') { cc2(CORE); cc2(e.op); B.push(OP.call, 0x08); } // _handler14 call-out
+    else if (k.k === 'rsrv') { cc2(CORE); cc2(e.op); B.push(OP.call, 0x09); } // c_handler6 call-out
     else if (k.k === 'l8ui') { // r_handler41: dst = MR8(ar[s]+off)
       c(P(k.t)); c(CORE); ld(P(k.s)); c(k.off); B.push(OP.i32_add, OP.call, 0x00, OP.i32_store, 0x02, 0x00);
     }
@@ -627,15 +634,17 @@ export function buildTraceModule(T, ctx) {
   const typeSec = [0x01, ...uleb(typePay.length), ...typePay];
   const impR = (nm) => [...encStr('env'), ...encStr(nm), 0x00, 0x00]; // (i32,i32)->i32
   const impW = (nm) => [...encStr('env'), ...encStr(nm), 0x00, 0x02]; // (i32,i32,i32)->void
-  const impPay = [0x09,
+  const impPay = [0x0b,
     ...impR('mr8'), ...impR('mr16'), ...impR('mr32'),
     ...impW('mw8'), ...impW('mw16'), ...impW('mw32'),
     ...[...encStr('env'), ...encStr('jit_l32r'), 0x00, 0x01],
     ...[...encStr('env'), ...encStr('jit_ssai'), 0x00, 0x03],
-    ...[...encStr('env'), ...encStr('mem'), 0x02, 0x03, ...uleb(1), ...uleb(65536)]];
+    ...[...encStr('env'), ...encStr('mem'), 0x02, 0x03, ...uleb(1), ...uleb(65536)],
+    ...[...encStr('env'), ...encStr('jit_rsr'), 0x00, 0x03],
+    ...[...encStr('env'), ...encStr('jit_rsrv'), 0x00, 0x03]];
   const impSec = [0x02, ...uleb(impPay.length), ...impPay];
   const funcSec = [0x03, ...uleb(2), 0x01, 0x04];
-  const expPay = [0x01, ...encStr('run'), 0x00, 0x08];
+  const expPay = [0x01, ...encStr('run'), 0x00, 0x0a]; // 10 func imports (mem is a memory)
   const expSec = [0x07, ...uleb(expPay.length), ...expPay];
   const codeBody = [0x01, 0x01, 0x7f, ...B, OP.end];
   const codeContent = [0x01, ...uleb(codeBody.length), ...codeBody];
@@ -656,6 +665,8 @@ export async function instantiateTrace(mod, L, ex) {
       mw32: (core, addr, val) => ex.core_write_uint32(core, addr, val),
       jit_l32r: (core, op, nextpc) => ex.native_jit_l32r(core, op, nextpc),
       jit_ssai: (core, op) => ex.native_jit_ssai(core, op),
+      jit_rsr: (core, op) => ex.native_jit_rsr(core, op),
+      jit_rsrv: (core, op) => ex.native_jit_rsrv(core, op),
     },
   });
   return inst.instance.exports.run;
@@ -677,16 +688,18 @@ export function assemblePageModule(body, { locals = 3, exitGlobal = true } = {})
   const typeSec = [0x01, ...uleb(typePay.length), ...typePay];
   const impR = (nm) => [...encStr('env'), ...encStr(nm), 0x00, 0x00];
   const impW = (nm) => [...encStr('env'), ...encStr(nm), 0x00, 0x02];
-  const impPay = [0x09,
+  const impPay = [0x0b,
     ...impR('mr8'), ...impR('mr16'), ...impR('mr32'),
     ...impW('mw8'), ...impW('mw16'), ...impW('mw32'),
     ...[...encStr('env'), ...encStr('jit_l32r'), 0x00, 0x01],
     ...[...encStr('env'), ...encStr('jit_ssai'), 0x00, 0x03],
-    ...[...encStr('env'), ...encStr('mem'), 0x02, 0x03, ...uleb(1), ...uleb(65536)]];
+    ...[...encStr('env'), ...encStr('mem'), 0x02, 0x03, ...uleb(1), ...uleb(65536)],
+    ...[...encStr('env'), ...encStr('jit_rsr'), 0x00, 0x03],
+    ...[...encStr('env'), ...encStr('jit_rsrv'), 0x00, 0x03]];
   const impSec = [0x02, ...uleb(impPay.length), ...impPay];
   const funcSec = [0x03, ...uleb(2), 0x01, 0x04];
   const globSec = [0x06, ...uleb(6), 0x01, 0x7f, 0x01, OP.i32_const, ...sleb(0), OP.end];
-  const expPay = [0x02, ...encStr('run'), 0x00, 0x08, ...encStr('exitpc'), 0x03, 0x00];
+  const expPay = [0x02, ...encStr('run'), 0x00, 0x0a, ...encStr('exitpc'), 0x03, 0x00]; // 10 func imports
   const expSec = [0x07, ...uleb(expPay.length), ...expPay];
   const codeBody = [0x01, locals, 0x7f, ...body, OP.end];
   const codeContent = [0x01, ...uleb(codeBody.length), ...codeBody];
@@ -707,6 +720,8 @@ export async function instantiatePageModule(mod, L, ex) {
       mw32: (core, addr, val) => ex.core_write_uint32(core, addr, val),
       jit_l32r: (core, op, nextpc) => ex.native_jit_l32r(core, op, nextpc),
       jit_ssai: (core, op) => ex.native_jit_ssai(core, op),
+      jit_rsr: (core, op) => ex.native_jit_rsr(core, op),
+      jit_rsrv: (core, op) => ex.native_jit_rsrv(core, op),
     },
   });
   return { run: inst.instance.exports.run, exitpc: inst.instance.exports.exitpc };

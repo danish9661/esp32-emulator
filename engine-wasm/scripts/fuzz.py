@@ -18,6 +18,13 @@ def sext8(v):
 def classify(op):
     if (op & 0xffff0f) == 0x60c0:
         return ('unknown',)
+    # RSR / RSRV: exact router arms (hoisted above the shape chain in the JS
+    # classifier so no generic rule can shadow them).
+    if (op & 0xff000f) == 0x030000:
+        sr = (op >> 8) & 0xff
+        return ('rsrcc',) if sr == 234 else ('rsr',)
+    if (op & 0xef000f) == 0x610000:
+        return ('rsrv',)
     if (op & 0xff) == 0x1d and ((op >> 8) & 0xff) == 0xf0 and ((op >> 16) & 0xf0) == 0x30:
         return ('unknown',)
     lo = op & 15
@@ -217,6 +224,7 @@ EXPECT = {
     'addx8': 'n_handler16', 'lsiu': 'r_handler58', 'rems': 'a_handler58', 'bor': 'a_handler52', 'sexpn': '_handler26', 'ftrunc': '_handler55',
     'maxu': 'r_handler63', 'maxs': 'r_handler62', 'divu': 'a_handler57', 'fcmp': '_handler59',
     'muluhf': 'a_handler43', 's32in': '_handler21', 'addN': 'n_handler9',
+    'rsr': '_handler14', 'rsrv': 'c_handler6',
     'addiN': 'n_handler12', 'moviN': 'a_handler13', 'l32r': 'r_handler48',
     'br-bne': 'n_handler46', 'br-bltu': 'n_handler42', 'br-beq': 'n_handler30',
     'br-bge': 'n_handler35', 'br-bgeu': 'n_handler37', 'br-blt': 'n_handler40',
