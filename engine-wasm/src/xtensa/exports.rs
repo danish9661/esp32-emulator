@@ -42,6 +42,274 @@ static mut BP_ARMED: u32 = 0;
 pub extern "C" fn native_breakpoints_armed(n: u32) {
     unsafe { BP_ARMED = n; }
 }
+
+// 50mips Phase 2: hot-trace recorder (profiling side of the trace JIT).
+// Records linear instruction runs for later WASM emission. Design:
+// - HOT[1024] counters keyed by (pc>>2)&1023; crossing THRESH starts a
+//   recording at that pc (default 20000, tunable; boot noise never crosses).
+// - While recording, every fetched op appends (pc, opcode, width); the run
+//   closes at 64 ops, at an MMIO/fallback-page op (kept WITHOUT it — the
+//   partial straight line is still valid), or at a taken-backward... note:
+//   direction is unknown at fetch time, so branches/calls simply CLOSE the
+//   run (the emitter adds direction guards + side exits later).
+// - 16-slot ring; the spin loop dominates it. Interrupts/exceptions return
+//   before fetch, so recorded runs are side-effect-ordinary by construction
+//   (MMIO *reads* are fine to replay — same order, current device values;
+//   MMIO *writes* never enter: the run closes first).
+// - Cleared on engine reset alongside the decode machinery (stale traces
+//   reference the previous boot's code).
+// Overhead while armed: ~2 increments + branches per fetched instruction
+// (toggle via native_trace_enable for A/B).
+static mut TRACE_HOT: [[u32; 1024]; 2] = [[0u32; 1024]; 2];
+static mut TRACE_THRESH: u32 = 20000;
+static mut TRACE_ENABLE: u32 = 1;
+static mut TRACE_STATE: [u32; 2] = [0; 2]; // 0 idle, 1 recording
+static mut TRACE_LEN: [u32; 2] = [0; 2];
+static mut TRACE_RMIN: [u32; 2] = [64; 2];
+static mut TRACE_RMAX: [u32; 2] = [0; 2];
+static mut TRACE_BUF: [[u32; 768]; 2] = [[0u32; 768]; 2]; // per core: 256 x (pc, op, w)
+// Ring slots are per-core-coherent: 16 x (core, start, len, 256x3).
+// (run316 lesson: a shared buffer interleaves both cores' fetch streams —
+// pcs jump -188/+68 between entries and no entry run is a real dynamic
+// path. The recorder must be per-core; the ring carries the core tag.)
+static mut TRACE_RING: [u32; 16 * 771] = [0u32; 16 * 771];
+static mut TRACE_RING_N: u32 = 0;
+static mut TRACE_RING_HEAD: u32 = 0;
+
+#[no_mangle]
+pub extern "C" fn native_trace_enable(on: u32) {
+    unsafe { TRACE_ENABLE = on; }
+}
+
+#[no_mangle]
+pub extern "C" fn native_trace_threshold(n: u32) {
+    unsafe { TRACE_THRESH = n; }
+}
+
+/// Completed-trace count (ring holds the last 16).
+#[no_mangle]
+pub extern "C" fn native_trace_len() -> u32 {
+    unsafe { TRACE_RING_N }
+}
+
+/// Linear scratch address holding the ring: [ntraces, (start,len,e0..)..].
+/// Read `native_trace_scratch_len()` u32 words from it via memoryBuffer.
+static mut TRACE_SCRATCH: [u32; 1 + 16 * 771] = [0u32; 1 + 16 * 771];
+
+#[no_mangle]
+pub extern "C" fn native_trace_scratch_ptr() -> u32 {
+    unsafe {
+        TRACE_SCRATCH[0] = TRACE_RING_N;
+        let mut i = 0;
+        while i < 16 * 771 {
+            TRACE_SCRATCH[1 + i] = TRACE_RING[i];
+            i += 1;
+        }
+        TRACE_SCRATCH.as_ptr() as u32
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn native_trace_scratch_len() -> u32 {
+    1 + 16 * 771
+}
+
+/// Fetch hook: hotness + linear capture. Called with the fetched opcode;
+///
+/// `mmio_op` must be true when the fetch came from an MMIO/fallback page.
+/// Trigger records its OWN op as entry 0 (no off-by-one: the hot pc leads
+/// its own trace, keeping loop alignment exact).
+/// `core_idx` selects the per-core buffer (see the TRACE_RING note).
+#[inline(always)]
+fn trace_fetch(pc: u32, op: u32, w: u32, mmio_op: bool, core_idx: usize) {
+    let c = core_idx & 1;
+    unsafe {
+        if TRACE_ENABLE == 0 {
+            return;
+        }
+        if TRACE_STATE[c] == 0 {
+            let h = ((pc >> 2) & 1023) as usize;
+            TRACE_HOT[c][h] = TRACE_HOT[c][h].wrapping_add(1);
+            if TRACE_HOT[c][h] >= TRACE_THRESH && !mmio_op {
+                TRACE_STATE[c] = 1;
+                TRACE_BUF[c][0] = pc;
+                TRACE_BUF[c][1] = op;
+                TRACE_BUF[c][2] = w;
+                TRACE_LEN[c] = 1;
+                let pr = super::memory::region_of(pc);
+                TRACE_RMIN[c] = pr as u32;
+                TRACE_RMAX[c] = pr as u32;
+            }
+        } else if mmio_op {
+            close_trace(c);
+        } else if TRACE_LEN[c] as usize >= 256 {
+            close_trace(c);
+            // The current op belongs to the NEXT run, which starts only on
+            // a fresh hot trigger (keeps runs loop-aligned).
+        } else {
+            let o = (TRACE_LEN[c] as usize) * 3;
+            TRACE_BUF[c][o] = pc;
+            TRACE_BUF[c][o + 1] = op;
+            TRACE_BUF[c][o + 2] = w;
+            TRACE_LEN[c] += 1;
+            let pr = super::memory::region_of(pc) as u32;
+            if pr < TRACE_RMIN[c] { TRACE_RMIN[c] = pr; }
+            if pr > TRACE_RMAX[c] { TRACE_RMAX[c] = pr; }
+        }
+    }
+}
+
+fn close_trace(c: usize) {
+    unsafe {
+        if TRACE_LEN[c] == 0 {
+            TRACE_STATE[c] = 0;
+            return;
+        }
+        let slot = (TRACE_RING_HEAD % 16) as usize;
+        let base = slot * 771;
+        TRACE_RING[base] = c as u32;
+        TRACE_RING[base + 1] = TRACE_BUF[c][0];
+        TRACE_RING[base + 2] = TRACE_LEN[c] | (TRACE_RMIN[c] << 16) | (TRACE_RMAX[c] << 24);
+        let mut i = 0;
+        while i < (TRACE_LEN[c] as usize) * 3 {
+            TRACE_RING[base + 3 + i] = TRACE_BUF[c][i];
+            i += 1;
+        }
+        TRACE_RING_HEAD += 1;
+        if TRACE_RING_N < 16 {
+            TRACE_RING_N += 1;
+        }
+        TRACE_STATE[c] = 0;
+        TRACE_LEN[c] = 0;
+    }
+}
+
+/// Clear hotness + traces (chip reset — a reboot may load different code
+/// under identical pcs; stale ring entries would lie in dumps).
+pub(crate) fn trace_reset_all() {
+    unsafe {
+        TRACE_HOT = [[0u32; 1024]; 2];
+        TRACE_STATE = [0; 2];
+        TRACE_LEN = [0; 2];
+        TRACE_RMIN = [64; 2];
+        TRACE_RMAX = [0; 2];
+        TRACE_RING_N = 0;
+        TRACE_RING_HEAD = 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn native_rec_reset() {
+    trace_reset_all();
+    code_gen_reset();
+}
+
+/// 50mips milestone B: JIT entry-guard generation (bumped on every
+/// code-affecting store; see memory.rs CODE_GEN).
+#[no_mangle]
+pub extern "C" fn native_code_gen() -> u32 {
+    code_gen_get()
+}
+
+/// Bump from JS-side code-affecting stores (flash-mirror sync in the
+/// js_spi_flash_set_byte handler — the mirror write is invisible to Rust).
+#[no_mangle]
+pub extern "C" fn native_code_gen_bump() {
+    code_gen_bump_flash();
+}
+
+/// 50mips (run317): per-region generation read for JIT entry guards.
+#[no_mangle]
+pub extern "C" fn native_code_gen_region(r: u32) -> u32 {
+    code_gen_get_region(r)
+}
+
+/// Diag probe for the milestone-B guard's window_check JS port: calls the
+/// REAL window_check with live spec state. Side-effect-free exactly when
+/// it returns 0 (all mutations sit behind the early false returns).
+#[no_mangle]
+pub extern "C" fn native_window_check_probe(core_idx: u32, cpu_val: u32, tmp_val: u32, idx_val: u32) -> u32 {
+    let core = get_core(core_idx);
+    if core.window_check(cpu_val, tmp_val, idx_val) {
+        1
+    } else {
+        0
+    }
+}
+
+/// 50mips milestone C: l32r call-out for JIT traces. Exact r_handler48
+/// datapath minus window_check (covered by the entry guard). Returns the
+/// loaded value; the emitted code stores it to the dest phys reg.
+#[no_mangle]
+pub extern "C" fn native_jit_l32r(core_idx: u32, op: u32, next_pc: u32) -> u32 {
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 65535;
+    let addr = ((next_pc >> 2).wrapping_add(0xffff0000 | idx_val)) << 2;
+    read_uint32(core, addr)
+}
+
+/// 50mips milestone C: ssai call-out for JIT traces. Exact _handler42
+/// body (no window_check in the original — vacuous).
+#[no_mangle]
+pub extern "C" fn native_jit_ssai(core_idx: u32, op: u32) {
+    use super::constants::EXC_CAUSE;
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 15;
+    core.special_registers[EXC_CAUSE] = (((op >> 4) & 1) << 4) | idx_val;
+    core.sar_m32_pending = 0;
+}
+
+/// 50mips milestone C: rsr call-out for JIT traces. Exact _handler14 body
+/// (window_check + privileged trap included) so routing parity is by
+/// construction; only the live CALLER_REGS value is touched, which is where
+/// the trace keeps ARs. Reads go through read_special_register (CCOUNT /
+/// WINDOW_START semantics live there, not in the register file).
+#[no_mangle]
+pub extern "C" fn native_jit_rsr(core_idx: u32, op: u32) {
+    use super::constants::TRAP_PRIVILEGED;
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 255;
+    let idx_reg = (op >> 4) & 15;
+    if !core.window_check(0, 0, idx_reg >> 2) {
+        if idx_val >= 64 && core.ps_owing() != 0 {
+            core.exception(TRAP_PRIVILEGED);
+        } else {
+            let val = read_special_register(core, idx_val);
+            core.set_ar(idx_reg, val);
+        }
+    }
+}
+
+/// 50mips milestone C: rsrv call-out for JIT traces. Exact c_handler6 body
+/// (SWAP: ar[t] <-> SR), including the privileged trap on the read side.
+#[no_mangle]
+pub extern "C" fn native_jit_rsrv(core_idx: u32, op: u32) {
+    use super::constants::TRAP_PRIVILEGED;
+    let core = get_core(core_idx);
+    let idx_val = (op >> 8) & 255;
+    let idx_reg = (op >> 4) & 15;
+    if !core.window_check(0, 0, idx_reg >> 2) {
+        if idx_val >= 64 && core.ps_owing() != 0 {
+            core.exception(TRAP_PRIVILEGED);
+        } else {
+            let tmp = core.ar(idx_reg);
+            let old = read_special_register(core, idx_val);
+            write_special_register(core, idx_val, tmp);
+            core.set_ar(idx_reg, old);
+        }
+    }
+}
+
+/// Byte offset of sar_m32_pending from its core-state base (for JIT
+/// emission of ssai without layout guesses — the field order before
+/// `enabled` is not independently pinned like the loader offsets are).
+#[no_mangle]
+pub extern "C" fn native_sar_pending_off() -> u32 {
+    let core = get_core(0) as *mut CoreState as usize;
+    let base = core;
+    let field = unsafe { &(* (core as *mut CoreState)).sar_m32_pending } as *const u32 as usize;
+    (field - base) as u32
+}
 // run152 bisect gate (RETIRED run153 with the run151 intercept; the gate
 // and shadow now stand by for future CAS forensics, default OFF).
 pub static mut S32C1I_ENABLE: u32 = 0;
@@ -1360,6 +1628,16 @@ pub(crate) fn run_instruction(core: &mut CoreState) -> u32 {
         let extra_byte = read_opcode_u8(core, pc + 2);
         opcode |= (extra_byte as u32) << 16;
     }
+
+    // 50mips trace recorder (profiling side of the trace JIT).
+    trace_fetch(
+        pc,
+        opcode,
+        width,
+        core.opcode_page_type != PTE_TYPE_RAM as i32
+            && core.opcode_page_type != PTE_TYPE_FLASH as i32,
+        core.index as usize,
+    );
 
     core.last_opcode = opcode;
     core.debug_opcode = opcode;
