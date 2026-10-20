@@ -305,6 +305,10 @@ export class JitDriver {
         const cands = findLoopSlices(TE);
         for (const cand of cands) {
           const L = cand.end - cand.start;
+          // ANCHOR REQUIRED (see compile()): the slice must start at the
+          // window start, otherwise the module's hardcoded entry pc and the
+          // entry guard context would not match the pc it is entered at.
+          if (cand.start !== 0) continue;
           if (L >= this.minLen && L <= 64) {
             const S = TE.slice(cand.start, cand.end);
             use = S;
@@ -404,11 +408,25 @@ export class JitDriver {
     if (cool && Date.now() < cool) return false;
     const found = this.findTrace(core, pc);
     if (!found) { this.stats.findNull++; return false; }
+    // ANCHOR INVARIANT: an emitted module hardcodes its entry pc to the
+    // recorded window start (buildPage: local pc = Sc[0].pc; a trace runs
+    // its ops from TE[0]) and the driver enters a cached module whenever the
+    // guest pc equals its cache key. The entry guard context (window
+    // base/start + register generations) equally belongs to that window
+    // start, so a module is only valid at the pc it was recorded at. A
+    // window anchored elsewhere (mid-window loop slice) would execute a
+    // foreign code region and park the guest at that region's exit pc
+    // (observed: wild jump -> exception storm in IRAM). Refuse: interpreter
+    // covers the code, and findTrace never returns unanchored windows now.
+    if ((found.TE[0].pc >>> 0) !== (pc >>> 0)) {
+      this.stats.anchorRej = (this.stats.anchorRej || 0) + 1;
+      return false;
+    }
     if (this.pageEnabled) return this.compilePage(core, pc, found);
     let built;
+    const foldedAddrs = [];
     try {
       const ex2 = this.ex;
-      const foldedAddrs = [];
       built = buildTraceModule(found.TE, {
         CORE: core, CBASE: core * this.CORE_SZ, wb: found.wb,
         recLoop: found.loop, sarOff: this.sarOff,

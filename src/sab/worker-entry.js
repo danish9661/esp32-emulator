@@ -1488,7 +1488,7 @@ function applyBasicSetup(chip, config, flash, rom) {
   // jitEnabled:false disables the driver; default follows JIT env.
   chip._jitEnabled = config.jitEnabled !== undefined ? !!config.jitEnabled : chip._jitEnabled;
   chip._jitDryRun = !!config.jitDryRun;
-  chip._jitPage = !!config.jitPage;
+  chip._jitPage = !!config.jitPage || (typeof process !== 'undefined' && !!process.env.JITPAGE);
   chip._jitNoCallout = !!config.jitNoCallout;
   chip._jitNoFold = !!config.jitNoFold;
   chip._jitInstGate = !!config.jitInstGate || (typeof process !== 'undefined' && !!process.env.JITINSTGATE);
