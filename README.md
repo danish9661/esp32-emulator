@@ -405,16 +405,19 @@ recorded and diverged 4/20 runs at `hot=100`. Kill switches: `JIT=0`,
   is the default here). Diag scripts: `tests/tmp-speed.mjs` (end-to-end
   table), `tests/tmp-speed2.mjs` (batch/pump sweeps).
 
-### Ceiling note (Oct 2026)
+### Interpreter ceiling note (Oct 2026)
 
 Two decode-cache designs were built on the `50mips` branch, proven
 bit-exact (200M-iteration ACC oracle), measured interleaved A/B, and
 reverted (−20% reread-validated, −14% generation-validated: the probe costs
 more than the already-optimized dispatch it skips). Remaining
-accuracy-safe ideas (cold outlining, superoperators, fetch TLB) stack to
-roughly ×1.45 (≈43 MIPS); 50+ needs JIT/threads/native, all declined on
-accuracy, determinism, or platform grounds. Standing throughput ≈30 MIPS
-raw / ≈26 SAB-on; the branch history holds the full evidence trail.
+accuracy-safe interpreter ideas (cold outlining, superoperators, fetch TLB)
+stack to roughly ×1.45 (≈43 MIPS), so the interpreter alone stays short of
+50. The JIT tier above is how that ceiling was passed: it keeps the
+interpreter as the reference path (and as the `JIT=0` fallback) and compiles
+hot windows to WASM without changing guest output. Standing interpreter
+throughput ≈30 MIPS raw / ≈26 SAB-on; the branch history holds the full
+evidence trail for the interpreter work.
 
 Idle/yielding firmware is dominated by idle fast-forward + native peripheral
 FFI and sees little wall-clock change. All worker tests pass with zero
