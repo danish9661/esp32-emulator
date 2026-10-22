@@ -10939,9 +10939,39 @@ pub fn advance_clock(delta: u64) {
     recompute_clock();
 }
 
+// Simulation time is MONOTONIC in WASM, but the JS `chip.cycles` counter is
+// boot-relative: esp32.js `reset()` zeroes it (host RESET button / chip.reset(),
+// asserted by tests/test-taps-host.mjs "reset clears cycle counter"). Native
+// event deadlines are ABSOLUTE APB ticks, so feeding a rewound JS counter
+// straight into CLK_CYCLES moved time backwards and every armed event
+// (EFUSE CMD clear, RTC wakeup, UART timeout ...) became unreachable — the
+// guest then spun forever in the boot ROM's EFUSE CMD poll (0x4000fca9) or its
+// DPORT APPCPU_CTRL_C wait (0x400076dd) after a RESET / deep-sleep wake.
+//
+// Fix: keep a constant offset so WASM time = JS cycles + CLK_OFFSET. A JS
+// rewind (reset) shifts the offset instead of moving time backwards, leaving
+// the WASM clock exactly where it was and still advancing one-for-one with
+// the JS counter afterwards (a plain clamp froze time until the JS counter
+// caught up — measured: apb stuck at 0x36677e40 for the whole post-reset boot).
+static mut CLK_OFFSET: u64 = 0;
+
+fn sync_js_cycles(js_cycles: u32) {
+    unsafe {
+        let js = js_cycles as u64;
+        let want = js.wrapping_add(CLK_OFFSET);
+        if want > CLK_CYCLES {
+            CLK_CYCLES = want;
+        } else if want < CLK_CYCLES {
+            // JS counter rewound (SoC reset zeroed it): re-anchor the mapping
+            // so the JS value maps to "now" and time never moves backwards.
+            CLK_OFFSET = CLK_CYCLES.wrapping_sub(js);
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn native_set_clock_state(cycles: u32) {
-    unsafe { CLK_CYCLES = cycles as u64; }
+    sync_js_cycles(cycles);
     recompute_clock();
 }
 
@@ -13575,7 +13605,8 @@ pub extern "C" fn native_pump_events() {
 /// Returns the cycle advance as f64 (safe for unbounded cycle counts).
 #[no_mangle]
 pub extern "C" fn native_idle_advance(js_cycles: u32) -> f64 {
-    unsafe { CLK_CYCLES = js_cycles as u64; }
+    // Monotonic JS->WASM clock mapping (see sync_js_cycles).
+    sync_js_cycles(js_cycles);
     recompute_clock();
     let advance = native_fast_forward();
     native_pump_events();

@@ -1,32 +1,17 @@
 import { SimulatorWorker } from '../src/index.js';
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { buildWebFirmware } from './web-firmware.mjs';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Boots the shared web-server firmware and waits for it to bring the HTTP
+// server up ("ready on port 80"). test-worker-webserver.mjs then drives the
+// real HTTP request through the gateway.
 async function main() {
-  let fb;
-  const cachePath = resolve(__dirname, 'build/webserver.bin');
-  if (existsSync(cachePath)) {
-    fb = readFileSync(cachePath);
-  } else {
-    const code = readFileSync('C:\\Users\\Danish\\Downloads\\esp32_1.ino', 'utf8');
-    const { default: axios } = await import('axios');
-    const sr = await axios.post('http://localhost:5525/api/compile/start', {
-      code, target: 'esp32', targetEngine: 'frontend', fqbn: 'esp32:esp32:esp32'
-    });
-    const bid = sr.data.buildId;
-    process.stdout.write('Compiling');
-    while (1) {
-      const s = await axios.get(`http://localhost:5525/api/compile/status/${bid}`);
-      if (s.data.status === 'success') { fb = Buffer.from(s.data.binary_content, 'base64'); break; }
-      else if (s.data.status === 'failed') throw Error(s.data.error);
-      process.stdout.write('.'); await new Promise(r => setTimeout(r, 1000));
-    }
-    console.log('');
-    try { mkdirSync(resolve(__dirname, 'build')); } catch (e) { }
-    writeFileSync(cachePath, fb);
-  }
+  const fb = await buildWebFirmware();
+  console.log('[test] firmware ' + fb.length + ' bytes');
 
   const flash = new Uint8Array(new SharedArrayBuffer(4 * 1024 * 1024));
   flash.set(fb);
@@ -48,39 +33,47 @@ async function main() {
 
   proxy.run();
   let pollLast = 0;
+  const t0 = Date.now();
 
-  for (let i = 0; i < 600; i++) {
+  while (Date.now() - t0 < 120000) {
     await new Promise(r => setTimeout(r, 50));
     proxy.run();
     proxy.pollUart();
     if (out.length > pollLast) {
-      const newText = out.substring(pollLast);
-      const lines = newText.split('\n').filter(l => l.trim()).map(l => '  ' + l);
+      const lines = out.substring(pollLast).split('\n').filter(l => l.trim()).map(l => '  ' + l.trim());
       if (lines.length) lines.forEach(l => console.log(l));
       pollLast = out.length;
     }
-    if (out.includes('ready on port 80')) { break; }
+    if (out.includes('ready on port 80')) break;
+    if (out.includes('WEB=FAIL')) break;
+  }
+
+  const ready = out.includes('ready on port 80');
+  if (!ready) {
+    console.log('\n[test] FAILED (server never reported "ready on port 80")');
+    try { proxy.stop(); proxy.terminate(); } catch (e) { }
+    process.exit(1);
   }
 
   console.log('\n=== WEB SERVER READY ===');
   console.log('ns=' + proxy.nanos);
-  console.log('Press Ctrl+C to stop.\n');
 
   // In CI the battery just needs the READY assertion; exit so the run
   // completes. Set KEEP_SERVING=1 to keep the server up for manual curl.
   if (!process.env.KEEP_SERVING) {
+    try { proxy.stop(); proxy.terminate(); } catch (e) { }
+    console.log('[test] PASSED');
     process.exit(0);
   }
 
-  // Keep running
+  console.log('Press Ctrl+C to stop.\n');
   let pollLast2 = out.length;
-  while (true) {
+  for (;;) {
     await new Promise(r => setTimeout(r, 1000));
     proxy.run();
     proxy.pollUart();
     if (out.length > pollLast2) {
-      const newText = out.substring(pollLast2);
-      const lines = newText.split('\n').filter(l => l.trim()).map(l => '  [WEB] ' + l);
+      const lines = out.substring(pollLast2).split('\n').filter(l => l.trim()).map(l => '  [WEB] ' + l.trim());
       if (lines.length) lines.forEach(l => console.log(l));
       pollLast2 = out.length;
     }

@@ -66,5 +66,9 @@ parallel WASM nodes (the JS engine and lockstep dual-engine mode are gone).
 
 ## Status
 
-Full worker suite: `PASS=31 FAIL=0` (incl. WiFi) when the compile server and
-gateway are up; `PASS=28 FAIL=0 SKIP=3` with WiFi skipped.
+`./tests/run-worker-tests.sh --wifi` (compile server on :5525 +
+`openhw-unified-gateway/openhw-gw` on 127.0.0.1:5030):
+**`PASS=70 FAIL=0 SKIP=0`** — every cell, including BT and the seven
+gateway-dependent network cells (`wifi`, `web`, `webserver`, `coap-server`,
+`espnow`, `ipv6`, `net-protocols`). Without the gateway pass `--skip-bt`:
+`PASS=61 FAIL=0 SKIP=9`.

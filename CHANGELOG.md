@@ -174,6 +174,35 @@ This project follows semantic versioning (`MAJOR.MINOR.PATCH`).
   See README “Performance” for the current table + methodology.
 
 ### Fixed
+- **Simulation time no longer rewinds on a host or guest SoC reset**
+  (2026-10-22). Native event deadlines are ABSOLUTE APB ticks
+  (`EventTag` queue, RTC wakeup, UART timeout, EFUSE CMD clear), but
+  `esp32.js reset()` zeroes the JS `chip.cycles` counter (a tested contract,
+  `test-taps-host.mjs`) and worker-entry pushed that smaller value straight
+  into the WASM clock. Every armed deadline then became unreachable and the
+  guest spun forever in the boot ROM's EFUSE CMD poll (`0x4000fca9`) or its
+  `DPORT APPCPU_CTRL_C` wait (`0x400076dd`) — the guest never came back from a
+  RESET button tap, a deep-sleep wake, or an in-guest WDT/BOD reset.
+  `native_set_clock_state`/`native_idle_advance` now share `sync_js_cycles`:
+  WASM time = JS cycles + `CLK_OFFSET`, and a JS rewind re-anchors the offset
+  instead of moving time backwards (a plain clamp was tried first and froze
+  time until the JS counter caught up — measured `apb=0x36677e40` for a whole
+  post-reset boot). `js_reset_soc` also preserves `chip.cycles` across in-guest
+  SoC resets so the two counters stay in step. Regression cells that were red
+  on the committed tree are green: `test-worker-buttons` (RESET tap, BOOT
+  hold + RESET, release + RESET), `test-worker-deepsleep` (3 boots, cause
+  0→4→4), `test-worker-ulp-wake`, `test-worker-bod` (second level-sensitive
+  BOD reset after re-arming `RST_ENA` at 2000 mV).
+- Worker tests that could not run on a fresh checkout are now self-contained:
+  `test-worker-web`/`test-worker-webserver` no longer read a hardcoded
+  `C:\Users\...\esp32_1.ino` / a never-committed `tests/build/webserver.bin`
+  — the firmware lives in `tests/web-firmware.mjs` and is compiled on demand
+  (cached under the gitignored `tests/build/`), and `test-worker-webserver`
+  drives a real HTTP `GET /` (+ `/led`) through the gateway forward and
+  asserts `200` and the served marker instead of only grepping "ready on
+  port 80". `test-worker-gpio-led` parks the guest on a UART byte between the
+  HIGH and LOW states, so its level readback no longer races the 200 ms poll
+  cadence (it sampled `level@LED_ON=0` once the guest got faster).
 - `GpioPin::reset` now clears the derived `output_enable_value` latch
   (direction read stale-out after reset).
 - `seedNativeGpio` uses DataView (the seed scratch is not guaranteed

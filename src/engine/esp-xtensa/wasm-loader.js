@@ -456,10 +456,22 @@ js_log_u32: (val) => {
         // SoC reset from inside WASM (WDT/BOD/sleep-wakeup): resetReason was
         // already set by the caller via js_set_reset_reason — chip.reset()
         // must NOT clobber it (it means POWERON on a fresh boot only).
+        //
+        // Likewise the simulation clock must not rewind. chip.reset() zeroes
+        // this.cycles (host resets do restart sim time), but an in-guest SoC
+        // reset happens at the *current* simulation time: the RTC keeps
+        // counting across a deep-sleep wake, and the native event queue's
+        // deadlines are absolute APB ticks. Rewinding here made every pending
+        // deadline unreachable — the boot ROM stalled in its EFUSE CMD poll
+        // (0x4000fca9) / DPORT APPCPU_CTRL_C wait (0x400076dd) because
+        // native_idle_advance() pushed the smaller JS cycle count into the
+        // WASM clock (measured: apb 0xe81000 -> 0x552000 right after wake).
         try {
           const keep = this.esp32?.resetReason;
+          const keepCycles = this.esp32?.cycles ?? 0;
           this.esp32?.reset?.();
           if (keep !== undefined) this.esp32.resetReason = keep >>> 0;
+          if (this.esp32) this.esp32.cycles = keepCycles;
         } catch (e) { console.error('[WASM-RTC-RESET-ERR]', e?.message || e); }
       },
       js_reset_core: (idx) => {
